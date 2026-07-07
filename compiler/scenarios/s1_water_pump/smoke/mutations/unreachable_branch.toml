@@ -1,0 +1,6 @@
+package = "s1_water_pump_mutation"
+version = "1.0.0"
+
+[components.legacy_variant_z]
+type = "module"
+condition = "cooling_brand == 'legacy' && cooling_model == 'z1'"

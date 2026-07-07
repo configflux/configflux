@@ -1,0 +1,107 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "runtime_sdk_core",
+    srcs = [
+        "src/runtime_session_core.cc",
+        "src/runtime_session_event_dispatch.cc",
+        "src/runtime_session_event_json.cc",
+        "src/runtime_session_internal.h",
+        "src/runtime_session_status.cc",
+    ],
+    hdrs = [
+        "include/configflux/sdk/runtime_c_abi.h",
+        "include/configflux/sdk/runtime_linked_c_abi.h",
+        "include/configflux/sdk/runtime_session.h",
+    ],
+    copts = ["-std=c++20"],
+    includes = ["include"],
+)
+
+cc_library(
+    name = "runtime_sdk_core_minimal",
+    srcs = [
+        "src/runtime_session_core.cc",
+        "src/runtime_session_status.cc",
+    ],
+    hdrs = [
+        "include/configflux/sdk/runtime_c_abi.h",
+        "include/configflux/sdk/runtime_linked_c_abi.h",
+        "include/configflux/sdk/runtime_session.h",
+    ],
+    copts = ["-std=c++20"],
+    defines = ["CONFIGFLUX_SDK_MINIMAL_PROFILE=1"],
+    includes = ["include"],
+)
+
+cc_library(
+    name = "runtime_sdk_core_test_support",
+    testonly = True,
+    srcs = ["tests/support/fake_runtime_c_abi.cc"],
+    hdrs = [
+        "tests/support/fake_runtime_c_abi.h",
+        "tests/support/test_checks.h",
+        "tests/support/test_harness.h",
+    ],
+    copts = ["-std=c++20"],
+    deps = [":runtime_sdk_core"],
+)
+
+cc_test(
+    name = "runtime_sdk_core_test",
+    size = "small",
+    timeout = "short",
+    srcs = [
+        "tests/runtime_session_core_test.cc",
+        "tests/runtime_session_events_test.cc",
+        "tests/runtime_session_test.cc",
+        "tests/runtime_session_threading_test.cc",
+    ],
+    copts = ["-std=c++20"],
+    tags = [
+        "ci",
+        "owner:sdk",
+        "sdk",
+    ],
+    deps = [
+        ":runtime_sdk_core",
+        ":runtime_sdk_core_test_support",
+    ],
+)
+
+cc_test(
+    name = "runtime_sdk_core_linked_abi_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["tests/runtime_session_linked_abi_test.cc"],
+    copts = ["-std=c++20"],
+    tags = [
+        "ci",
+        "owner:sdk",
+        "sdk",
+    ],
+    deps = [
+        ":runtime_sdk_core",
+        # configflux-u32v: the runtime C ABI staticlib moved from the compiler
+        # crate to the runtime crate so its open entrypoint enforces the
+        # ADR-0030 D2 `.ccm` solver-model precondition (needs //solver:solver,
+        # which the compiler may not import — ADR-0003 §2).
+        "//runtime:runtime_c_abi_static",
+    ],
+)
+
+filegroup(
+    name = "docs",
+    srcs = ["README.md"],
+)
+
+filegroup(
+    name = "all_files",
+    srcs = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ),
+)

@@ -1,0 +1,31 @@
+{
+    "package": "compose_fleet",
+    "version": "1.0.0",
+    "definitions": {
+        "instance_id": {
+            "type": "string",
+            "doc": "Stable identifier for one running instance in a stack",
+            "lifecycle": "construction",
+            "access": "developer"
+        },
+        "broker_endpoint": {
+            "type": "string",
+            "doc": "Message-broker endpoint the service connects to at startup",
+            "lifecycle": "startup",
+            "access": "integrator"
+        },
+        "tick_interval_ms": {
+            "type": "integer",
+            "unit": "ms",
+            "doc": "Service work-loop interval in milliseconds",
+            "lifecycle": "startup",
+            "access": "integrator"
+        },
+        "log_level": {
+            "type": "string",
+            "doc": "Runtime log verbosity (info, debug, trace)",
+            "lifecycle": "runtime",
+            "access": "technician"
+        }
+    }
+}

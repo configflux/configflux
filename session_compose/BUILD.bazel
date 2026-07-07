@@ -1,0 +1,51 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["Cargo.toml"])
+
+filegroup(
+    name = "all_files",
+    srcs = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ),
+)
+
+# Shared solver-composition crate (ADR-0003 §2 amendment / ADR-0042 §2
+# amendment, configflux-szwp / configflux-kkhc). Extracted VERBATIM from the
+# interpreter's former `src/solver_session.rs` so BOTH the interpreter
+# (`//interpreter:interpreter`) and `cfx` (`//cfx:cfx`, in later tasks) consume
+# one implementation and produce byte-identical `options` / `select` /
+# `resolve` / `explain` envelopes. It is the single composition seam permitted
+# to depend on BOTH `//compiler:compiler_lib` and `//solver:solver` — neither
+# library imports the other (ADR-0003 §2). Public (BUSL-1.1 per ADR-0046); it is
+# NOT a frontier crate.
+SESSION_COMPOSE_DEPS = [
+    "//compiler:compiler_lib",
+    "//solver:solver",
+]
+
+SESSION_COMPOSE_SRCS = [
+    "src/lib.rs",
+]
+
+rust_library(
+    name = "session_compose",
+    srcs = SESSION_COMPOSE_SRCS,
+    crate_name = "session_compose",
+    edition = "2021",
+    deps = SESSION_COMPOSE_DEPS,
+)
+
+rust_test(
+    name = "session_compose_test",
+    size = "small",
+    timeout = "short",
+    crate = ":session_compose",
+    edition = "2021",
+    tags = [
+        "ci",
+        "owner:interpreter",
+    ],
+)

@@ -1,0 +1,23 @@
+{
+  "format_version": 1,
+  "chunk_count": 2,
+  "source_ids": [
+    "scenarios/s1_water_pump/smoke/chunks/00_definitions.toml",
+    "scenarios/s1_water_pump/smoke/chunks/10_components.toml"
+  ],
+  "definition_ids": [
+    "driver_slot",
+    "safe_flow",
+    "trim_gain"
+  ],
+  "component_ids": [
+    "eu_label",
+    "power_bus",
+    "thermal_control"
+  ],
+  "artifact_ids": [
+    "aeroflux_a9_driver",
+    "hydra_x200_dual_driver",
+    "hydra_x200_single_driver"
+  ]
+}

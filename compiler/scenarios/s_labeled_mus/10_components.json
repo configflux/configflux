@@ -1,0 +1,53 @@
+{
+    "package": "s_labeled_mus",
+    "version": "1.0.0",
+    "components": {
+        "rig": {
+            "type": "controller",
+            "params": {
+                "cpu": {
+                    "inherits": "cpu_slot",
+                    "type": "string",
+                    "doc": "Runtime CPU performance tier",
+                    "value": "standard",
+                    "lifecycle": "runtime",
+                    "safety": "q_m",
+                    "access": "technician",
+                    "req_id": "req_labeled_mus_001"
+                },
+                "cooling": {
+                    "inherits": "cooling_slot",
+                    "type": "string",
+                    "doc": "Runtime cooling solution",
+                    "value": "liquid",
+                    "lifecycle": "runtime",
+                    "safety": "q_m",
+                    "access": "technician",
+                    "req_id": "req_labeled_mus_002"
+                },
+                "psu": {
+                    "inherits": "psu_slot",
+                    "type": "string",
+                    "doc": "Runtime power-supply tier",
+                    "value": "gold",
+                    "lifecycle": "runtime",
+                    "safety": "q_m",
+                    "access": "technician",
+                    "req_id": "req_labeled_mus_003"
+                }
+            }
+        },
+        "highperf_requires_liquid": {
+            "type": "policy_module",
+            "condition": "cpu != 'highperf' || cooling != 'air'"
+        },
+        "highperf_requires_gold": {
+            "type": "policy_module",
+            "condition": "cpu != 'highperf' || psu != 'bronze'"
+        },
+        "facet_option_domains": {
+            "type": "policy_module",
+            "condition": "cpu == 'standard' || cooling == 'liquid' || psu == 'gold'"
+        }
+    }
+}

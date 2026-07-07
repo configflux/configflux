@@ -1,0 +1,93 @@
+[package]
+name = "solver"
+# ADR-0002 §1: inherit the single-source-of-truth workspace version.
+# solver sets its own description, so only `version` is inherited. The whole
+# workspace is BUSL-1.1 (ADR-0046, dual license: BUSL-1.1 + commercial);
+# the former ADR-0007 solver-only carve-out stays dissolved.
+version.workspace = true
+edition = "2021"
+license = "BUSL-1.1"
+description = "ConfigFlux solver crate: transport-ready Session API over SolverBackend trait"
+publish = false
+
+[dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+# configflux-8dm.2: ADR-0005 §2, §3 CCM manifest and symbols files are
+# canonical JSON per §6. `serde_json` is the workspace-standard JSON
+# codec already used by `compiler/` for the CMP manifest; reusing it
+# here keeps round-trip canonicalization rules (lexicographic keys,
+# compact output) identical across the two crates.
+serde_json = "1.0.140"
+# configflux-8dm.2: ADR-0005 §5 Step 1-2 compute SHA-256 digests over
+# `ccm.bdd.bin` and `ccm.symbols.json` bytes; `Session::load_ccm` must
+# re-compute and compare these on load per §5 Load 4-6. Using the same
+# `sha2` crate and version bound the `compiler/` crate already pins so
+# that compiler-side emitters (future configflux-8dm.5) and solver-side
+# loaders produce bit-identical digests.
+sha2 = ">=0.10.9, <0.11.0"
+
+# oxidd 0.11.0 — ROBDD backend wrapped behind `solver::SolverBackend` per
+# ADR-0003 §3 and docs/security/oxidd-audit.md §6. Exact-version pin is
+# required by the dep-audit-v0.3.0 acceptance bar AC-2 and by the oxidd
+# audit §3.3 wrapping plan — bumping oxidd is a deliberate re-audit event,
+# not a `cargo update`. Feature hygiene (AC-7) follows dep-audit §5.1:
+# `default-features = false`, enable only the four features the ROBDD
+# backend actually needs. `manager-index` picks the index-based manager
+# implementation (stable across 0.6+); `apply-cache-direct-mapped` selects
+# the direct-mapped apply cache variant; `multi-threading` enables the
+# internal worker pool used by oxidd's apply operators. `dot-export`,
+# `dddmp`, `visualize`, `mtbdd`, `zbdd`, `tdd`, and `bcdd` are deliberately
+# left disabled — the M0 `OxiddBackend` wrapper uses only the core BDD
+# manager and constant-formula construction; DDDMP serialization lands in
+# a later M1 task against ADR-0005 §5 (and will re-enable `oxidd-dump/dddmp`
+# at that point per the audit's Section 3.3 wrapping plan).
+oxidd = { version = "=0.11.0", default-features = false, features = [
+    "bdd",
+    "manager-index",
+    "apply-cache-direct-mapped",
+    "multi-threading",
+] }
+
+# cudd-sys (configflux fork) — in-tree path dep per ADR-0004 §3
+# second-pass amendment (configflux-7hn2 / configflux-d1cc). The fork
+# at //third_party/cudd-sys/ is MIT (relicensed from upstream
+# CC0-1.0; clears `cargo deny check` via `deny.toml` line 53). Its
+# upstream `build.rs` is intentionally absent — the C symbols are
+# linked by the Bazel cc_library at `//third_party/cudd:cudd`,
+# wired through `solver/BUILD.bazel`'s `rust_library.deps`.
+#
+# `default-features = false` is hygienic per
+# `docs/security/dep-audit-v0.3.0.md` §5.1; the fork has no
+# `[features]` section so it is also a no-op (the upstream
+# `build_cudd` toggle is gone). The path-dep version constraint is
+# wildcard via `allow-wildcard-paths = true` in `deny.toml`, which
+# applies to every workspace member with `publish = false`.
+#
+# This is a dep-onboarding-only task (configflux-d1cc); no
+# `solver/src/*.rs` consumes `cudd_sys` yet. The
+# `solver/src/backend_cudd.rs` consumer is a follow-on under
+# configflux-jxk6.
+cudd-sys = { path = "../third_party/cudd-sys", default-features = false }
+
+# batsat 0.6.0 — CDCL SAT solver wrapped behind `solver::SatBackend` for
+# deletion-based MUS extraction in `Session::explain_rejection` (M4),
+# per ADR-0004 §4. The pre-integration supply-chain audit
+# (configflux-ivle) cleared it: see docs/security/dep-audit-v0.4.0.md §2
+# (AC-1/AC-3/AC-6/AC-8/AC-10 all PASS, MIT license on the deny.toml allow
+# list, no build.rs, sole transitive dep bit-vec 0.5.1).
+#
+# Exact-version pin is required by ADR-0004 §4 AC-2 and the dep-audit
+# acceptance bar — bumping batsat is a deliberate re-audit event, not a
+# `cargo update`. Feature hygiene (AC-7): batsat's default feature set is
+# already empty (`default = []`); the only optional feature, `logging`
+# (which pulls in `log`), is left off. The core
+# incremental-solving-with-assumptions surface
+# (`add_clause` / `solve_limited` / `unsat_core`) is always available and
+# needs no feature flag, so the minimum feature set for MUS extraction is
+# the empty set: `default-features = false` with no `features = [...]`.
+#
+# Only `solver/src/sat_backend_batsat.rs` may import `batsat`; the public
+# crate surface is isolated via the `SatBackend` trait in
+# `solver/src/sat_backend.rs` (the AC-5 mitigation leg). Wired in by
+# configflux-tcjw.
+batsat = { version = "= 0.6.0", default-features = false }

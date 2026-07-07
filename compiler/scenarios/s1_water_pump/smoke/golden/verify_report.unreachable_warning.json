@@ -1,0 +1,21 @@
+{
+  "schema_version": 2,
+  "status": "ok",
+  "error_count": 0,
+  "warning_count": 1,
+  "checks": [
+    {
+      "check_id": "graph_integrity",
+      "status": "pass",
+      "summary": "All references and dependency constraints verified",
+      "diagnostic_codes": []
+    },
+    {
+      "check_id": "reachability",
+      "status": "warn",
+      "summary": "1 component is unreachable for scenario profile domains",
+      "diagnostic_codes": ["W_UNREACHABLE_COMPONENT"]
+    }
+  ],
+  "unreachable_components": ["legacy_variant_z"]
+}

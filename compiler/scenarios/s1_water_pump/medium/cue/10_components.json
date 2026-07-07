@@ -1,0 +1,88 @@
+{
+    "package": "s1_water_pump",
+    "version": "1.0.0",
+    "artifacts": {
+        "hydra_x200_single_driver": {
+            "name": "hydra_x200_single_driver",
+            "version": "1.0.0",
+            "hash": "sha256-hydra-x200-single",
+            "source": "artifact://drivers/hydra_x200_single.so",
+            "target": "/opt/configflux/drivers/hydra_x200_single.so",
+            "doc": "Hydra X200 single-pump driver"
+        },
+        "hydra_x200_dual_driver": {
+            "name": "hydra_x200_dual_driver",
+            "version": "1.0.0",
+            "hash": "sha256-hydra-x200-dual",
+            "source": "artifact://drivers/hydra_x200_dual.so",
+            "target": "/opt/configflux/drivers/hydra_x200_dual.so",
+            "doc": "Hydra X200 dual-pump driver"
+        },
+        "aeroflux_a9_driver": {
+            "name": "aeroflux_a9_driver",
+            "version": "2.3.1",
+            "hash": "sha256-aeroflux-a9",
+            "source": "artifact://drivers/aeroflux_a9.so",
+            "target": "/opt/configflux/drivers/aeroflux_a9.so",
+            "doc": "Aeroflux A9 driver"
+        }
+    },
+    "components": {
+        "power_bus": {
+            "type": "power_module"
+        },
+        "thermal_control": {
+            "type": "controller",
+            "depends_on": [
+                "power_bus"
+            ],
+            "params": {
+                "max_flow_at_commissioning": {
+                    "inherits": "safe_flow",
+                    "type": "float",
+                    "unit": "lpm",
+                    "doc": "Safe commissioning flow limit",
+                    "value": 42.5,
+                    "lifecycle": "startup",
+                    "safety": "sil2",
+                    "access": "integrator",
+                    "req_id": "req_s1_001"
+                },
+                "control_driver": {
+                    "inherits": "driver_slot",
+                    "type": "artifact",
+                    "doc": "Control driver artifact reference",
+                    "value": "hydra_x200_single_driver",
+                    "lifecycle": "construction",
+                    "access": "developer",
+                    "req_id": "req_s1_002",
+                    "overrides": [
+                        {
+                            "condition": "cooling_brand == 'hydra' && cooling_model == 'x200' && pump_type == 'dual'",
+                            "value": "hydra_x200_dual_driver"
+                        },
+                        {
+                            "condition": "cooling_brand == 'aeroflux' && cooling_model == 'a9'",
+                            "value": "aeroflux_a9_driver"
+                        }
+                    ]
+                },
+                "runtime_trim_gain": {
+                    "inherits": "trim_gain",
+                    "type": "float",
+                    "unit": "ratio",
+                    "doc": "Runtime trim gain",
+                    "value": 0.15,
+                    "lifecycle": "runtime",
+                    "safety": "q_m",
+                    "access": "technician",
+                    "req_id": "req_s1_003"
+                }
+            }
+        },
+        "eu_label": {
+            "type": "label_module",
+            "condition": "region == 'eu'"
+        }
+    }
+}

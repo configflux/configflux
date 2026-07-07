@@ -1,0 +1,30 @@
+// SPDX-License-Identifier: BUSL-1.1
+
+// configflux-ccs.7: selection-constraint resolution now uses the typed
+// `ConditionExpr` path. The former string-scanning helpers
+// (`parse_condition_conjunction` / `scan_condition_predicates`) were removed in
+// configflux-uiyo once the last matrix-implication user (`link_verify`) moved
+// onto the typed evaluator; only the typed helpers below are imported here.
+use crate::conditions::{
+    for_each_eq_predicate, is_pure_conjunction, mentions_eq, not_contradicted,
+    parse_condition_expr, ConditionExpr,
+};
+use crate::ir::{
+    self, CMP_CANONICALIZATION_VERSION, CMP_HASH_ALGO, CMP_MANIFEST_SCHEMA_VERSION,
+    IR_FORMAT_VERSION,
+};
+use crate::product_api::{
+    Diagnostic, DiagnosticSeverity, DiagnosticsReport, OperationStatus, PRODUCT_SCHEMA_VERSION,
+};
+use crate::resolver::{self, ResolutionContext};
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::path::{Path, PathBuf};
+
+include!("contracts.rs");
+include!("operations.rs");
+
+#[cfg(test)]
+mod tests;

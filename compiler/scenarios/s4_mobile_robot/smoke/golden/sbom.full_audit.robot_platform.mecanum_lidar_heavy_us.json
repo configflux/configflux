@@ -1,0 +1,187 @@
+{
+  "schema_version": 2,
+  "bom_version": 1,
+  "bom_hash": "__DYNAMIC_BOM_HASH__",
+  "hash_algo": "sha256",
+  "canonicalization_version": 1,
+  "model_hash": "__DYNAMIC_MODEL_HASH__",
+  "resolve_hash": "__DYNAMIC_RESOLVE_HASH__",
+  "selection_state_hash": "__DYNAMIC_SELECTION_STATE_HASH__",
+  "scope_root": "robot_platform",
+  "generated_at": "1970-01-01T00:00:00Z",
+  "generator": {
+    "name": "configflux-sbom",
+    "version": "0.1.0"
+  },
+  "context_tags": {
+    "battery_pack": "high_density",
+    "drive_type": "mecanum",
+    "localization_stack": "lidar",
+    "payload_module": "heavy_lift",
+    "region": "us"
+  },
+  "choices": {},
+  "components": [
+    {
+      "component_id": "battery_manager",
+      "type": "module",
+      "dependency_ids": []
+    },
+    {
+      "component_id": "drive_stack",
+      "type": "module",
+      "dependency_ids": []
+    },
+    {
+      "component_id": "localization_stack",
+      "type": "module",
+      "dependency_ids": []
+    },
+    {
+      "component_id": "payload_stack",
+      "type": "module",
+      "dependency_ids": []
+    },
+    {
+      "component_id": "robot_platform",
+      "type": "platform",
+      "dependency_ids": [
+        "battery_manager",
+        "drive_stack",
+        "localization_stack",
+        "payload_stack"
+      ]
+    }
+  ],
+  "parameters": [
+    {
+      "path": "component.battery_manager.param.battery_profile",
+      "component_id": "battery_manager",
+      "param_key": "battery_profile",
+      "type": "string",
+      "value": "high_density",
+      "safety": "q_m",
+      "lifecycle": "construction",
+      "binding_phase": "early",
+      "access": "developer",
+      "doc": "Battery profile for compile-time feature gates"
+    },
+    {
+      "path": "component.drive_stack.param.drive_driver",
+      "component_id": "drive_stack",
+      "param_key": "drive_driver",
+      "type": "artifact",
+      "value": "mecanum_drive_driver",
+      "safety": "q_m",
+      "lifecycle": "construction",
+      "binding_phase": "early",
+      "access": "developer",
+      "doc": "Drive driver artifact"
+    },
+    {
+      "path": "component.drive_stack.param.drive_profile",
+      "component_id": "drive_stack",
+      "param_key": "drive_profile",
+      "type": "string",
+      "value": "mecanum",
+      "safety": "q_m",
+      "lifecycle": "construction",
+      "binding_phase": "early",
+      "access": "developer",
+      "doc": "Drive control compile profile"
+    },
+    {
+      "path": "component.drive_stack.param.max_speed_at_startup",
+      "component_id": "drive_stack",
+      "param_key": "max_speed_at_startup",
+      "type": "float",
+      "value": 1.8,
+      "unit": "mps",
+      "safety": "q_m",
+      "lifecycle": "startup",
+      "binding_phase": "late",
+      "access": "integrator",
+      "doc": "Commissioning speed limit"
+    },
+    {
+      "path": "component.drive_stack.param.runtime_trim_gain",
+      "component_id": "drive_stack",
+      "param_key": "runtime_trim_gain",
+      "type": "float",
+      "value": 0.2,
+      "unit": "ratio",
+      "safety": "q_m",
+      "lifecycle": "runtime",
+      "binding_phase": "runtime",
+      "access": "technician",
+      "doc": "Runtime trim gain"
+    },
+    {
+      "path": "component.localization_stack.param.localization_driver",
+      "component_id": "localization_stack",
+      "param_key": "localization_driver",
+      "type": "artifact",
+      "value": "lidar_localization_driver",
+      "safety": "q_m",
+      "lifecycle": "construction",
+      "binding_phase": "early",
+      "access": "developer",
+      "doc": "Localization stack artifact"
+    },
+    {
+      "path": "component.payload_stack.param.payload_driver",
+      "component_id": "payload_stack",
+      "param_key": "payload_driver",
+      "type": "artifact",
+      "value": "payload_heavy_driver",
+      "safety": "q_m",
+      "lifecycle": "construction",
+      "binding_phase": "early",
+      "access": "developer",
+      "doc": "Payload module artifact"
+    }
+  ],
+  "artifacts": [
+    {
+      "artifact_id": "lidar_localization_driver",
+      "bound_paths": [
+        "component.localization_stack.param.localization_driver"
+      ],
+      "name": "lidar_localization_driver",
+      "version": "7.0.3",
+      "hash": "sha256-lidar-localization",
+      "source": "artifact://localization/lidar_stack.so",
+      "target": "/opt/configflux/localization/lidar_stack.so",
+      "doc": "Lidar localization artifact"
+    },
+    {
+      "artifact_id": "mecanum_drive_driver",
+      "bound_paths": [
+        "component.drive_stack.param.drive_driver"
+      ],
+      "name": "mecanum_drive_driver",
+      "version": "5.2.0",
+      "hash": "sha256-mecanum-drive",
+      "source": "artifact://drivers/mecanum_drive.so",
+      "target": "/opt/configflux/drivers/mecanum_drive.so",
+      "doc": "Mecanum-drive control artifact"
+    },
+    {
+      "artifact_id": "payload_heavy_driver",
+      "bound_paths": [
+        "component.payload_stack.param.payload_driver"
+      ],
+      "name": "payload_heavy_driver",
+      "version": "2.4.1",
+      "hash": "sha256-payload-heavy",
+      "source": "artifact://payload/heavy_lift.so",
+      "target": "/opt/configflux/payload/heavy_lift.so",
+      "doc": "Heavy-lift payload artifact"
+    }
+  ],
+  "stats": {
+    "component_count": 5,
+    "parameter_count": 7,
+    "artifact_count": 3
+  }
+}

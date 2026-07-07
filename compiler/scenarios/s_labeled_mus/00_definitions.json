@@ -1,0 +1,27 @@
+{
+    "package": "s_labeled_mus",
+    "version": "1.0.0",
+    "definitions": {
+        "cpu_slot": {
+            "type": "string",
+            "doc": "Runtime-selectable CPU performance tier",
+            "lifecycle": "runtime",
+            "safety": "q_m",
+            "access": "technician"
+        },
+        "cooling_slot": {
+            "type": "string",
+            "doc": "Runtime-selectable cooling solution",
+            "lifecycle": "runtime",
+            "safety": "q_m",
+            "access": "technician"
+        },
+        "psu_slot": {
+            "type": "string",
+            "doc": "Runtime-selectable power-supply tier",
+            "lifecycle": "runtime",
+            "safety": "q_m",
+            "access": "technician"
+        }
+    }
+}

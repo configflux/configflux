@@ -1,0 +1,2 @@
+selection_domains = { occupancy_class = ["office", "hospital"], filtration_grade = ["merv13", "hepa"], region = ["us", "eu"] }
+default_context = { occupancy_class = "hospital", filtration_grade = "hepa", region = "us" }

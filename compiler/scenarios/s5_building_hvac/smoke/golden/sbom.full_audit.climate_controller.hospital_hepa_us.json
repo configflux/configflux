@@ -1,0 +1,109 @@
+{
+  "schema_version": 2,
+  "bom_version": 1,
+  "bom_hash": "__DYNAMIC_BOM_HASH__",
+  "hash_algo": "sha256",
+  "canonicalization_version": 1,
+  "model_hash": "__DYNAMIC_MODEL_HASH__",
+  "resolve_hash": "__DYNAMIC_RESOLVE_HASH__",
+  "selection_state_hash": "__DYNAMIC_SELECTION_STATE_HASH__",
+  "scope_root": "climate_controller",
+  "generated_at": "1970-01-01T00:00:00Z",
+  "generator": {
+    "name": "configflux-sbom",
+    "version": "0.1.0"
+  },
+  "context_tags": {
+    "filtration_grade": "hepa",
+    "occupancy_class": "hospital",
+    "region": "us"
+  },
+  "choices": {},
+  "components": [
+    {
+      "component_id": "air_handler",
+      "type": "module",
+      "dependency_ids": []
+    },
+    {
+      "component_id": "climate_controller",
+      "type": "controller",
+      "dependency_ids": [
+        "air_handler",
+        "power_distribution",
+        "pressure_monitor"
+      ]
+    },
+    {
+      "component_id": "power_distribution",
+      "type": "module",
+      "dependency_ids": []
+    },
+    {
+      "component_id": "pressure_monitor",
+      "type": "module",
+      "dependency_ids": []
+    }
+  ],
+  "parameters": [
+    {
+      "path": "component.climate_controller.param.airflow_trim_gain",
+      "component_id": "climate_controller",
+      "param_key": "airflow_trim_gain",
+      "type": "float",
+      "value": 0.07,
+      "unit": "ratio",
+      "safety": "q_m",
+      "lifecycle": "runtime",
+      "binding_phase": "runtime",
+      "access": "technician",
+      "req_id": "req_s5_003",
+      "doc": "Runtime airflow trim gain for balancing after commissioning"
+    },
+    {
+      "path": "component.climate_controller.param.controller_package",
+      "component_id": "climate_controller",
+      "param_key": "controller_package",
+      "type": "artifact",
+      "value": "hospital_hepa_us_controller",
+      "safety": "q_m",
+      "lifecycle": "construction",
+      "binding_phase": "early",
+      "access": "developer",
+      "req_id": "req_s5_002",
+      "doc": "Selected HVAC controller package artifact"
+    },
+    {
+      "path": "component.climate_controller.param.ventilation_profile",
+      "component_id": "climate_controller",
+      "param_key": "ventilation_profile",
+      "type": "string",
+      "value": "acute_care_isolation",
+      "safety": "q_m",
+      "lifecycle": "startup",
+      "binding_phase": "late",
+      "access": "integrator",
+      "req_id": "req_s5_001",
+      "doc": "Commissioning profile selected for the building HVAC controller"
+    }
+  ],
+  "artifacts": [
+    {
+      "artifact_id": "hospital_hepa_us_controller",
+      "bound_paths": [
+        "component.climate_controller.param.controller_package"
+      ],
+      "name": "hospital_hepa_us_controller",
+      "version": "2.0.0",
+      "hash": "sha256-hospital-hepa-us-controller",
+      "source": "artifact://hvac/hospital_hepa_us_controller.so",
+      "target": "/opt/configflux/hvac/hospital_hepa_us_controller.so",
+      "doc": "US hospital HVAC controller package for HEPA isolation zones"
+    }
+  ],
+  "stats": {
+    "component_count": 4,
+    "parameter_count": 3,
+    "artifact_count": 1
+  }
+}

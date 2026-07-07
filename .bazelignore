@@ -1,0 +1,8 @@
+# Directories Bazel must not walk during package enumeration.
+.cache
+.configflux
+%workspace%
+sdk/ros2/build
+sdk/ros2/install
+sdk/ros2/log
+target

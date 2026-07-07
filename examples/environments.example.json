@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "environments": {
+    "local": {
+      "scope": "component:runtime_tuner",
+      "context_tags": {
+        "region": "eu",
+        "site": "lab"
+      },
+      "choices": {
+        "device_class": "gateway",
+        "update_channel": "canary"
+      }
+    },
+    "production": {
+      "scope": "component:runtime_tuner",
+      "context_tags": {
+        "site": "prod"
+      },
+      "choices": {
+        "device_class": "gateway",
+        "update_channel": "canary",
+        "region": "eu"
+      }
+    }
+  }
+}

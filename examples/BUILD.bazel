@@ -1,0 +1,292 @@
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+package(default_visibility = ["//visibility:public"])
+
+# Regression tests for the runnable examples under examples/*.
+#
+# Each sh_test invokes the example's run.sh via a shared wrapper
+# (run_example_test.sh) that:
+#   - exports CONFIGFLUX_COMPILER pointing at the bazel-built compiler
+#   - exports CONFIGFLUX_EXAMPLE_OUT_DIR pointing at $TEST_TMPDIR/out
+#   - runs run.sh and propagates its exit code
+#
+# The examples break loudly in CI if the compile/verify/inspect pipeline
+# regresses or if the example sources drift out of sync with the CLI.
+
+sh_test(
+    name = "01_hello_led_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["run_example_test.sh"],
+    data = [
+        "01-hello-led/config.json",
+        "01-hello-led/cue/config.cue",
+        "01-hello-led/run.sh",
+        "//compiler:compiler",
+    ],
+    env = {
+        "COMPILER_RLOCATION": "$(rootpath //compiler:compiler)",
+        "EXAMPLE_RUN_RLOCATION": "$(rootpath 01-hello-led/run.sh)",
+    },
+)
+
+sh_test(
+    name = "02_sensor_gateway_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["run_example_test.sh"],
+    data = [
+        "02-sensor-gateway/00_definitions.json",
+        "02-sensor-gateway/10_components.json",
+        "02-sensor-gateway/cue/00_definitions.cue",
+        "02-sensor-gateway/cue/10_components.cue",
+        "02-sensor-gateway/run.sh",
+        "//compiler:compiler",
+    ],
+    env = {
+        "COMPILER_RLOCATION": "$(rootpath //compiler:compiler)",
+        "EXAMPLE_RUN_RLOCATION": "$(rootpath 02-sensor-gateway/run.sh)",
+    },
+)
+
+sh_test(
+    name = "03_motor_controller_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["run_example_test.sh"],
+    data = [
+        "03-motor-controller/00_definitions.json",
+        "03-motor-controller/10_components.json",
+        "03-motor-controller/cue/00_definitions.cue",
+        "03-motor-controller/cue/10_components.cue",
+        "03-motor-controller/run.sh",
+        "//compiler:compiler",
+    ],
+    env = {
+        "COMPILER_RLOCATION": "$(rootpath //compiler:compiler)",
+        "EXAMPLE_RUN_RLOCATION": "$(rootpath 03-motor-controller/run.sh)",
+    },
+)
+
+# Canonical end-to-end test for example 03 on the solver-wired stack
+# (configflux-g3f.4). Drives compiler -> interpreter -> runtime through the
+# real binaries with TWO facet applies, asserts the resolve result against a
+# byte-stable golden, exercises a runtime set/get round-trip, and confirms a
+# constraint-violating runtime write is rejected. Uses python3 (not jq) for
+# JSON shaping/assertions so it has no extra host-PATH dependency.
+sh_test(
+    name = "e2e_03_motor_controller_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["e2e_03_motor_controller_test.sh"],
+    data = [
+        "03-motor-controller/00_definitions.json",
+        "03-motor-controller/10_components.json",
+        "03-motor-controller/expected/resolve.golden.json",
+        "//compiler:compiler",
+        "//interpreter:interpreter",
+        "//runtime:runtime",
+    ],
+    env = {
+        "COMPILER_RLOCATION": "$(rootpath //compiler:compiler)",
+        "INTERPRETER_RLOCATION": "$(rootpath //interpreter:interpreter)",
+        "RUNTIME_RLOCATION": "$(rootpath //runtime:runtime)",
+        "DEFS_RLOCATION": "$(rootpath 03-motor-controller/00_definitions.json)",
+        "COMPONENTS_RLOCATION": "$(rootpath 03-motor-controller/10_components.json)",
+        "GOLDEN_RLOCATION": "$(rootpath 03-motor-controller/expected/resolve.golden.json)",
+    },
+)
+
+# Example 04 drives the full pipeline: it PRODUCES the config with `cfx resolve`
+# (compiler -> cfx -> runtime) and reshapes JSON with `jq` only on the
+# runtime-handoff envelope seam, so it depends on the compiler, cfx, and
+# runtime binaries and requires `jq` on the host PATH.
+sh_test(
+    name = "04_fleet_edge_node_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["run_example_test.sh"],
+    data = [
+        "04-fleet-edge-node/00_definitions.json",
+        "04-fleet-edge-node/10_components.json",
+        "04-fleet-edge-node/cue/00_definitions.cue",
+        "04-fleet-edge-node/cue/10_components.cue",
+        "04-fleet-edge-node/run.sh",
+        "//cfx:cfx",
+        "//compiler:compiler",
+        "//runtime:runtime",
+    ],
+    env = {
+        "CFX_RLOCATION": "$(rootpath //cfx:cfx)",
+        "COMPILER_RLOCATION": "$(rootpath //compiler:compiler)",
+        "EXAMPLE_RUN_RLOCATION": "$(rootpath 04-fleet-edge-node/run.sh)",
+        "RUNTIME_RLOCATION": "$(rootpath //runtime:runtime)",
+    },
+)
+
+# Exercises the reference delivery-bundle verification script
+# (examples/verify_bundle.sh). Produces a real bundle by running the
+# example-04 pipeline (compile -> cfx resolve) over the product binaries,
+# assembles a standard-layout bundle, and asserts the script accepts a matched
+# bundle and rejects mis-assembled ones (missing ccm/, tampered
+# bound_model_hash). Reshapes JSON with `jq`, so it depends on the compiler,
+# cfx, and runtime binaries and requires `jq` on PATH.
+sh_test(
+    name = "verify_bundle_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["verify_bundle_test.sh"],
+    data = [
+        "04-fleet-edge-node/00_definitions.json",
+        "04-fleet-edge-node/10_components.json",
+        "04-fleet-edge-node/cue/00_definitions.cue",
+        "04-fleet-edge-node/cue/10_components.cue",
+        "04-fleet-edge-node/run.sh",
+        "verify_bundle.sh",
+        "//cfx:cfx",
+        "//compiler:compiler",
+        "//runtime:runtime",
+    ],
+    env = {
+        "CFX_RLOCATION": "$(rootpath //cfx:cfx)",
+        "COMPILER_RLOCATION": "$(rootpath //compiler:compiler)",
+        "EXAMPLE_RUN_RLOCATION": "$(rootpath 04-fleet-edge-node/run.sh)",
+        "RUNTIME_RLOCATION": "$(rootpath //runtime:runtime)",
+        "VERIFY_SCRIPT_RLOCATION": "$(rootpath verify_bundle.sh)",
+    },
+)
+
+# Exercises the reference deploy-guard script (examples/deploy_guard.sh,
+# ADR-0035 C2). Compiles the example-05 model and resolves one real snapshot,
+# derives an overlay-active copy by stamping context_tags.overlay="dev", builds
+# a manifest with local/non-local/unclassified target classes, and asserts the
+# guard's decision table: REFUSE an overlay-active deploy to a non-local-class
+# (or unclassified) target without --allow-overlay, ALLOW it with the override
+# or against a local-class target, ALLOW any non-overlay snapshot, and exit 2 on
+# usage errors. JSON shaping uses python3 (no jq in the asserts); the guard
+# script itself uses jq, so jq must be on PATH (like verify_bundle_test).
+sh_test(
+    name = "deploy_guard_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["deploy_guard_test.sh"],
+    data = [
+        "05-compose-fleet/00_definitions.json",
+        "05-compose-fleet/10_components.json",
+        "05-compose-fleet/environments.json",
+        "deploy_guard.sh",
+        "//compiler:compiler",
+        "//interpreter:interpreter",
+    ],
+    env = {
+        "COMPILER_RLOCATION": "$(rootpath //compiler:compiler)",
+        "COMPONENTS_RLOCATION": "$(rootpath 05-compose-fleet/10_components.json)",
+        "DEFS_RLOCATION": "$(rootpath 05-compose-fleet/00_definitions.json)",
+        "GUARD_SCRIPT_RLOCATION": "$(rootpath deploy_guard.sh)",
+        "INTERPRETER_RLOCATION": "$(rootpath //interpreter:interpreter)",
+        "MANIFEST_RLOCATION": "$(rootpath 05-compose-fleet/environments.json)",
+    },
+)
+
+# Exercises the reference environment-manifest resolver
+# (examples/resolve_environment.sh). Compiles the example-04 model with the
+# real compiler, then drives the resolver (which itself drives the interpreter
+# open -> init-selection-state -> select -> resolve chain) to assert that a
+# named environment resolves reproducibly (byte-identical snapshot + identical
+# resolve_hash) and that an N x M matrix yields exactly N*M reproducible
+# snapshots with distinct per-cell lineage. Reshapes JSON with `jq`, so it
+# depends on the compiler + interpreter binaries and requires `jq` on PATH.
+sh_test(
+    name = "resolve_environment_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["resolve_environment_test.sh"],
+    data = [
+        "04-fleet-edge-node/00_definitions.json",
+        "04-fleet-edge-node/10_components.json",
+        "environments.example.json",
+        "resolve_environment.sh",
+        "//compiler:compiler",
+        "//interpreter:interpreter",
+    ],
+    env = {
+        "COMPILER_RLOCATION": "$(rootpath //compiler:compiler)",
+        "COMPONENTS_RLOCATION": "$(rootpath 04-fleet-edge-node/10_components.json)",
+        "DEFS_RLOCATION": "$(rootpath 04-fleet-edge-node/00_definitions.json)",
+        "INTERPRETER_RLOCATION": "$(rootpath //interpreter:interpreter)",
+        "MANIFEST_RLOCATION": "$(rootpath environments.example.json)",
+        "RESOLVER_RLOCATION": "$(rootpath resolve_environment.sh)",
+    },
+)
+
+# Stdin-safety regression for examples/resolve_environment.sh (configflux-f3uf).
+# Drives the resolver under a stdin-DRAINING interpreter stub that mimics a
+# `docker run -i` wrapper (ADR-0033): it attaches and consumes stdin, which a
+# leaky select/matrix loop would feed its loop input from. Asserts that a
+# single environment resolves identically to the native binary (all choices
+# applied, not just the first) and that a two-environment matrix yields one
+# snapshot per environment. Reshapes JSON with `jq`, so it depends on the
+# compiler + interpreter binaries and requires `jq` on PATH.
+sh_test(
+    name = "resolve_environment_stdin_safe_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["resolve_environment_stdin_safe_test.sh"],
+    data = [
+        "04-fleet-edge-node/00_definitions.json",
+        "04-fleet-edge-node/10_components.json",
+        "environments.example.json",
+        "resolve_environment.sh",
+        "//compiler:compiler",
+        "//interpreter:interpreter",
+    ],
+    env = {
+        "COMPILER_RLOCATION": "$(rootpath //compiler:compiler)",
+        "COMPONENTS_RLOCATION": "$(rootpath 04-fleet-edge-node/10_components.json)",
+        "DEFS_RLOCATION": "$(rootpath 04-fleet-edge-node/00_definitions.json)",
+        "INTERPRETER_RLOCATION": "$(rootpath //interpreter:interpreter)",
+        "MANIFEST_RLOCATION": "$(rootpath environments.example.json)",
+        "RESOLVER_RLOCATION": "$(rootpath resolve_environment.sh)",
+    },
+)
+
+# End-to-end test for examples/05-compose-fleet — the docker-compose fleet
+# example. Exercises the NON-DOCKER chain (compose is skipped under bazel test,
+# matching run.sh's docker-absent path): compiles the shared model, drives the
+# interpreter chain to matrix-resolve TWO named environments x TWO service
+# scopes (4 snapshots), assembles + verifies a delivery bundle per cell, runs
+# the user-side compose-override generator, and runs the example's Python
+# service standalone (Pattern 1 load + lineage pin, plus a fail-closed case).
+# Hard assertions use python3 (no jq dependency, like e2e_03); the example's own
+# reference scripts (resolve_environment.sh, verify_bundle.sh) are ADDITIONALLY
+# exercised when jq is on PATH, so they are in `data`.
+sh_test(
+    name = "e2e_05_compose_fleet_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["e2e_05_compose_fleet_test.sh"],
+    data = [
+        "05-compose-fleet/00_definitions.json",
+        "05-compose-fleet/10_components.json",
+        "05-compose-fleet/environments.json",
+        "05-compose-fleet/service/app.py",
+        "05-compose-fleet/tools/gen_compose_override.py",
+        "05-compose-fleet/tools/render_app_config.py",
+        "resolve_environment.sh",
+        "verify_bundle.sh",
+        "//compiler:compiler",
+        "//interpreter:interpreter",
+    ],
+    env = {
+        "APP_RLOCATION": "$(rootpath 05-compose-fleet/service/app.py)",
+        "COMPILER_RLOCATION": "$(rootpath //compiler:compiler)",
+        "COMPONENTS_RLOCATION": "$(rootpath 05-compose-fleet/10_components.json)",
+        "DEFS_RLOCATION": "$(rootpath 05-compose-fleet/00_definitions.json)",
+        "INTERPRETER_RLOCATION": "$(rootpath //interpreter:interpreter)",
+        "MANIFEST_RLOCATION": "$(rootpath 05-compose-fleet/environments.json)",
+        "OVERRIDE_GEN_RLOCATION": "$(rootpath 05-compose-fleet/tools/gen_compose_override.py)",
+        "RENDER_GEN_RLOCATION": "$(rootpath 05-compose-fleet/tools/render_app_config.py)",
+        "RESOLVER_RLOCATION": "$(rootpath resolve_environment.sh)",
+        "VERIFIER_RLOCATION": "$(rootpath verify_bundle.sh)",
+    },
+)

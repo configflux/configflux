@@ -1,0 +1,243 @@
+name: Release
+
+# Triggered on push of a version tag (v0.3.0, v0.3.1, ...). This workflow
+# is intentionally separated from ci.yml: its permissions scope (`contents:
+# write`, `id-token: write`) is declared only where needed, and a
+# release-pipeline regression cannot block non-release PRs.
+#
+# Outputs (per ADR-0009): for each Linux platform (x86_64, aarch64), a
+# gzipped tarball containing `compiler`, `interpreter`, `runtime`, `LICENSE`,
+# and `NOTICE`, plus per-artifact SHA-256 and cosign signature/certificate
+# files, plus a combined `SHA256SUMS` manifest signed with cosign keyless.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write   # required to attach assets to the GitHub Release
+  id-token: write   # required for cosign keyless OIDC signing
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: x86_64-linux
+            target: x86_64-unknown-linux-musl
+          - platform: aarch64-linux
+            target: aarch64-unknown-linux-musl
+
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Resolve version from tag
+        id: version
+        run: |
+          set -euo pipefail
+          # ${GITHUB_REF_NAME} is the tag (e.g. "v0.3.0"); strip the leading "v"
+          ref="${GITHUB_REF_NAME}"
+          version="${ref#v}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=${ref}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust toolchain with musl target
+        uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b # stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      - name: Install Python (for ziglang)
+        uses: actions/setup-python@8d9ed9ac5c53483de85588cdf95a591a75ab9f55 # v5.5.0
+        with:
+          python-version: "3.12"
+
+      - name: Install zig and cargo-zigbuild
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          # ziglang wheel bundles the zig toolchain; pin to a known-good
+          # version to keep release builds reproducible across workflow runs.
+          python -m pip install "ziglang==0.13.0"
+          cargo install --locked cargo-zigbuild@0.19.7
+
+      - name: Cargo fetch
+        run: cargo fetch --locked
+
+      - name: Cross-compile binaries with cargo-zigbuild
+        run: |
+          set -euo pipefail
+          cargo zigbuild --release --locked \
+            --target ${{ matrix.target }} \
+            --package compiler \
+            --package interpreter \
+            --package runtime
+
+      - name: Stage tarball contents
+        id: stage
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          platform="${{ matrix.platform }}"
+          stage_dir="configflux-v${version}-${platform}"
+          mkdir -p "dist/${stage_dir}"
+          for bin in compiler interpreter runtime; do
+            cp "target/${{ matrix.target }}/release/${bin}" \
+              "dist/${stage_dir}/${bin}"
+            chmod +x "dist/${stage_dir}/${bin}"
+          done
+          cp LICENSE "dist/${stage_dir}/LICENSE"
+          if [ -f NOTICE ]; then
+            cp NOTICE "dist/${stage_dir}/NOTICE"
+          fi
+          echo "stage_dir=${stage_dir}" >> "$GITHUB_OUTPUT"
+
+      - name: Create tarball and SHA-256 checksum
+        id: pack
+        run: |
+          set -euo pipefail
+          stage_dir="${{ steps.stage.outputs.stage_dir }}"
+          tarball="${stage_dir}.tar.gz"
+          (
+            cd dist
+            # Deterministic tar: sorted, owner 0, group 0, mtime from tag
+            tar --sort=name \
+                --owner=0 --group=0 --numeric-owner \
+                --mtime="@${SOURCE_DATE_EPOCH:-$(git log -1 --format=%ct HEAD)}" \
+                -czf "${tarball}" "${stage_dir}"
+            sha256sum "${tarball}" > "${tarball}.sha256"
+          )
+          echo "tarball=dist/${tarball}" >> "$GITHUB_OUTPUT"
+          echo "checksum=dist/${tarball}.sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@d7d6bc7722e3daa8354c50bcb52f4837da5e9b6a # v3.8.1
+        with:
+          cosign-release: v2.4.1
+
+      - name: Sign tarball with cosign keyless
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          set -euo pipefail
+          tarball="${{ steps.pack.outputs.tarball }}"
+          cosign sign-blob --yes \
+            --output-signature "${tarball}.sig" \
+            --output-certificate "${tarball}.crt" \
+            "${tarball}"
+
+      - name: Upload artifacts for release job
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-${{ matrix.platform }}
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+            dist/*.tar.gz.sig
+            dist/*.tar.gz.crt
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate combined SHA256SUMS
+        run: |
+          set -euo pipefail
+          cd dist
+          # One SHA256SUMS entry per tarball (drop per-platform .sha256 files
+          # from the combined manifest — they list the same digest).
+          sha256sum *.tar.gz > SHA256SUMS
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@d7d6bc7722e3daa8354c50bcb52f4837da5e9b6a # v3.8.1
+        with:
+          cosign-release: v2.4.1
+
+      - name: Sign SHA256SUMS with cosign keyless
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          set -euo pipefail
+          cd dist
+          cosign sign-blob --yes \
+            --output-signature SHA256SUMS.sig \
+            --output-certificate SHA256SUMS.crt \
+            SHA256SUMS
+
+      - name: Generate release notes
+        id: notes
+        run: |
+          set -euo pipefail
+          version="${{ needs.build.outputs.version }}"
+          notes_file="$(mktemp)"
+          if [ -x tools/generate_release_notes.sh ]; then
+            tools/generate_release_notes.sh "${version}" > "${notes_file}" || \
+              printf "Release %s\n" "${version}" > "${notes_file}"
+          else
+            printf "Release %s\n" "${version}" > "${notes_file}"
+          fi
+          echo "notes_file=${notes_file}" >> "$GITHUB_OUTPUT"
+
+      - name: Create or update GitHub Release and attach assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          notes_file="${{ steps.notes.outputs.notes_file }}"
+          # Asset list shared by the create and update paths. Builds are
+          # deterministic (see the "Create tarball" step: sorted tar, owner 0,
+          # pinned mtime), so re-uploading the same tag's assets is
+          # byte-for-byte identical and safe to clobber.
+          assets=(
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+            dist/*.tar.gz.sig
+            dist/*.tar.gz.crt
+            dist/SHA256SUMS
+            dist/SHA256SUMS.sig
+            dist/SHA256SUMS.crt
+          )
+          # Idempotent on tag re-push: re-pushing a tag re-runs this workflow,
+          # but the GitHub Release for that tag already exists, so an
+          # unconditional `gh release create` fails with "a release with the
+          # same tag name already exists" (observed on public runs 27257283872
+          # and 27262924224). If the release exists, refresh its notes and
+          # `--clobber` the assets instead of recreating it; create only when
+          # the release is absent.
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            echo "Release ${tag} already exists; refreshing notes and re-uploading assets."
+            gh release edit "${tag}" \
+              --notes-file "${notes_file}"
+            gh release upload "${tag}" --clobber "${assets[@]}"
+          else
+            echo "Release ${tag} does not exist; creating it."
+            gh release create "${tag}" \
+              --title "${tag}" \
+              --notes-file "${notes_file}" \
+              --verify-tag \
+              "${assets[@]}"
+          fi

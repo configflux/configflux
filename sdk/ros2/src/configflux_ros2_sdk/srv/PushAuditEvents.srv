@@ -1,0 +1,5 @@
+string runtime_snapshot_json
+bool backend_connected
+uint32 max_events
+---
+configflux_ros2_sdk/RuntimeControlResult result

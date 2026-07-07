@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "environments": {
+    "robot-alpha": {
+      "scope": "component:vision_service",
+      "context_tags": {
+        "site": "field"
+      },
+      "choices": {
+        "deploy_env": "robot",
+        "log_profile": "quiet"
+      }
+    },
+    "local": {
+      "scope": "component:vision_service",
+      "context_tags": {
+        "site": "lab"
+      },
+      "choices": {
+        "deploy_env": "local",
+        "log_profile": "verbose"
+      },
+      "class": "local"
+    }
+  }
+}

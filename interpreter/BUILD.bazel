@@ -1,0 +1,542 @@
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["Cargo.toml"])
+
+# configflux-2awb.3 / CFX-2 (ADR-0031 D5, ADR-0042 §2): the pure human-readable
+# unsat-core renderer, extracted from the interpreter binary into a shared
+# `rust_library` so the interpreter binary AND `cfx` consume ONE renderer rather
+# than each forking a copy. It is a total function over the compiler-side
+# `UnsatCore` (`//compiler:compiler_lib`); it links no solver and does no I/O.
+# The extraction is behaviour-preserving: the renderer's own unit tests move
+# here unmodified (`:explain_renderer_test`), and the interpreter's envelope
+# path never called it (it was `allow(dead_code)` in the binary), so the binary
+# behaviour is byte-identical.
+rust_library(
+    name = "explain_renderer",
+    srcs = ["src/explain_renderer.rs"],
+    crate_name = "explain_renderer",
+    edition = "2021",
+    deps = ["//compiler:compiler_lib"],
+)
+
+# The renderer's in-crate unit tests (golden wording, determinism, empty-core
+# fallback) run here UNMODIFIED after the extraction. rules_rust `crate=` does
+# not inherit crate_features, but the renderer declares none, so nothing to
+# repeat.
+rust_test(
+    name = "explain_renderer_test",
+    size = "small",
+    timeout = "short",
+    crate = ":explain_renderer",
+    tags = [
+        "ci",
+        "interpreter",
+        "owner:interpreter",
+    ],
+)
+
+filegroup(
+    name = "all_files",
+    srcs = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ),
+)
+
+COMMON_DEPS = [
+    "//compiler:compiler_lib",
+    # configflux-kkhc / ADR-0003 §2 amendment: the selection composition moved
+    # out of the interpreter into the shared `//session_compose` crate, which
+    # owns the sole compiler + solver edge and routes options/select/resolve/
+    # explain through `solver::Session<CuddBackend>`. The interpreter no longer
+    # depends on `//solver` directly.
+    "//session_compose",
+    # configflux-2awb.3 / CFX-2 (ADR-0031 D5): the unsat-core renderer now lives
+    # in the shared `:explain_renderer` library. The interpreter binary consumes
+    # it here rather than compiling the source directly — the same library `cfx`
+    # depends on, so there is one renderer, not a fork per binary.
+    ":explain_renderer",
+    "@crates//:clap",
+    "@crates//:serde",
+    "@crates//:serde_json",
+]
+
+INTERPRETER_BINARY_SRCS = [
+    "src/main.rs",
+    "src/cli_adapter.rs",
+]
+
+INTERPRETER_TEST_SRCS = INTERPRETER_BINARY_SRCS + [
+    "src/tests.rs",
+]
+
+SCENARIO_COMPILE_DATA = [
+    # S1/S3 added in E-1c (configflux-zxni): interpreter S1/S3 fixtures now
+    # include_str! these resolved CUE-JSON siblings (as S2/S4/S5 already do).
+    "//compiler:scenarios/s1_water_pump/smoke/cue/00_definitions.json",
+    "//compiler:scenarios/s1_water_pump/smoke/cue/10_components.json",
+    "//compiler:scenarios/s3_automation_cell/smoke/cue/00_definitions.json",
+    "//compiler:scenarios/s3_automation_cell/smoke/cue/10_components.json",
+    "//compiler:scenarios/s5_building_hvac/smoke/cue/00_definitions.json",
+    "//compiler:scenarios/s5_building_hvac/smoke/cue/10_components.json",
+    "//compiler:scenarios/s2_wind_turbine/smoke/cue/00_definitions.json",
+    "//compiler:scenarios/s2_wind_turbine/smoke/cue/10_components.json",
+    "//compiler:scenarios/s2_wind_turbine/medium/cue/00_definitions.json",
+    "//compiler:scenarios/s2_wind_turbine/medium/cue/10_components.json",
+    "//compiler:scenarios/s4_mobile_robot/smoke/cue/00_definitions.json",
+    "//compiler:scenarios/s4_mobile_robot/smoke/cue/10_components.json",
+    "//compiler:scenarios/s4_mobile_robot/medium/cue/00_definitions.json",
+    "//compiler:scenarios/s4_mobile_robot/medium/cue/10_components.json",
+    # configflux-vwhj: committed synthetic THREE-facet cross-facet-`requires`
+    # fixture, include_str!'d by the labeled-MUS exit-criterion E2E tests.
+    "//compiler:scenarios/s_labeled_mus/00_definitions.json",
+    "//compiler:scenarios/s_labeled_mus/10_components.json",
+]
+
+rust_test(
+    name = "interpreter_cli_test",
+    size = "small",
+    timeout = "short",
+    srcs = INTERPRETER_TEST_SRCS,
+    crate_root = "src/main.rs",
+    compile_data = SCENARIO_COMPILE_DATA,
+    edition = "2021",
+    deps = COMMON_DEPS,
+)
+
+rust_binary(
+    name = "interpreter",
+    srcs = INTERPRETER_BINARY_SRCS,
+    crate_root = "src/main.rs",
+    edition = "2021",
+    # ADR-0002 §5: feeds CARGO_PKG_VERSION so `#[command(version)]` in
+    # src/cli_adapter.rs resolves `--version` to the workspace release
+    # version. rules_rust defaults CARGO_PKG_VERSION to "0.0.0" when this
+    # attr is absent, so it must mirror /VERSION and [workspace.package].
+    version = "0.3.0",
+    deps = COMMON_DEPS,
+)
+
+rust_test(
+    name = "interpreter_contract_gate_test",
+    size = "small",
+    timeout = "short",
+    srcs = INTERPRETER_TEST_SRCS,
+    crate_root = "src/main.rs",
+    args = [
+        "--exact",
+        "tests::int_001_happy_path_e2e_chain",
+    ],
+    compile_data = SCENARIO_COMPILE_DATA,
+    edition = "2021",
+    tags = [
+        "ci",
+        "interpreter",
+        "owner:interpreter",
+    ],
+    deps = COMMON_DEPS,
+)
+
+rust_test(
+    name = "interpreter_security_mutation_gate_test",
+    size = "small",
+    timeout = "short",
+    srcs = INTERPRETER_TEST_SRCS,
+    crate_root = "src/main.rs",
+    args = [
+        "--exact",
+        "tests::int_002_corrupted_cmp_artifacts_produce_deterministic_loader_diagnostics",
+    ],
+    compile_data = SCENARIO_COMPILE_DATA,
+    edition = "2021",
+    tags = [
+        "ci",
+        "interpreter",
+        "owner:interpreter",
+        "security",
+    ],
+    deps = COMMON_DEPS,
+)
+
+rust_test(
+    name = "interpreter_security_tamper_gate_test",
+    size = "small",
+    timeout = "short",
+    srcs = INTERPRETER_TEST_SRCS,
+    crate_root = "src/main.rs",
+    args = [
+        "--exact",
+        "tests::int_004_selection_tampering_rejected_with_selection_family_code",
+    ],
+    compile_data = SCENARIO_COMPILE_DATA,
+    edition = "2021",
+    tags = [
+        "ci",
+        "interpreter",
+        "owner:interpreter",
+        "security",
+    ],
+    deps = COMMON_DEPS,
+)
+
+rust_test(
+    name = "interpreter_determinism_replay_gate_test",
+    size = "small",
+    timeout = "short",
+    srcs = INTERPRETER_TEST_SRCS,
+    crate_root = "src/main.rs",
+    args = [
+        "--exact",
+        "tests::int_007_determinism_replay_returns_byte_identical_json",
+    ],
+    compile_data = SCENARIO_COMPILE_DATA,
+    edition = "2021",
+    tags = [
+        "ci",
+        "interpreter",
+        "owner:interpreter",
+        "security",
+    ],
+    deps = COMMON_DEPS,
+)
+
+rust_test(
+    name = "interpreter_diagnostic_leakage_gate_test",
+    size = "small",
+    timeout = "short",
+    srcs = INTERPRETER_TEST_SRCS,
+    crate_root = "src/main.rs",
+    args = [
+        "--exact",
+        "tests::int_008_diagnostics_do_not_leak_payload_or_stack_details",
+    ],
+    compile_data = SCENARIO_COMPILE_DATA,
+    edition = "2021",
+    tags = [
+        "ci",
+        "interpreter",
+        "owner:interpreter",
+        "security",
+    ],
+    deps = COMMON_DEPS,
+)
+
+rust_test(
+    name = "interpreter_s3_integration_gate_test",
+    size = "small",
+    timeout = "short",
+    srcs = INTERPRETER_TEST_SRCS,
+    crate_root = "src/main.rs",
+    args = [
+        "--exact",
+        "tests::fixture_pack_includes_s3_happy_path",
+    ],
+    compile_data = SCENARIO_COMPILE_DATA,
+    edition = "2021",
+    tags = [
+        "ci",
+        "interpreter",
+        "owner:interpreter",
+        "security",
+    ],
+    deps = COMMON_DEPS,
+)
+
+rust_test(
+    name = "interpreter_s5_integration_gate_test",
+    size = "small",
+    timeout = "short",
+    srcs = INTERPRETER_TEST_SRCS,
+    crate_root = "src/main.rs",
+    args = [
+        "--exact",
+        "tests::fixture_pack_includes_s5_non_robotics_happy_path",
+    ],
+    compile_data = SCENARIO_COMPILE_DATA,
+    edition = "2021",
+    tags = [
+        "ci",
+        "interpreter",
+        "owner:interpreter",
+        "security",
+        "system",
+    ],
+    deps = COMMON_DEPS,
+)
+
+rust_test(
+    name = "interpreter_s2_s4_fixture_gate_test",
+    size = "small",
+    timeout = "short",
+    srcs = INTERPRETER_TEST_SRCS,
+    crate_root = "src/main.rs",
+    args = [
+        "--exact",
+        "tests::fixture_pack_includes_s2_s4_smoke_and_medium_profiles",
+    ],
+    compile_data = SCENARIO_COMPILE_DATA,
+    edition = "2021",
+    tags = [
+        "ci",
+        "interpreter",
+        "owner:interpreter",
+        "security",
+        "system",
+    ],
+    deps = COMMON_DEPS,
+)
+
+rust_test(
+    name = "interpreter_determinism_all_commands_gate_test",
+    size = "small",
+    timeout = "short",
+    srcs = INTERPRETER_TEST_SRCS,
+    crate_root = "src/main.rs",
+    args = [
+        "--exact",
+        "tests::int_011_determinism_across_all_commands_and_file_mode_equivalence",
+    ],
+    compile_data = SCENARIO_COMPILE_DATA,
+    edition = "2021",
+    tags = [
+        "ci",
+        "interpreter",
+        "owner:interpreter",
+        "security",
+        "system",
+    ],
+    deps = COMMON_DEPS,
+)
+
+rust_test(
+    name = "interpreter_traceability_gate_test",
+    size = "small",
+    timeout = "short",
+    srcs = INTERPRETER_TEST_SRCS,
+    crate_root = "src/main.rs",
+    args = [
+        "--exact",
+        "tests::int_010_traceability_hash_lineage_is_complete",
+    ],
+    compile_data = SCENARIO_COMPILE_DATA,
+    edition = "2021",
+    tags = [
+        "ci",
+        "interpreter",
+        "owner:interpreter",
+        "security",
+    ],
+    deps = COMMON_DEPS,
+)
+
+rust_test(
+    name = "interpreter_transport_io_negative_gate_test",
+    size = "small",
+    timeout = "short",
+    srcs = INTERPRETER_TEST_SRCS,
+    crate_root = "src/main.rs",
+    args = [
+        "--exact",
+        "tests::int_012_transport_request_file_negative_matrix_is_deterministic",
+    ],
+    compile_data = SCENARIO_COMPILE_DATA,
+    edition = "2021",
+    tags = [
+        "ci",
+        "interpreter",
+        "owner:interpreter",
+        "security",
+    ],
+    deps = COMMON_DEPS,
+)
+
+rust_test(
+    name = "interpreter_response_io_negative_gate_test",
+    size = "small",
+    timeout = "short",
+    srcs = INTERPRETER_TEST_SRCS,
+    crate_root = "src/main.rs",
+    args = [
+        "--exact",
+        "tests::int_013_transport_response_file_negative_matrix_is_deterministic",
+    ],
+    compile_data = SCENARIO_COMPILE_DATA,
+    edition = "2021",
+    tags = [
+        "ci",
+        "interpreter",
+        "owner:interpreter",
+        "security",
+    ],
+    deps = COMMON_DEPS,
+)
+
+rust_test(
+    name = "interpreter_malformed_envelope_property_gate_test",
+    size = "small",
+    timeout = "short",
+    srcs = INTERPRETER_TEST_SRCS,
+    crate_root = "src/main.rs",
+    args = [
+        "--exact",
+        "tests::int_014_malformed_envelope_property_corpus_is_fail_closed",
+    ],
+    compile_data = SCENARIO_COMPILE_DATA,
+    edition = "2021",
+    tags = [
+        "ci",
+        "interpreter",
+        "owner:interpreter",
+        "security",
+    ],
+    deps = COMMON_DEPS,
+)
+
+rust_test(
+    name = "interpreter_dispatch_robustness_gate_test",
+    size = "small",
+    timeout = "short",
+    srcs = INTERPRETER_TEST_SRCS,
+    crate_root = "src/main.rs",
+    args = [
+        "--exact",
+        "tests::int_015_dispatch_invalid_args_property_is_fail_closed",
+    ],
+    compile_data = SCENARIO_COMPILE_DATA,
+    edition = "2021",
+    tags = [
+        "ci",
+        "interpreter",
+        "owner:interpreter",
+        "security",
+    ],
+    deps = COMMON_DEPS,
+)
+
+# Single-path end-to-end coverage for the solver-wired CLI — configflux-g3f.5 /
+# ADR-0017 + the 2026-06-09 compiler-delegated-resolve amendment. Replaces the
+# retired g3f.2 dual-path parity test now that the interpreter selection
+# commands are migrated off the legacy `compiler::loader_api` selection entry
+# points. Compiles the constraint-bearing S1 scenario (which emits the `.ccm`
+# sibling, configflux-9hi2), then drives the one production path through the
+# real CLI — init / options / select(accept) / select(chain) / select(reject) /
+# resolve — asserting the concrete contract at each step (a hard guard keeps
+# the solver path genuinely active so it cannot silently fall back to legacy).
+# Product-stack + system tagged (E2E impact: regression).
+rust_test(
+    name = "interpreter_solver_session_e2e_test",
+    size = "small",
+    timeout = "short",
+    srcs = INTERPRETER_TEST_SRCS,
+    crate_root = "src/main.rs",
+    args = [
+        "--exact",
+        "tests::int_016_solver_session_single_path_e2e",
+    ],
+    compile_data = SCENARIO_COMPILE_DATA,
+    edition = "2021",
+    tags = [
+        "ci",
+        "interpreter",
+        "owner:interpreter",
+        "security",
+        "solver",
+        "system",
+    ],
+    deps = COMMON_DEPS,
+)
+
+# configflux-vwhj — labeled-MUS exit-criterion E2E on the interpreter `explain`
+# path (configflux-osp M4 hard exit criterion). Drives a well-formed
+# ExplainRejectionRequest over the committed THREE-facet cross-facet-`requires`
+# fixture and asserts the `unsat_core` carries NO raw BDD variable index (a
+# bare integer) in any facet/option position, plus a deterministic response
+# shape (ADR-0031 D3). E2E impact: regression. Two named targets so CI never
+# skips either assertion.
+rust_test(
+    name = "interpreter_labeled_mus_exit_criterion_test",
+    size = "small",
+    timeout = "short",
+    srcs = INTERPRETER_TEST_SRCS,
+    crate_root = "src/main.rs",
+    args = [
+        "--exact",
+        "tests::vwhj_interpreter_explain_labeled_mus_has_no_raw_indices",
+    ],
+    compile_data = SCENARIO_COMPILE_DATA,
+    edition = "2021",
+    tags = [
+        "ci",
+        "interpreter",
+        "owner:interpreter",
+        "security",
+        "solver",
+        "system",
+    ],
+    deps = COMMON_DEPS,
+)
+
+rust_test(
+    name = "interpreter_labeled_mus_determinism_test",
+    size = "small",
+    timeout = "short",
+    srcs = INTERPRETER_TEST_SRCS,
+    crate_root = "src/main.rs",
+    args = [
+        "--exact",
+        "tests::vwhj_interpreter_explain_labeled_mus_shape_is_deterministic",
+    ],
+    compile_data = SCENARIO_COMPILE_DATA,
+    edition = "2021",
+    tags = [
+        "ci",
+        "interpreter",
+        "owner:interpreter",
+        "security",
+        "solver",
+        "system",
+    ],
+    deps = COMMON_DEPS,
+)
+
+test_suite(
+    name = "interpreter_scenario_smoke_test",
+    tags = [
+        "ci",
+        "interpreter",
+        "owner:interpreter",
+    ],
+    tests = [
+        ":interpreter_contract_gate_test",
+        ":interpreter_determinism_replay_gate_test",
+        ":interpreter_diagnostic_leakage_gate_test",
+        ":interpreter_malformed_envelope_property_gate_test",
+        ":interpreter_response_io_negative_gate_test",
+        ":interpreter_security_tamper_gate_test",
+        ":interpreter_transport_io_negative_gate_test",
+    ],
+)
+
+test_suite(
+    name = "interpreter_scenario_medium_test",
+    tags = [
+        "ci",
+        "interpreter",
+        "owner:interpreter",
+        "security",
+    ],
+    tests = [
+        ":interpreter_determinism_all_commands_gate_test",
+        ":interpreter_dispatch_robustness_gate_test",
+        ":interpreter_s2_s4_fixture_gate_test",
+        ":interpreter_s3_integration_gate_test",
+        ":interpreter_s5_integration_gate_test",
+        ":interpreter_security_mutation_gate_test",
+        ":interpreter_solver_session_e2e_test",
+        ":interpreter_labeled_mus_exit_criterion_test",
+        ":interpreter_labeled_mus_determinism_test",
+        ":interpreter_traceability_gate_test",
+    ],
+)

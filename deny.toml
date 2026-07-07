@@ -1,0 +1,123 @@
+# cargo-deny configuration for configflux.
+#
+# This file codifies the project's supply-chain policy. It is read by
+# `cargo deny check` as part of the dependency-audit checks.
+#
+# Policy summary:
+#   - Vulnerabilities and yanked crates are rejected outright.
+#   - Licenses are restricted to a permissive allowlist (no copyleft).
+#   - Wildcard version requirements are rejected.
+#   - Git sources are rejected — every crate must come from crates.io.
+#
+# When adding a new dependency, review the ten acceptance criteria in
+# docs/security/dep-audit-v0.3.0.md Section 8 (AC-1 through AC-10)
+# before modifying the allowlists below.
+
+[graph]
+targets = []
+all-features = false
+no-default-features = false
+
+[output]
+feature-depth = 1
+
+[advisories]
+# Advisory database: https://github.com/rustsec/advisory-db
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+# Hard-deny any known vulnerability or yanked crate.
+yanked = "deny"
+# Unmaintained and notice-level advisories warn but do not block, mirroring
+# the audit's acceptance bar (AC-8 hardens this for new deps at PR time).
+#
+# Each entry below is a deliberate, justified suppression — never a silent
+# catch-all. An unmaintained advisory is acknowledged here so that
+# `cargo deny check advisories` stays green while the disposition stays
+# explicit and traceable to a tracking issue and an audit document.
+ignore = [
+    # RUSTSEC-2024-0370: proc-macro-error 1.0.4 is UNMAINTAINED (RustSec,
+    # 2024-09-01) — an unmaintained advisory, NOT an exploitable
+    # vulnerability and NOT a yanked crate. It enters the dependency graph
+    # ONLY transitively via oxidd-derive (0.11.0 → proc-macro-error 1.0.4),
+    # adopted with the oxidd ROBDD backend in configflux-8dm.1. It is NOT
+    # introduced by batsat (batsat's transitive closure is {bit-vec}); it
+    # pre-dates batsat in the baseline lockfile.
+    #
+    # Disposition — resolution option (b), recorded under configflux-8brf:
+    # a documented ignore with justification, rather than a major oxidd /
+    # oxidd-derive bump (which would ripple through the core BDD backend and
+    # the crate_universe lockfile and is deferred to its own task). oxidd is
+    # wrapped behind the `SolverBackend` trait per ADR-0003 §3, so the
+    # backend can be swapped if upstream does not migrate; the unmaintained
+    # status travels with oxidd-derive and is outside our direct control.
+    # The configured gate (`cargo deny check`) treats this as a justified
+    # ignore and reports `advisories ok`; only the stricter ad-hoc
+    # `cargo audit --deny unmaintained` surfaces it.
+    #
+    # Tracked here: configflux-8brf (discovered-from configflux-ivle).
+    # Audit context: docs/security/dep-audit-v0.4.0.md §3 (the batsat
+    # pre-integration audit that surfaced it) and docs/security/oxidd-audit.md
+    # §8 (backend fallback plan). REVISIT and remove this entry on the next
+    # oxidd / oxidd-derive upgrade that drops proc-macro-error (e.g. a
+    # migration to proc-macro-error2), at which point the suppression is no
+    # longer needed.
+    { id = "RUSTSEC-2024-0370", reason = "unmaintained-not-vulnerable; transitive via oxidd-derive 0.11.0; wrapped behind SolverBackend trait per ADR-0003 §3; tracked configflux-8brf; see docs/security/dep-audit-v0.4.0.md §3; revisit on oxidd upgrade" },
+]
+
+[licenses]
+# Confidence threshold for SPDX license-text detection. 0.93 matches the
+# default recommendation for multi-license crates with boilerplate headers.
+confidence-threshold = 0.93
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "Zlib",
+]
+exceptions = []
+
+[licenses.private]
+# Skip license checks on workspace members that are not published to a
+# registry. All configflux workspace crates declare `publish = false`
+# (configflux-fcz8), so cargo-deny treats them as private. Their
+# licensing is governed by per-crate SPDX fields, the top-level LICENSE
+# file, and ADR-0046 (BUSL-1.1 + commercial dual license).
+ignore = true
+# cargo-deny uses the set below to detect "private" crates that are
+# internal workspace members without an explicit publish gate. Listing
+# the workspace's internal registries is unnecessary (we publish nothing
+# to a private registry) but the empty list is kept explicit for clarity.
+registries = []
+
+[bans]
+multiple-versions = "warn"
+# Wildcard version requirements are denied. Intra-workspace path
+# dependencies (e.g. `compiler = { path = "../compiler" }` in
+# interpreter/runtime Cargo.toml) resolve to a `*` version constraint
+# from cargo-deny's perspective, but `allow-wildcard-paths = true` below
+# exempts unpublished crates. All workspace members now declare
+# `publish = false` (configflux-fcz8), so the exemption applies cleanly.
+# Any true wildcard on an external crate will be denied.
+wildcards = "deny"
+allow-wildcard-paths = true
+highlight = "all"
+# No crates are globally denied by name today. Populate this list if a
+# crate is flagged in docs/security/dep-audit-v0.3.0.md Section 4 with a
+# REMOVE verdict.
+deny = []
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# Empty git allowlist: every crate must come from crates.io. Closing this
+# hole defends against attacker-controlled git URL redirects (Section 3.3
+# of the dep audit).
+allow-git = []

@@ -1,0 +1,48 @@
+{
+  "package": "merged_root",
+  "version": "0.0.0",
+  "components": {
+    "power_bus": {
+      "type": "power_module",
+      "params": {}
+    },
+    "thermal_control": {
+      "type": "controller",
+      "params": {
+        "control_driver": {
+          "value": "hydra_x200_dual_driver",
+          "type": "artifact",
+          "unit": null,
+          "safety": "q_m",
+          "lifecycle": "construction",
+          "access": "developer",
+          "req_id": "req_s1_002",
+          "doc": "Control driver artifact reference",
+          "limits": null
+        },
+        "max_flow_at_commissioning": {
+          "value": 42.5,
+          "type": "float",
+          "unit": "lpm",
+          "safety": "sil2",
+          "lifecycle": "startup",
+          "access": "integrator",
+          "req_id": "req_s1_001",
+          "doc": "Safe commissioning flow limit",
+          "limits": null
+        },
+        "runtime_trim_gain": {
+          "value": 0.15,
+          "type": "float",
+          "unit": "ratio",
+          "safety": "q_m",
+          "lifecycle": "runtime",
+          "access": "technician",
+          "req_id": "req_s1_003",
+          "doc": "Runtime trim gain",
+          "limits": null
+        }
+      }
+    }
+  }
+}

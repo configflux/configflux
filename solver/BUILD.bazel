@@ -1,0 +1,406 @@
+load(
+    "@rules_rust//rust:defs.bzl",
+    "rust_library",
+    "rust_test",
+)
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["Cargo.toml"])
+
+SOLVER_LIB_SRCS = [
+    "src/backend.rs",
+    "src/backend_cudd.rs",
+    "src/backend_oxidd.rs",
+    "src/ccm.rs",
+    "src/ccm_format.rs",
+    "src/ccm_multi_part.rs",
+    "src/cudd_translate.rs",
+    "src/explain.rs",
+    "src/lib.rs",
+    "src/partition_manifest.rs",
+    "src/partition_session.rs",
+    "src/resolve.rs",
+    "src/sat_backend.rs",
+    "src/sat_backend_batsat.rs",
+    "src/session.rs",
+    "src/snapshot.rs",
+]
+
+# `@crates//:oxidd` is the crate_universe target for the oxidd 0.11.0
+# ROBDD library. Wired in by configflux-8dm.1 per ADR-0003 §3 feature
+# hygiene: `default-features = false`, only `bdd`, `manager-index`,
+# `apply-cache-direct-mapped`, `multi-threading` enabled (see the dep
+# entry in `solver/Cargo.toml`). Only `src/backend_oxidd.rs` is
+# permitted to import oxidd types; the public crate surface is
+# isolated via the `SolverBackend` trait in `src/backend.rs`.
+#
+# `@crates//:serde_json` and `@crates//:sha2` wired in by
+# configflux-8dm.2: required by `ccm_format.rs` for ADR-0005 §2-§5
+# three-file CCM parsing and `ccm_hash` pre-image recomputation.
+# `//third_party/cudd-sys:cudd_sys` is the in-tree fork of cudd-sys
+# (MIT-relicensed from upstream CC0-1.0) wired in by configflux-d1cc
+# per ADR-0004 §3 second-pass amendment (configflux-7hn2). The fork
+# strips the upstream `build.rs` and links via the hand-authored
+# Bazel cc_library at `//third_party/cudd:cudd` (vendored CUDD 3.0.0,
+# BSD-3-Clause). The dep is wired here on the dep-onboarding lane so
+# `bazel build //solver/...` validates the C-source compile and
+# linkage early, even though no `solver/src/*.rs` consumes
+# `cudd_sys` yet — that consumer is `solver/src/backend_cudd.rs`,
+# scoped to configflux-jxk6. Per ADR-0003 §3 / ADR-0004 §3
+# amendment, only `backend_cudd.rs` will be permitted to import
+# `cudd_sys::*`; the public surface stays bounded by the
+# `SolverBackend` trait at `src/backend.rs`.
+#
+# `@crates//:batsat` is the crate_universe target for batsat 0.6.0, the
+# CDCL SAT solver wired in by configflux-tcjw per ADR-0004 §4 for
+# deletion-based MUS extraction. Feature hygiene (AC-7): the dep entry in
+# `solver/Cargo.toml` pins `= 0.6.0`, `default-features = false`, no
+# features (batsat's defaults are already empty). Only
+# `src/sat_backend_batsat.rs` is permitted to import batsat types; the
+# public surface is isolated via the `SatBackend` trait in
+# `src/sat_backend.rs` (the AC-5 mitigation leg).
+SOLVER_LIB_DEPS = [
+    "@crates//:batsat",
+    "@crates//:oxidd",
+    "@crates//:serde",
+    "@crates//:serde_json",
+    "@crates//:sha2",
+    "//third_party/cudd-sys:cudd_sys",
+]
+
+rust_library(
+    name = "solver",
+    srcs = SOLVER_LIB_SRCS,
+    crate_name = "solver",
+    edition = "2021",
+    deps = SOLVER_LIB_DEPS,
+)
+
+rust_test(
+    name = "solver_test",
+    size = "small",
+    timeout = "short",
+    crate = ":solver",
+)
+
+# M0 exit criterion integration test for bd-configflux-6tl.
+#
+# Unlike `solver_test` above — which runs the crate's internal
+# `#[cfg(test)] mod` tests — this target compiles `tests/round_trip_empty.rs`
+# as its own crate that depends on `:solver` through the same public API
+# `interpreter` and `runtime` will use. That is what makes it a "proper
+# integration test": a visibility or re-export regression on the public
+# API breaks this test even when every internal test still passes.
+#
+# Until this target is green and wired into `bazel test //...`, M0 is not
+# considered complete.
+rust_test(
+    name = "round_trip_empty_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["tests/round_trip_empty.rs"],
+    edition = "2021",
+    deps = [":solver"],
+)
+
+# OxiddBackend parity integration test — configflux-8dm.1.
+#
+# This target compiles `tests/oxidd_backend_parity.rs` as an external
+# crate that depends only on `:solver` through the public API. It is the
+# regression guard for the "no oxidd types leak across the Session API"
+# invariant (ADR-0003 §2 / §3): if a future Session method returned a
+# raw oxidd type, this file would no longer compile. It also exercises
+# the `OxiddBackend` wrapper's `SolverBackend` impl end-to-end on the
+# round-trip-empty contract alongside the NullBackend target above.
+rust_test(
+    name = "oxidd_backend_parity_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["tests/oxidd_backend_parity.rs"],
+    edition = "2021",
+    deps = [":solver"],
+)
+
+# Hand-crafted CCM fixture round-trip — configflux-8dm.2.
+#
+# Exercises `Session::load_ccm` end-to-end against a three-file CCM
+# directory (ccm.manifest.json, ccm.bdd.bin, ccm.symbols.json) built
+# byte-for-byte in a tempdir per ADR-0005 §§2-5. Proves: (1) the ADR-0005
+# reader reconstructs a non-trivial BDD (>=2 variables) into oxidd;
+# (2) schema_version overflow is a typed Err; (3) bound_model_hash is
+# stored on the Ccm handle and flows into `Session::state_hash`;
+# (4) a corrupted ccm_hash is rejected with CcmError::CcmHashMismatch.
+#
+# The extra crate deps (serde, serde_json, sha2) are needed inside the
+# test to fabricate the fixture bytes; the solver library owns its own
+# copies of the same crates for parsing, but the test crate compiles
+# separately and needs them wired in explicitly.
+rust_test(
+    name = "load_ccm_real_fixture_test",
+    size = "small",
+    timeout = "short",
+    srcs = [
+        "tests/fixture_v2.rs",
+        "tests/load_ccm_real_fixture.rs",
+    ],
+    crate_root = "tests/load_ccm_real_fixture.rs",
+    edition = "2021",
+    deps = [
+        ":solver",
+        "@crates//:serde",
+        "@crates//:serde_json",
+        "@crates//:sha2",
+    ],
+)
+
+# `valid_options` over BDD projection — configflux-8dm.3.
+#
+# Exercises `Session::valid_options` end-to-end on a hand-crafted
+# three-variable CCM fixture built byte-for-byte in a tempdir. The
+# fixture encodes `(engine.v6 XOR engine.v8) ∧ gearbox.auto` under the
+# ADR-0005 §3 `(tag, value)` symbol-name convention. Proves:
+# (1) valid_options enumerates each satisfiable option value for a known
+#     facet ({v6, v8} for "engine", {auto} for "gearbox");
+# (2) unknown facet name returns a typed `Error::UnknownFacet`;
+# (3) an all-ruled-out projection returns an empty Vec, not an error;
+# (4) the empty-Ccm path preserves the M0 round-trip-empty contract
+#     (count == 0, empty options list).
+rust_test(
+    name = "valid_options_bdd_test",
+    size = "small",
+    timeout = "short",
+    srcs = [
+        "tests/fixture_v2.rs",
+        "tests/valid_options_bdd.rs",
+    ],
+    crate_root = "tests/valid_options_bdd.rs",
+    edition = "2021",
+    deps = [
+        ":solver",
+        "@crates//:serde",
+        "@crates//:serde_json",
+        "@crates//:sha2",
+    ],
+)
+
+# `apply` / `retract` round-trip — configflux-8dm.4.
+#
+# Exercises `Session::apply` and `Session::retract` end-to-end on the
+# same XOR-AND-auto three-variable fixture used by `valid_options_bdd`.
+# Proves:
+# (1) `apply(facet, value)` conjoins the unit clause for `{facet}.{value}`
+#     and narrows `valid_options(facet)` to the still-satisfiable values;
+# (2) `retract(facet)` pops the undo stack and restores pre-apply options;
+# (3) a conflicting `apply` (the second of an XOR pair) returns a typed
+#     `Error::Conflict` without mutating the session's `current` or
+#     undo stack — prior narrowing survives and subsequent retract still
+#     restores the baseline;
+# (4) an unknown `(facet, value)` pair returns a typed
+#     `Error::UnknownOption`, not `Conflict`.
+rust_test(
+    name = "apply_retract_test",
+    size = "small",
+    timeout = "short",
+    srcs = [
+        "tests/apply_retract.rs",
+        "tests/fixture_v2.rs",
+    ],
+    crate_root = "tests/apply_retract.rs",
+    edition = "2021",
+    deps = [
+        ":solver",
+        "@crates//:serde",
+        "@crates//:serde_json",
+        "@crates//:sha2",
+    ],
+)
+
+# `Session::explain_rejection` labeled-MUS extraction — configflux-kv5d.
+#
+# Compiles `tests/explain_rejection_mus.rs` as an external crate that
+# depends only on `:solver` through the public API, exercising the real
+# ADR-0004 §4 deletion-based MUS extraction end-to-end:
+# (1) a minimal 2-option / 1-constraint exactly-one model: after pinning
+#     engine.v6, explaining engine.v8 returns the labeled exclusion model
+#     rule (would_reject:true, minimal core, no raw integers);
+# (2) a genuinely valid (facet, option) returns would_reject:false, no core;
+# (3) every facet/value in the returned core is a labeled name — never a
+#     bare integer (asserted) and never a batsat type (structural: the
+#     public surface mentions only labeled Strings);
+# (4) a multi-partition fixture (cluster forces a symbol, bridge forbids it,
+#     shared by name) proves the composite formula across all partitions is
+#     the MUS input.
+#
+# Crate deps mirror the other fixture tests: serde / serde_json / sha2 are
+# needed inside the test to fabricate the canonical v2 CCM bytes.
+rust_test(
+    name = "explain_rejection_mus_test",
+    size = "small",
+    timeout = "short",
+    srcs = [
+        "tests/explain_rejection_mus.rs",
+        "tests/fixture_v2.rs",
+    ],
+    crate_root = "tests/explain_rejection_mus.rs",
+    edition = "2021",
+    deps = [
+        ":solver",
+        "@crates//:serde",
+        "@crates//:serde_json",
+        "@crates//:sha2",
+    ],
+)
+
+# Regression for the index-based-terminal explain fault — configflux-autp.
+#
+# The kv5d suite above uses only hand-rolled BDD fixtures whose non-terminal
+# nodes reference ⊥/⊤ via the sentinel constants. The real oxidd/cudd
+# compiler serializer instead references the terminals BY TABLE INDEX
+# (0 = ⊥, 1 = ⊤ per ADR-0005 §4; see compiler `ccm_emitter/bdd.rs::child_id`),
+# which made `explain_rejection`'s falsifying-path walker fault on EVERY
+# real-model `.ccm`. This test drives `explain_rejection` over a `.ccm` whose
+# BDD uses that index-based terminal convention (the same on-disk shape
+# `load_ccm_real_fixture` round-trips), asserting a labeled core for a
+# forbidden option and Ok-with-no-core for a valid one — without depending on
+# the compiler crate (ADR-0003 §2).
+rust_test(
+    name = "explain_rejection_real_ccm_test",
+    size = "small",
+    timeout = "short",
+    srcs = [
+        "tests/explain_rejection_real_ccm.rs",
+        "tests/fixture_v2.rs",
+    ],
+    crate_root = "tests/explain_rejection_real_ccm.rs",
+    edition = "2021",
+    deps = [
+        ":solver",
+        "@crates//:serde",
+        "@crates//:serde_json",
+        "@crates//:sha2",
+    ],
+)
+
+# Labeled-MUS exit-criterion invariant — configflux-vwhj (configflux-osp M4
+# epic's HARD EXIT CRITERION). Compiles `tests/labeled_mus.rs` as an external
+# crate over the public `solver` API and asserts `Session::explain_rejection`
+# returns a fully labeled minimal unsatisfiable subset with NO raw BDD
+# variable index in any `conflicting_constraints[*].atoms[*]` (ADR-0031
+# D3/D4). The synthetic CCM has THREE facets and a cross-facet `requires`
+# (modeling the committed scenario `compiler/scenarios/s_labeled_mus/`); it is
+# hand-rolled here because the solver test crate may not depend on `compiler`
+# (ADR-0003 §2). FAILS if explain_rejection is reverted to the stub.
+rust_test(
+    name = "labeled_mus_test",
+    size = "small",
+    timeout = "short",
+    srcs = [
+        "tests/labeled_mus.rs",
+        "tests/fixture_v2.rs",
+    ],
+    crate_root = "tests/labeled_mus.rs",
+    edition = "2021",
+    deps = [
+        ":solver",
+        "@crates//:serde",
+        "@crates//:serde_json",
+        "@crates//:sha2",
+    ],
+)
+
+# `Session::resolve()` materialized output + deterministic resolve_hash
+# — configflux-i0ne (g3f.2 dual-path-parity blocker).
+#
+# Compiles `tests/resolve_materialized.rs` as an external crate that
+# depends only on `:solver` through the public API. Exercises the real
+# `Session::resolve()` walk on the same XOR-AND-auto three-variable
+# fixture `apply_retract` uses. Proves:
+# (1) resolve() materializes a non-empty facet -> option map consistent
+#     with `valid_options` (first still-satisfiable option in symbol-table
+#     order);
+# (2) resolve_hash is deterministic across independent loads of the same
+#     artifact + selection;
+# (3) a different applied selection produces a different resolved_output
+#     and a different resolve_hash;
+# (4) the empty-Ccm path resolves satisfiable with an empty output and a
+#     stable hash.
+#
+# The adapter rationale (solver owns the selection + hash; the compiler
+# API supplies the component/artifact catalog in g3f.2) is documented on
+# `ResolveResult` / `Session::resolve` in `src/session.rs` per ADR-0017 §3.
+rust_test(
+    name = "resolve_materialized_test",
+    size = "small",
+    timeout = "short",
+    srcs = [
+        "tests/fixture_v2.rs",
+        "tests/resolve_materialized.rs",
+    ],
+    crate_root = "tests/resolve_materialized.rs",
+    edition = "2021",
+    deps = [
+        ":solver",
+        "@crates//:serde",
+        "@crates//:serde_json",
+        "@crates//:sha2",
+    ],
+)
+
+# Multi-partition `Session` boolean composition — configflux-0r62.
+#
+# Builds a 2-partition v2 CCM fixture (one cluster + one bridge, both
+# over the same `[region.a, region.b]` variable order) in a tempdir
+# and exercises the Session-level fan-out wired by 0r62:
+#   - valid_options intersects per-partition surviving sets
+#     (cluster's XOR-formed {a, b} intersected with bridge's
+#     `b ∧ ¬a` shape's {b} == {b});
+#   - apply that succeeds on one partition and conflicts on another
+#     atomically rolls back the successful one (post-apply joint
+#     valid_options must equal baseline);
+#   - retract pops per-partition undo entries (ADR-0012 §7) so the
+#     state returns to baseline;
+#   - state_hash is deterministic across independent loads of the
+#     same multi-part artifact and incorporates the per-partition
+#     undo contribution counts per ADR-0012 §8.
+#
+# Crate deps mirror the other integration tests: serde / serde_json /
+# sha2 are needed inside the test to fabricate the canonical bytes for
+# both per-partition manifests and the top-level chain.
+rust_test(
+    name = "multi_partition_session_test",
+    size = "small",
+    timeout = "short",
+    srcs = [
+        "tests/fixture_v2.rs",
+        "tests/multi_partition_session.rs",
+    ],
+    crate_root = "tests/multi_partition_session.rs",
+    edition = "2021",
+    deps = [
+        ":solver",
+        "@crates//:serde",
+        "@crates//:serde_json",
+        "@crates//:sha2",
+    ],
+)
+
+# CuddBackend parity integration test — configflux-jxk6.
+#
+# Mirrors `oxidd_backend_parity_test` above for the CUDD-backed
+# implementation of `SolverBackend` per ADR-0004 §3 second-pass
+# amendment 2026-05-09 (configflux-dwwv). Compiles `tests/cudd_backend_parity.rs`
+# as an external crate that depends only on `:solver` through the
+# public API; if a Session method ever leaked a CUDD type, this file
+# would no longer compile. Also exercises `CuddBackend::deserialize_bdd`,
+# `is_var_sat_under`, and `apply_and` end-to-end on a small
+# AND-fixture and verifies semantic parity vs `OxiddBackend` on the
+# same canonical ADR-0005 §4 node table.
+rust_test(
+    name = "cudd_backend_parity_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["tests/cudd_backend_parity.rs"],
+    edition = "2021",
+    deps = [":solver"],
+)

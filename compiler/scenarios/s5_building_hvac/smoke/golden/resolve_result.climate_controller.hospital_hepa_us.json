@@ -1,0 +1,62 @@
+{
+  "scope": "component:climate_controller",
+  "resolve_hash": "a51c5f4f3d06e8027e7d436ac0fa1f859d424fdde478d06bf2a0cb35db5bcb2c",
+  "resolved_output": {
+    "climate_controller": {
+      "components": {
+        "air_handler": {
+          "params": {},
+          "type": "module"
+        },
+        "climate_controller": {
+          "params": {
+            "airflow_trim_gain": {
+              "access": "technician",
+              "doc": "Runtime airflow trim gain for balancing after commissioning",
+              "lifecycle": "runtime",
+              "limits": null,
+              "req_id": "req_s5_003",
+              "safety": "q_m",
+              "type": "float",
+              "unit": "ratio",
+              "value": 0.07
+            },
+            "controller_package": {
+              "access": "developer",
+              "doc": "Selected HVAC controller package artifact",
+              "lifecycle": "construction",
+              "limits": null,
+              "req_id": "req_s5_002",
+              "safety": "q_m",
+              "type": "artifact",
+              "unit": null,
+              "value": "hospital_hepa_us_controller"
+            },
+            "ventilation_profile": {
+              "access": "integrator",
+              "doc": "Commissioning profile selected for the building HVAC controller",
+              "lifecycle": "startup",
+              "limits": null,
+              "req_id": "req_s5_001",
+              "safety": "q_m",
+              "type": "string",
+              "unit": null,
+              "value": "acute_care_isolation"
+            }
+          },
+          "type": "controller"
+        },
+        "power_distribution": {
+          "params": {},
+          "type": "module"
+        },
+        "pressure_monitor": {
+          "params": {},
+          "type": "module"
+        }
+      },
+      "package": "merged_root",
+      "version": "0.0.0"
+    }
+  }
+}

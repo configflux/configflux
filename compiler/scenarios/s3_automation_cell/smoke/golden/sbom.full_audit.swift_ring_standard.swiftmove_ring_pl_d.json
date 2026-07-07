@@ -1,0 +1,82 @@
+{
+  "schema_version": 2,
+  "bom_version": 1,
+  "bom_hash": "__DYNAMIC_BOM_HASH__",
+  "hash_algo": "sha256",
+  "canonicalization_version": 1,
+  "model_hash": "__DYNAMIC_MODEL_HASH__",
+  "resolve_hash": "__DYNAMIC_RESOLVE_HASH__",
+  "selection_state_hash": "__DYNAMIC_SELECTION_STATE_HASH__",
+  "scope_root": "swift_ring_standard",
+  "generated_at": "1970-01-01T00:00:00Z",
+  "generator": {
+    "name": "configflux-sbom",
+    "version": "0.1.0"
+  },
+  "context_tags": {
+    "conveyor_brand": "swiftmove",
+    "network_topology": "ring",
+    "safety_mode": "pl_d",
+    "vision_stack": "opticore"
+  },
+  "choices": {},
+  "components": [
+    {
+      "component_id": "cell_root",
+      "type": "cell",
+      "dependency_ids": []
+    },
+    {
+      "component_id": "swift_ring_standard",
+      "type": "module",
+      "dependency_ids": [
+        "cell_root"
+      ]
+    }
+  ],
+  "parameters": [
+    {
+      "path": "component.swift_ring_standard.param.driver",
+      "component_id": "swift_ring_standard",
+      "param_key": "driver",
+      "type": "artifact",
+      "value": "swift_ring_driver",
+      "safety": "q_m",
+      "lifecycle": "construction",
+      "binding_phase": "early",
+      "access": "developer",
+      "doc": "Driver artifact selected for the automation cell path"
+    },
+    {
+      "path": "component.swift_ring_standard.param.profile",
+      "component_id": "swift_ring_standard",
+      "param_key": "profile",
+      "type": "string",
+      "value": "swift_ring_standard",
+      "safety": "q_m",
+      "lifecycle": "startup",
+      "binding_phase": "late",
+      "access": "integrator",
+      "doc": "Automation module profile selected by constrained facets"
+    }
+  ],
+  "artifacts": [
+    {
+      "artifact_id": "swift_ring_driver",
+      "bound_paths": [
+        "component.swift_ring_standard.param.driver"
+      ],
+      "name": "swift_ring_driver",
+      "version": "1.0.0",
+      "hash": "sha256-swift-ring-driver",
+      "source": "artifact://automation/swift_ring_driver.so",
+      "target": "/opt/configflux/drivers/swift_ring_driver.so",
+      "doc": "Driver for swiftmove + opticore ring topology"
+    }
+  ],
+  "stats": {
+    "component_count": 2,
+    "parameter_count": 2,
+    "artifact_count": 1
+  }
+}

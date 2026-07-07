@@ -1,0 +1,61 @@
+{
+  "schema_version": 2,
+  "status": "ok",
+  "model_hash": "__DYNAMIC_MODEL_HASH__",
+  "query": {
+    "query_type": "parameter",
+    "component_id": "thermal_control",
+    "param_key": "control_driver"
+  },
+  "summary": {
+    "source_count": 2,
+    "definition_count": 3,
+    "component_count": 3,
+    "artifact_count": 3,
+    "definition_ids": [
+      "driver_slot",
+      "safe_flow",
+      "trim_gain"
+    ],
+    "component_ids": [
+      "eu_label",
+      "power_bus",
+      "thermal_control"
+    ],
+    "artifact_ids": [
+      "aeroflux_a9_driver",
+      "hydra_x200_dual_driver",
+      "hydra_x200_single_driver"
+    ]
+  },
+  "item": {
+    "entity_kind": "parameter",
+    "component_id": "thermal_control",
+    "param_key": "control_driver",
+    "inherits": "driver_slot",
+    "type": "artifact",
+    "value": "hydra_x200_single_driver",
+    "lifecycle": "construction",
+    "access": "developer",
+    "req_id": "req_s1_002",
+    "doc": "Control driver artifact reference",
+    "override_count": 2,
+    "override_conditions": [
+      "cooling_brand == 'aeroflux' && cooling_model == 'a9'",
+      "cooling_brand == 'hydra' && cooling_model == 'x200' && pump_type == 'dual'"
+    ],
+    "candidate_artifact_ids": [
+      "aeroflux_a9_driver",
+      "hydra_x200_dual_driver",
+      "hydra_x200_single_driver"
+    ]
+  },
+  "error_count": 0,
+  "warning_count": 0,
+  "diagnostics": {
+    "schema_version": 2,
+    "diagnostics": [],
+    "error_count": 0,
+    "warning_count": 0
+  }
+}

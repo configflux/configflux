@@ -1,0 +1,2 @@
+selection_domains = { gearbox_type = ["geared", "direct_drive"], blade_class = ["onshore", "offshore"], grid_code = ["ieee_1547", "iec_61400"], sensor_pack = ["core", "extended"] }
+default_context = { gearbox_type = "direct_drive", blade_class = "onshore", grid_code = "iec_61400", sensor_pack = "core" }

@@ -1,0 +1,57 @@
+{
+  "schema_version": 2,
+  "status": "ok",
+  "model_hash": "__DYNAMIC_MODEL_HASH__",
+  "query": {
+    "query_type": "scoped_stats",
+    "scope": "component:swift_ring_standard"
+  },
+  "summary": {
+    "source_count": 2,
+    "definition_count": 2,
+    "component_count": 5,
+    "artifact_count": 4,
+    "definition_ids": [
+      "driver_slot",
+      "module_profile"
+    ],
+    "component_ids": [
+      "belt_star_high_safety",
+      "belt_star_standard",
+      "cell_root",
+      "swift_ring_high_safety",
+      "swift_ring_standard"
+    ],
+    "artifact_ids": [
+      "belt_star_driver",
+      "belt_star_safety_driver",
+      "swift_ring_driver",
+      "swift_ring_safety_driver"
+    ]
+  },
+  "item": {
+    "entity_kind": "scoped_stats",
+    "scope": "component:swift_ring_standard",
+    "scope_roots": [
+      "swift_ring_standard"
+    ],
+    "component_count": 2,
+    "parameter_count": 2,
+    "artifact_count": 1,
+    "component_ids": [
+      "cell_root",
+      "swift_ring_standard"
+    ],
+    "artifact_ids": [
+      "swift_ring_driver"
+    ]
+  },
+  "error_count": 0,
+  "warning_count": 0,
+  "diagnostics": {
+    "schema_version": 2,
+    "diagnostics": [],
+    "error_count": 0,
+    "warning_count": 0
+  }
+}

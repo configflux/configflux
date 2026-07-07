@@ -1,0 +1,29 @@
+# Bazel
+bazel-*
+/.cache/
+# Rust
+/target/
+**/*.rs.bk
+debug/
+*.pdb
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Linux
+*~
+
+# Local-only environment
+/.env
+
+# Local toolchain bootstrap cache
+/.configflux/
+
+# ROS2 colcon workspace artifacts
+/sdk/ros2/build/
+/sdk/ros2/install/
+/sdk/ros2/log/
+
+# Literal %workspace% dir created when --disk_cache uses unexpanded token
+/%workspace%/

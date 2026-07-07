@@ -1,0 +1,4 @@
+string runtime_snapshot_json
+uint32 max_audit_events
+---
+configflux_ros2_sdk/RuntimeControlResult result

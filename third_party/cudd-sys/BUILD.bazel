@@ -1,0 +1,51 @@
+# Bazel build for the cudd-sys fork (MIT, in-tree).
+#
+# Per ADR-0004 §3 second-pass amendment (2026-05-09, configflux-7hn2),
+# this is the only crate permitted to declare a Rust → CUDD FFI surface.
+# It links against the hand-authored cc_library at
+# `//third_party/cudd:cudd` (vendored CUDD 3.0.0, BSD-3-Clause). The
+# upstream `build.rs` is intentionally absent — linkage is Bazel's
+# responsibility, not Cargo's.
+#
+# Consumed by `solver/BUILD.bazel` as `//third_party/cudd-sys:cudd_sys`.
+# No other crate is permitted to depend on this target. The
+# `SolverBackend` trait at `solver/src/backend.rs` is the project-wide
+# boundary for decision-diagram functionality (ADR-0003 §3).
+
+load("@rules_rust//rust:defs.bzl", "rust_library")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "Cargo.toml",
+    "LICENSE",
+    "README.md",
+])
+
+# `convert-externs.pl` is the upstream script that generates the FFI
+# surface from CUDD's public headers. Kept under version control for
+# reproducibility but not invoked by the build (the generated `src/`
+# files are vendored verbatim from upstream cudd-sys 1.1.2-alpha.2).
+exports_files(["convert-externs.pl"])
+
+CUDD_SYS_SRCS = [
+    "src/cudd.rs",
+    "src/dddmp.rs",
+    "src/epd.rs",
+    "src/lib.rs",
+    "src/mtr.rs",
+]
+
+rust_library(
+    name = "cudd_sys",
+    srcs = CUDD_SYS_SRCS,
+    crate_name = "cudd_sys",
+    edition = "2021",
+    # `libc` is the only Rust dep — pulled via crate_universe from the
+    # workspace `Cargo.lock`. CUDD's C symbols come in via the
+    # `proc_macro_deps`-equivalent: a static cc_library link.
+    deps = [
+        "@crates//:libc",
+        "//third_party/cudd:cudd",
+    ],
+)

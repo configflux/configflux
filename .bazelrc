@@ -1,0 +1,78 @@
+# =============================================================================
+# 1. CORE CONFIGURATION
+# =============================================================================
+# Explicitly disable the legacy WORKSPACE mode (we are strictly Bzlmod)
+common --noenable_workspace
+common --enable_bzlmod
+
+# Enforce stricter environment isolation to prevent "it works on my machine" issues.
+# This stops variables like $PATH from leaking into the build actions.
+build --incompatible_strict_action_env
+
+# =============================================================================
+# 2. OUTPUT & LOGGING
+# =============================================================================
+# Only show output if there is an error (reduces noise)
+build --show_result=2
+
+# Use a more human-readable output format
+common --color=yes
+common --curses=auto
+
+# =============================================================================
+# 3. CACHING (CRITICAL FOR RUST)
+# =============================================================================
+# Rust builds can be large. Use a local disk cache to speed up re-builds.
+# Relative to repo root so it persists via the workspace volume across rebuilds.
+build --disk_cache=.cache/bazel-disk-cache
+# Bound the disk cache so it cannot grow unbounded and fill the worktree base
+# (the working cache had reached ~43G). Bazel garbage-collects the cache down to
+# this ceiling after the server has been idle (default 5m). Applies to every
+# invocation (gate, resource_guard, direct), whatever disk_cache path is in use.
+build --experimental_disk_cache_gc_max_size=60G
+
+# "Build without the Bytes": Only download artifacts when actually needed.
+# This speeds up remote builds significantly.
+build --remote_download_outputs=toplevel
+
+# =============================================================================
+# 4. RUST & SANDBOXING
+# =============================================================================
+# Ensure builds are sandboxed (files declared in srcs are the ONLY files visible).
+build --spawn_strategy=sandboxed
+build --sandbox_default_allow_network=false
+
+# =============================================================================
+# 5. TEST CONFIGURATION
+# =============================================================================
+# On test failure, print the output to the console immediately (don't bury it in logs).
+test --test_output=errors
+
+# =============================================================================
+# 6. C++ TOOLCHAIN POLICY (CLANG-ONLY)
+# =============================================================================
+# Use this config for first-party C++ builds:
+#   bazel build --config=clang_cpp //sdk/...
+#
+# clang_cpp resolves clang from PATH. A local non-root clang bundle can be
+# installed to /tmp/configflux-clang-toolchain with tools/install_clang_toolchain.sh.
+build:clang_cpp --repo_env=CC=clang
+build:clang_cpp --repo_env=CXX=clang++
+build:clang_cpp --repo_env=PATH=/tmp/configflux-clang-toolchain/bin:/usr/local/bin:/usr/bin:/bin
+build:clang_cpp --action_env=CC=clang
+build:clang_cpp --action_env=CXX=clang++
+build:clang_cpp --action_env=PATH=/tmp/configflux-clang-toolchain/bin:/usr/local/bin:/usr/bin:/bin
+build:clang_cpp --host_action_env=CC=clang
+build:clang_cpp --host_action_env=CXX=clang++
+build:clang_cpp --host_action_env=PATH=/tmp/configflux-clang-toolchain/bin:/usr/local/bin:/usr/bin:/bin
+
+# Modern C++ baseline for new C++ targets.
+build:clang_cpp --cxxopt=-std=c++20
+build:clang_cpp --host_cxxopt=-std=c++20
+
+# =============================================================================
+# 7. DEVELOPER OVERRIDES
+# =============================================================================
+# Allow developers to have a local config file (gitignored) for their own tweaks
+# e.g., enabling verbose logging or changing cache paths.
+try-import %workspace%/.bazelrc.local

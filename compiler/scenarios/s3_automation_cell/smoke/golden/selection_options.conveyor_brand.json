@@ -1,0 +1,7 @@
+{
+  "facet": "conveyor_brand",
+  "valid_options": [
+    "beltmax",
+    "swiftmove"
+  ]
+}

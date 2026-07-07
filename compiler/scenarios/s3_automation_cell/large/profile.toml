@@ -1,0 +1,14 @@
+profile_id = "large"
+scenario_id = "s3_automation_cell"
+
+[selection_domains]
+conveyor_brand = ["swiftmove", "beltmax"]
+vision_stack = ["opticore", "camplus"]
+safety_mode = ["pl_d", "pl_e"]
+network_topology = ["ring", "star"]
+
+[default_context]
+conveyor_brand = "swiftmove"
+vision_stack = "opticore"
+safety_mode = "pl_d"
+network_topology = "ring"

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security report
+    url: https://github.com/configflux/configflux/blob/main/SECURITY.md
+    about: Please report security vulnerabilities through our security policy rather than a public issue.
+  - name: Documentation and worked examples
+    url: https://github.com/configflux/configflux/blob/main/docs/design.md
+    about: Browse the design docs and worked examples before filing.

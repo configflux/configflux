@@ -1,0 +1,41 @@
+# docker-compose stack modelling ONE fleet node running TWO scoped services.
+#
+# Both services are built from the SAME image (service/Dockerfile) and the SAME
+# shared model; they differ only in which SCOPED snapshot they read at startup
+# (CONFIGFLUX_SNAPSHOT). This is the fleet pattern in miniature: one model, many
+# scopes, each service consuming exactly its own resolved configuration.
+#
+# The build context (.) is OUT_DIR/compose-build/, which run.sh assembles by
+# copying the service code, the per-service delivery bundles, and a generated
+# .env carrying the expected resolve_hash for each scope. docker-compose reads
+# that .env automatically and interpolates ${...} below.
+#
+# This compose file targets the robot-alpha named environment. The local
+# environment is exercised standalone (no compose) via run_standalone.sh — the
+# same image/app reading the local bundle, for debugging.
+
+services:
+  vision-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: configflux-compose-fleet-service
+    environment:
+      CONFIGFLUX_ENV_LABEL: "robot-alpha"
+      CONFIGFLUX_SNAPSHOT: "/app/bundles/robot-alpha--vision_service/${VISION_SNAPSHOT_NAME}"
+      CONFIGFLUX_EXPECT_RESOLVE_HASH: "${VISION_RESOLVE_HASH}"
+    # Pattern 1 consumer prints its scoped config and exits 0. `restart: "no"`
+    # keeps the demo deterministic (a real long-lived service would loop).
+    restart: "no"
+
+  telemetry-service:
+    # Reuse the image vision-service builds; only the scoped snapshot differs.
+    image: configflux-compose-fleet-service
+    depends_on:
+      vision-service:
+        condition: service_completed_successfully
+    environment:
+      CONFIGFLUX_ENV_LABEL: "robot-alpha"
+      CONFIGFLUX_SNAPSHOT: "/app/bundles/robot-alpha--telemetry_service/${TELEMETRY_SNAPSHOT_NAME}"
+      CONFIGFLUX_EXPECT_RESOLVE_HASH: "${TELEMETRY_RESOLVE_HASH}"
+    restart: "no"

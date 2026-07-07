@@ -1,0 +1,25 @@
+{
+    "package": "s2_wind_turbine",
+    "version": "1.0.0",
+    "definitions": {
+        "grid_profile": {
+            "type": "string",
+            "doc": "Grid code commissioning profile",
+            "lifecycle": "startup",
+            "access": "integrator"
+        },
+        "control_driver_slot": {
+            "type": "artifact",
+            "doc": "Selected control driver artifact",
+            "lifecycle": "construction",
+            "access": "developer"
+        },
+        "pitch_trim_gain": {
+            "type": "float",
+            "unit": "ratio",
+            "doc": "Runtime pitch trim gain",
+            "lifecycle": "runtime",
+            "access": "technician"
+        }
+    }
+}

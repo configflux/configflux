@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ConfigFlux — deterministic configuration compiler</title>
+<meta name="description" content="Compile scattered configuration into one validated model, then resolve an exact, reproducible config for any product or deployment. The same inputs always produce the same bytes.">
+<link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://configflux.dev/">
+<meta property="og:title" content="ConfigFlux — deterministic configuration compiler">
+<meta property="og:description" content="Compile scattered configuration into one validated model, then resolve an exact, reproducible config for any product or deployment.">
+<meta property="og:image" content="https://configflux.dev/assets/og-image.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="ConfigFlux — deterministic configuration compiler">
+<meta name="twitter:description" content="The same inputs always produce the same bytes — auditable, reproducible config for every variant.">
+<meta name="twitter:image" content="https://configflux.dev/assets/og-image.png">
+<style>
+/* Self-hosted IBM Plex (latin subset). No third-party requests. */
+@font-face{font-family:'IBM Plex Mono';font-style:normal;font-weight:400;font-display:swap;src:url(assets/fonts/ibm-plex-mono-latin-400-normal.woff2) format('woff2');}
+@font-face{font-family:'IBM Plex Mono';font-style:normal;font-weight:500;font-display:swap;src:url(assets/fonts/ibm-plex-mono-latin-500-normal.woff2) format('woff2');}
+@font-face{font-family:'IBM Plex Mono';font-style:normal;font-weight:600;font-display:swap;src:url(assets/fonts/ibm-plex-mono-latin-600-normal.woff2) format('woff2');}
+@font-face{font-family:'IBM Plex Sans';font-style:normal;font-weight:400;font-display:swap;src:url(assets/fonts/ibm-plex-sans-latin-400-normal.woff2) format('woff2');}
+@font-face{font-family:'IBM Plex Sans';font-style:normal;font-weight:500;font-display:swap;src:url(assets/fonts/ibm-plex-sans-latin-500-normal.woff2) format('woff2');}
+@font-face{font-family:'IBM Plex Sans';font-style:normal;font-weight:600;font-display:swap;src:url(assets/fonts/ibm-plex-sans-latin-600-normal.woff2) format('woff2');}
+@font-face{font-family:'IBM Plex Sans';font-style:normal;font-weight:700;font-display:swap;src:url(assets/fonts/ibm-plex-sans-latin-700-normal.woff2) format('woff2');}
+</style>
+<style>
+:root{
+  --cf-hue:245;
+  --bg:#0d1117; --bg2:#0f141e; --surface:#131a27; --surface2:#18202e;
+  --border:#1f2740; --border2:#2c374f;
+  --fg:#e9ecf3; --muted:#9aa4b8; --dim:#7e889d;
+  --accent: oklch(0.72 0.14 var(--cf-hue));
+  --accent2: oklch(0.74 0.115 172);
+  --accent-soft: oklch(0.72 0.14 var(--cf-hue) / 0.14);
+  --on-accent:#08111f;
+  --shadow: 0 1px 0 rgba(255,255,255,0.02), 0 10px 34px rgba(0,0,0,0.38);
+}
+*{box-sizing:border-box;}
+body{margin:0;}
+html{scroll-behavior:smooth;}
+::selection{background:var(--accent-soft);}
+@keyframes cfflow{ to{ stroke-dashoffset:-24; } }
+@media (prefers-reduced-motion: reduce){
+  html{scroll-behavior:auto;}
+  *{animation-duration:0.001ms !important; animation-iteration-count:1 !important; transition-duration:0.001ms !important;}
+}
+@media (max-width:768px){
+  [data-cf="hero-img"]{ object-position:center !important; }
+  [data-cf="hero-overlay"]{ background:linear-gradient(180deg, rgba(13,17,23,0.93) 0%, rgba(13,17,23,0.9) 62%, var(--bg) 100%) !important; }
+}
+@media (max-width:880px){
+  [data-cf="desktopnav"]{display:none !important;}
+  [data-cf="hamburger"]{display:inline-flex !important;}
+}
+</style>
+</head>
+<body>
+
+<div data-cf-root style="background:var(--bg); color:var(--fg); font-family:'IBM Plex Sans', system-ui, -apple-system, sans-serif; min-height:100vh; -webkit-font-smoothing:antialiased; line-height:1.55;">
+
+  <!-- ===================== NAV ===================== -->
+  <header style="position:sticky; top:0; z-index:60; background:color-mix(in srgb, var(--bg) 80%, transparent); backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px); border-bottom:1px solid var(--border);">
+    <nav style="max-width:1180px; margin:0 auto; padding:13px clamp(18px,5vw,40px); display:flex; align-items:center; gap:24px;">
+      <a href="#top" style="display:flex; align-items:center; gap:10px; text-decoration:none; color:var(--fg); letter-spacing:-0.01em;">
+        <svg width="22" height="22" viewBox="0 0 22 22" aria-hidden="true" fill="none"><rect x="2" y="2" width="7" height="7" rx="1.5" style="fill:var(--accent)"/><rect x="13" y="2" width="7" height="7" rx="1.5" style="fill:var(--border2)"/><rect x="2" y="13" width="7" height="7" rx="1.5" style="fill:var(--border2)"/><rect x="13" y="13" width="7" height="7" rx="1.5" style="fill:var(--accent)"/></svg>
+        <span style="font-weight:700; font-size:17px;">Config<span style="color:var(--accent)">Flux</span></span>
+      </a>
+
+      <div data-cf="desktopnav" style="display:flex; align-items:center; gap:7px; margin-left:auto;">
+        <a href="#how" style="text-decoration:none; color:var(--muted); font-size:14px; padding:8px 12px; border-radius:7px;" style-hover="color:var(--fg); background:var(--surface)">How it works</a>
+        <a href="#features" style="text-decoration:none; color:var(--muted); font-size:14px; padding:8px 12px; border-radius:7px;" style-hover="color:var(--fg); background:var(--surface)">Features</a>
+        <a href="#quickstart" style="text-decoration:none; color:var(--muted); font-size:14px; padding:8px 12px; border-radius:7px;" style-hover="color:var(--fg); background:var(--surface)">Quickstart</a>
+        <a href="#docs" style="text-decoration:none; color:var(--muted); font-size:14px; padding:8px 12px; border-radius:7px;" style-hover="color:var(--fg); background:var(--surface)">Docs</a>
+        <a href="https://github.com/configflux/configflux" style="text-decoration:none; color:var(--muted); font-size:14px; padding:8px 12px; border-radius:7px;" style-hover="color:var(--fg); background:var(--surface)">GitHub</a>
+        <a href="https://github.com/configflux/configflux" style="margin-left:6px; display:inline-flex; align-items:center; gap:8px; text-decoration:none; padding:9px 15px; border:1px solid var(--border2); border-radius:8px; background:var(--surface); color:var(--fg); font-size:13.5px; font-weight:600;" style-hover="border-color:var(--accent); background:var(--surface2)">
+          <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.2l1.9 4 4.4.5-3.3 3 .9 4.3L8 10.9 4.1 13l.9-4.3-3.3-3 4.4-.5z" style="fill:var(--accent)"/></svg>
+          Star on GitHub
+        </a>
+      </div>
+
+      <button data-cf="hamburger" data-action="toggle-menu" aria-label="Open menu" aria-expanded="false" style="display:none; margin-left:auto; width:38px; height:38px; align-items:center; justify-content:center; border:1px solid var(--border2); background:var(--surface); color:var(--fg); border-radius:8px; cursor:pointer;">
+        <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true" style="stroke:currentColor" stroke-width="1.6"><line x1="2" y1="5" x2="16" y2="5"/><line x1="2" y1="9" x2="16" y2="9"/><line x1="2" y1="13" x2="16" y2="13"/></svg>
+      </button>
+    </nav>
+
+    <div id="mobile-menu" hidden>
+      <div style="border-top:1px solid var(--border); padding:10px clamp(18px,5vw,40px) 18px; display:flex; flex-direction:column; gap:2px; background:var(--bg);">
+        <a data-action="close-menu" href="#how" style="text-decoration:none; color:var(--fg); font-size:15px; padding:11px 4px; border-bottom:1px solid var(--border);">How it works</a>
+        <a data-action="close-menu" href="#features" style="text-decoration:none; color:var(--fg); font-size:15px; padding:11px 4px; border-bottom:1px solid var(--border);">Features</a>
+        <a data-action="close-menu" href="#quickstart" style="text-decoration:none; color:var(--fg); font-size:15px; padding:11px 4px; border-bottom:1px solid var(--border);">Quickstart</a>
+        <a data-action="close-menu" href="#docs" style="text-decoration:none; color:var(--fg); font-size:15px; padding:11px 4px; border-bottom:1px solid var(--border);">Docs</a>
+        <a href="https://github.com/configflux/configflux" style="text-decoration:none; color:var(--fg); font-size:15px; padding:11px 4px; display:flex; justify-content:space-between;">GitHub <span style="color:var(--muted)">↗</span></a>
+        <div style="display:flex; gap:10px; margin-top:12px;">
+          <a href="https://github.com/configflux/configflux" style="flex:1; text-align:center; text-decoration:none; padding:11px; border:1px solid var(--border2); border-radius:8px; background:var(--surface); color:var(--fg); font-size:14px; font-weight:600;">★ Star on GitHub</a>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <main id="top">
+
+  <!-- ===================== HERO ===================== -->
+  <section style="position:relative; overflow:hidden; padding:clamp(56px,8vw,104px) clamp(18px,5vw,40px) clamp(52px,7vw,88px);">
+    <img data-cf="hero-img" src="assets/hero-bg.webp" alt="" aria-hidden="true" loading="eager" style="position:absolute; inset:0; width:100%; height:100%; object-fit:cover; object-position:center right; z-index:0;">
+    <div data-cf="hero-overlay" aria-hidden="true" style="position:absolute; inset:0; z-index:1; pointer-events:none; background:linear-gradient(180deg, transparent 52%, var(--bg) 100%), linear-gradient(90deg, rgba(13,17,23,0.96) 0%, rgba(13,17,23,0.75) 45%, rgba(13,17,23,0.25) 100%);"></div>
+    <div>
+      <div aria-hidden="true" style="position:absolute; inset:0; z-index:2; pointer-events:none; background-image:linear-gradient(var(--border) 1px, transparent 1px), linear-gradient(90deg, var(--border) 1px, transparent 1px); background-size:46px 46px; opacity:0.16; mask-image:radial-gradient(ellipse 80% 60% at 50% 0%, #000 0%, transparent 75%); -webkit-mask-image:radial-gradient(ellipse 80% 60% at 50% 0%, #000 0%, transparent 75%);"></div>
+    </div>
+    <div style="position:relative; z-index:3; max-width:1180px; margin:0 auto; display:grid; grid-template-columns:repeat(auto-fit, minmax(330px, 1fr)); gap:clamp(32px,5vw,64px); align-items:center;">
+      <div>
+        <div style="display:inline-flex; align-items:center; gap:9px; padding:5px 11px 5px 9px; border:1px solid var(--border2); border-radius:999px; background:var(--surface); margin-bottom:24px;">
+          <span style="width:7px; height:7px; border-radius:50%; background:var(--accent2);"></span>
+          <span style="font-family:'IBM Plex Mono', monospace; font-size:12px; color:var(--muted); letter-spacing:0.02em;">BUSL-1.1 · source available</span>
+        </div>
+        <h1 style="font-size:clamp(30px,4.4vw,50px); line-height:1.08; letter-spacing:-0.025em; font-weight:700; margin:0 0 22px; max-width:18ch;">Compile scattered configuration into one validated model — then resolve an exact, reproducible config for any product or deployment.</h1>
+        <p style="font-size:clamp(15.5px,1.6vw,19px); color:var(--muted); margin:0 0 32px; max-width:56ch;">The same inputs always produce the same bytes. Built for teams shipping many variants of a system from shared building blocks — and for anyone who needs configuration to be auditable and bit-for-bit reproducible.</p>
+        <div style="display:flex; flex-wrap:wrap; gap:12px; align-items:center;">
+          <a href="#quickstart" style="display:inline-flex; align-items:center; gap:8px; text-decoration:none; padding:12px 22px; border-radius:9px; background:var(--accent); color:var(--on-accent); font-size:15px; font-weight:600;" style-hover="filter:brightness(1.06)">Get started →</a>
+          <a href="https://github.com/configflux/configflux" style="display:inline-flex; align-items:center; gap:8px; text-decoration:none; padding:12px 20px; border-radius:9px; border:1px solid var(--border2); background:var(--surface); color:var(--fg); font-size:15px; font-weight:600;" style-hover="border-color:var(--accent)">
+            <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" style="fill:currentColor"><path d="M8 .2a8 8 0 0 0-2.5 15.6c.4.1.5-.2.5-.4v-1.4c-2.2.5-2.7-1-2.7-1-.4-.9-.9-1.2-.9-1.2-.7-.5.1-.5.1-.5.8.1 1.2.8 1.2.8.7 1.2 1.9.9 2.4.7.1-.5.3-.9.5-1.1-1.8-.2-3.6-.9-3.6-3.9 0-.9.3-1.6.8-2.1-.1-.2-.4-1 .1-2.1 0 0 .7-.2 2.2.8a7.6 7.6 0 0 1 4 0c1.5-1 2.2-.8 2.2-.8.5 1.1.2 1.9.1 2.1.5.5.8 1.2.8 2.1 0 3-1.8 3.7-3.6 3.9.3.3.6.8.6 1.6v2.4c0 .2.1.5.6.4A8 8 0 0 0 8 .2z"/></svg>
+            View on GitHub
+          </a>
+          <a href="https://github.com/configflux/configflux/releases/latest" style="display:inline-flex; align-items:center; gap:6px; text-decoration:none; padding:12px 8px; color:var(--muted); font-size:15px; font-weight:500;" style-hover="color:var(--fg)">Download ↓</a>
+        </div>
+      </div>
+
+      <div style="border:1px solid var(--border2); border-radius:14px; background:var(--surface); box-shadow:var(--shadow); overflow:hidden;">
+        <div style="display:flex; align-items:center; gap:8px; padding:11px 14px; border-bottom:1px solid var(--border); background:var(--surface2);">
+          <span style="width:11px; height:11px; border-radius:50%; background:var(--border2);"></span>
+          <span style="width:11px; height:11px; border-radius:50%; background:var(--border2);"></span>
+          <span style="width:11px; height:11px; border-radius:50%; background:var(--border2);"></span>
+          <span style="margin-left:8px; font-family:'IBM Plex Mono', monospace; font-size:12px; color:var(--dim);">configflux · compile → resolve</span>
+        </div>
+        <pre style="margin:0; padding:18px 18px 20px; font-family:'IBM Plex Mono', monospace; font-size:13px; line-height:1.75; color:var(--fg); overflow-x:auto; white-space:pre;"><span style="color:var(--accent)">$</span> configflux-compiler compile --source model.json --out build/
+<span style="color:var(--accent2)">✓</span> compiled <span style="color:var(--fg)">142</span> chunks → 150% model
+<span style="color:var(--accent2)">✓</span> validated typed graph <span style="color:var(--dim)">(0 conflicts)</span>
+<span style="color:var(--accent)">$</span> configflux-interpreter resolve \
+    --request-file resolve.json --response-file out.json
+<span style="color:var(--accent2)">✓</span> resolved → 100% model
+<span style="color:var(--accent2)">✓</span> canonicalized · sha256 <span style="color:var(--accent)">9f2c…a17b</span>
+<span style="color:var(--dim)">wrote 6 outputs in 0.42s · same inputs → same bytes</span></pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== PROBLEM ===================== -->
+  <section style="padding:clamp(40px,5vw,64px) clamp(18px,5vw,40px); border-top:1px solid var(--border); background-color:var(--bg2); background-image:url(assets/section-texture.webp); background-repeat:repeat; background-size:440px 440px;">
+    <div style="max-width:840px; margin:0 auto; text-align:center;">
+      <div style="font-family:'IBM Plex Mono', monospace; font-size:12px; color:var(--accent); letter-spacing:0.08em; text-transform:uppercase; margin-bottom:14px;">The problem</div>
+      <p style="font-size:clamp(19px,2.4vw,26px); line-height:1.45; letter-spacing:-0.015em; margin:0; font-weight:500;">Managing many configuration variants by hand <span style="color:var(--muted)">drifts, and can't be reproduced.</span> ConfigFlux makes configuration deterministic and auditable: a typed model you validate once, and resolve into an exact config — the same bytes, every time.</p>
+    </div>
+  </section>
+
+  <!-- ===================== HOW IT WORKS ===================== -->
+  <section id="how" style="position:relative; overflow:hidden; padding:clamp(64px,8vw,104px) clamp(18px,5vw,40px); scroll-margin-top:72px;">
+    <img src="assets/flow-band.webp" alt="" aria-hidden="true" loading="lazy" style="position:absolute; inset:0; width:100%; height:100%; object-fit:cover; object-position:center; z-index:0;">
+    <div aria-hidden="true" style="position:absolute; inset:0; z-index:1; pointer-events:none; background:linear-gradient(180deg, var(--bg) 0%, rgba(13,17,23,0.6) 22%, rgba(13,17,23,0.6) 78%, var(--bg) 100%);"></div>
+    <div style="position:relative; z-index:2; max-width:1180px; margin:0 auto;">
+      <div style="font-family:'IBM Plex Mono', monospace; font-size:12px; color:var(--accent); letter-spacing:0.08em; text-transform:uppercase; margin-bottom:12px;">01 / How it works</div>
+      <h2 style="font-size:clamp(26px,3.2vw,38px); letter-spacing:-0.02em; margin:0 0 8px; font-weight:700;">One pipeline — from CUE chunks to a live runtime</h2>
+      <p style="color:var(--muted); margin:0 0 40px; max-width:62ch; font-size:16px;">Every stage is typed and deterministic. Nothing is resolved twice the same way by accident — it's the same way by construction.</p>
+
+      <div style="border:1px solid var(--border2); border-radius:16px; background:var(--surface); padding:clamp(20px,3vw,36px); box-shadow:var(--shadow);">
+        <svg viewBox="0 0 1260 224" role="img" aria-labelledby="pl-t pl-d" preserveAspectRatio="xMidYMid meet" style="width:100%; height:auto; color:var(--muted); display:block;">
+          <title id="pl-t">ConfigFlux pipeline: author, compile, resolve, serve</title>
+          <desc id="pl-d">CUE chunks are compiled into a 150 percent model, resolved into a strict 100 percent model, and served by the runtime, which delivers resolved configuration to consumers over a stable CLI, a first-party C++ SDK, ROS 2 adapters, and a versioned C ABI for any language or your own stack.</desc>
+          <g style="font-family:'IBM Plex Mono', monospace; fill:var(--accent); font-size:12px; text-anchor:middle;">
+            <text x="195" y="50">Compile</text>
+            <text x="430" y="50">Resolve</text>
+            <text x="665" y="50">Serve</text>
+          </g>
+          <g style="stroke:currentColor; stroke-width:2; fill:none; stroke-dasharray:6 6; animation:cfflow 1.2s linear infinite; opacity:0.5;">
+            <line x1="160" y1="112" x2="229" y2="112"/>
+            <line x1="395" y1="112" x2="464" y2="112"/>
+            <line x1="630" y1="112" x2="699" y2="112"/>
+          </g>
+          <g style="fill:currentColor; opacity:0.7;">
+            <polygon points="235,112 225,107 225,117"/>
+            <polygon points="470,112 460,107 460,117"/>
+            <polygon points="705,112 695,107 695,117"/>
+          </g>
+          <g style="stroke:var(--accent); stroke-width:1.6; fill:none; opacity:0.85;">
+            <path d="M855,112 Q912,112 950,55"/>
+            <path d="M855,112 Q912,112 950,103"/>
+            <path d="M855,112 Q912,112 950,151"/>
+            <path d="M855,112 Q912,112 950,199"/>
+          </g>
+          <g style="font-family:'IBM Plex Mono', monospace;">
+            <g><rect x="4" y="70" width="152" height="84" rx="12" style="fill:var(--surface2); stroke:var(--border2); stroke-width:1.5"/><text x="80" y="107" text-anchor="middle" style="fill:var(--fg); font-size:15px; font-weight:600">CUE</text><text x="80" y="128" text-anchor="middle" style="fill:var(--muted); font-size:13px">chunks</text></g>
+            <g><rect x="239" y="70" width="152" height="84" rx="12" style="fill:var(--surface2); stroke:var(--border2); stroke-width:1.5"/><text x="315" y="107" text-anchor="middle" style="fill:var(--fg); font-size:15px; font-weight:600">150%</text><text x="315" y="128" text-anchor="middle" style="fill:var(--muted); font-size:13px">model</text></g>
+            <g><rect x="474" y="70" width="152" height="84" rx="12" style="fill:var(--surface2); stroke:var(--border2); stroke-width:1.5"/><text x="550" y="107" text-anchor="middle" style="fill:var(--fg); font-size:15px; font-weight:600">100%</text><text x="550" y="128" text-anchor="middle" style="fill:var(--muted); font-size:13px">model</text></g>
+            <g><rect x="709" y="70" width="146" height="84" rx="12" style="fill:var(--accent-soft); stroke:var(--accent); stroke-width:1.75"/><text x="782" y="110" text-anchor="middle" style="fill:var(--fg); font-size:15px; font-weight:600">Runtime</text><text x="782" y="130" text-anchor="middle" style="fill:var(--muted); font-size:11px">live system</text></g>
+          </g>
+          <g style="font-family:'IBM Plex Mono', monospace; font-size:13px;">
+            <g><rect x="950" y="40" width="80" height="30" rx="7" style="fill:var(--surface2); stroke:var(--border2); stroke-width:1.25"/><circle cx="966" cy="55" r="2.5" style="fill:var(--accent)"/><text x="978" y="59" style="fill:var(--fg)">CLI</text></g>
+            <g><rect x="950" y="88" width="80" height="30" rx="7" style="fill:var(--surface2); stroke:var(--border2); stroke-width:1.25"/><circle cx="966" cy="103" r="2.5" style="fill:var(--accent)"/><text x="978" y="107" style="fill:var(--fg)">C++</text></g>
+            <g><rect x="950" y="136" width="90" height="30" rx="7" style="fill:var(--surface2); stroke:var(--border2); stroke-width:1.25"/><circle cx="966" cy="151" r="2.5" style="fill:var(--accent)"/><text x="978" y="155" style="fill:var(--fg)">ROS 2</text></g>
+            <g><rect x="950" y="184" width="302" height="30" rx="7" style="fill:none; stroke:var(--accent); stroke-width:1.25; stroke-dasharray:5 4"/><circle cx="966" cy="199" r="2.5" style="fill:var(--accent)"/><text x="978" y="203" style="fill:var(--muted)">any language · your stack</text></g>
+          </g>
+        </svg>
+
+        <div style="display:flex; flex-wrap:wrap; gap:8px; justify-content:center; margin-top:22px; padding-top:22px; border-top:1px solid var(--border);">
+          <span style="font-family:'IBM Plex Mono', monospace; font-size:12px; color:var(--muted); padding:5px 11px; border:1px solid var(--border); border-radius:6px; background:var(--surface2);">C++ headers</span>
+          <span style="font-family:'IBM Plex Mono', monospace; font-size:12px; color:var(--muted); padding:5px 11px; border:1px solid var(--border); border-radius:6px; background:var(--surface2);">build flags</span>
+          <span style="font-family:'IBM Plex Mono', monospace; font-size:12px; color:var(--muted); padding:5px 11px; border:1px solid var(--border); border-radius:6px; background:var(--surface2);">artifact manifests</span>
+          <span style="font-family:'IBM Plex Mono', monospace; font-size:12px; color:var(--muted); padding:5px 11px; border:1px solid var(--border); border-radius:6px; background:var(--surface2);">software BOM</span>
+          <span style="font-family:'IBM Plex Mono', monospace; font-size:12px; color:var(--muted); padding:5px 11px; border:1px solid var(--border); border-radius:6px; background:var(--surface2);">runtime config</span>
+        </div>
+      </div>
+
+      <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(232px,1fr)); gap:22px 28px; margin-top:28px;">
+        <div><div style="font-family:'IBM Plex Mono', monospace; font-size:13px; color:var(--accent); margin-bottom:7px;">01 — Author</div><p style="margin:0; color:var(--muted); font-size:14.5px;">Decentralized CUE configuration chunks — your shared, typed building blocks.</p></div>
+        <div><div style="font-family:'IBM Plex Mono', monospace; font-size:13px; color:var(--accent); margin-bottom:7px;">02 — Compile</div><p style="margin:0; color:var(--muted); font-size:14.5px;">Merge and validate into the 150% model (a typed graph); emit a hash-addressable Compiled Model Package (CMP).</p></div>
+        <div><div style="font-family:'IBM Plex Mono', monospace; font-size:13px; color:var(--accent); margin-bottom:7px;">03 — Resolve</div><p style="margin:0; color:var(--muted); font-size:14.5px;">Apply late-binding selections to resolve the strict 100% model; export generated C++ headers, build flags, manifests, and a software BOM.</p></div>
+        <div><div style="font-family:'IBM Plex Mono', monospace; font-size:13px; color:var(--accent); margin-bottom:7px;">04 — Serve / Run</div><p style="margin:0; color:var(--muted); font-size:14.5px;">The runtime delivers resolved config to a live system — deterministic delta-first sync, a layered store, commit/rollback, and an event bus.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== FEATURES ===================== -->
+  <section id="features" style="padding:clamp(64px,8vw,104px) clamp(18px,5vw,40px); border-top:1px solid var(--border); background-color:var(--bg2); background-image:url(assets/section-texture.webp); background-repeat:repeat; background-size:440px 440px; scroll-margin-top:72px;">
+    <div style="max-width:1180px; margin:0 auto;">
+      <div style="font-family:'IBM Plex Mono', monospace; font-size:12px; color:var(--accent); letter-spacing:0.08em; text-transform:uppercase; margin-bottom:12px;">02 / Key features</div>
+      <h2 style="font-size:clamp(26px,3.2vw,38px); letter-spacing:-0.02em; margin:0 0 40px; font-weight:700; max-width:20ch;">Rigorous where it matters, honest about the rest</h2>
+
+      <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(290px,1fr)); gap:16px;">
+
+        <div style="border:1px solid var(--border); border-radius:14px; background:var(--surface); padding:24px;" style-hover="border-color:var(--border2)">
+          <svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true" style="margin-bottom:14px; stroke:var(--accent); fill:none" stroke-width="1.6"><rect x="3" y="3" width="11" height="11" rx="2"/><rect x="10" y="10" width="11" height="11" rx="2"/></svg>
+          <h3 style="margin:0 0 7px; font-size:16.5px; font-weight:600;">Deterministic by construction</h3>
+          <p style="margin:0; color:var(--muted); font-size:14.5px;">Outputs are canonicalized and hashed. The same inputs always produce the same bytes — and the same hashes.</p>
+        </div>
+
+        <div style="border:1px solid var(--border); border-radius:14px; background:var(--surface); padding:24px;" style-hover="border-color:var(--border2)">
+          <svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true" style="margin-bottom:14px; stroke:var(--accent); fill:none" stroke-width="1.6"><rect x="3" y="7" width="14" height="14" rx="2"/><path d="M7 7V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-2"/></svg>
+          <h3 style="margin:0 0 7px; font-size:16.5px; font-weight:600;">Scenario packs</h3>
+          <p style="margin:0; color:var(--muted); font-size:14.5px;">Reusable product families for robotics, industrial automation and building systems — a starting point, not a blank page.</p>
+        </div>
+
+        <div style="border:1px solid var(--border); border-radius:14px; background:var(--surface); padding:24px;" style-hover="border-color:var(--border2)">
+          <svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true" style="margin-bottom:14px; stroke:var(--accent); fill:none" stroke-width="1.6"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6" rx="1"/></svg>
+          <h3 style="margin:0 0 7px; font-size:16.5px; font-weight:600;">Bazel-only, hermetic build</h3>
+          <p style="margin:0; color:var(--muted); font-size:14.5px;">One command, fully sandboxed and reproducible. No surprise dependencies leaking in from your host.</p>
+        </div>
+
+        <div style="border:1px solid var(--border); border-radius:14px; background:var(--surface); padding:24px;" style-hover="border-color:var(--border2)">
+          <svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true" style="margin-bottom:14px; stroke:var(--accent); fill:none" stroke-width="1.6"><circle cx="5" cy="12" r="2.4"/><circle cx="12" cy="12" r="2.4"/><circle cx="19" cy="12" r="2.4"/><line x1="7.4" y1="12" x2="9.6" y2="12"/><line x1="14.4" y1="12" x2="16.6" y2="12"/></svg>
+          <h3 style="margin:0 0 7px; font-size:16.5px; font-weight:600;">Staged pipeline</h3>
+          <p style="margin:0; color:var(--muted); font-size:14.5px;">Compiler → interpreter → runtime, with a first-party C++ SDK and ROS 2 adapters for embedding in real systems.</p>
+        </div>
+
+        <div style="border:1px solid var(--border); border-radius:14px; background:var(--surface); padding:24px;" style-hover="border-color:var(--border2)">
+          <svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true" style="margin-bottom:14px; stroke:var(--accent); fill:none" stroke-width="1.6"><circle cx="12" cy="12" r="3"/><path d="M12 9V3.5M12 20.5V15M9 12H3.5M20.5 12H15M14.9 9.1l3.3-3.3M5.8 18.2l3.3-3.3"/></svg>
+          <h3 style="margin:0 0 7px; font-size:16.5px; font-weight:600;">Integrate from anywhere</h3>
+          <p style="margin:0; color:var(--muted); font-size:14.5px;">Resolved configuration ships as plain files, a stable CLI (JSON in/out), and a versioned C ABI — read it from any language, subprocess the CLI, or bind the ABI. First-party C++ and ROS 2 SDKs included.</p>
+        </div>
+
+        <div style="border:1px solid var(--border); border-radius:14px; background:var(--surface); padding:24px;" style-hover="border-color:var(--border2)">
+          <svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true" style="margin-bottom:14px; stroke:var(--accent); fill:none" stroke-width="1.6"><path d="M5 4h11l3 3v13H5z"/><line x1="8" y1="10" x2="14" y2="10"/><line x1="8" y1="13.5" x2="16" y2="13.5"/><line x1="8" y1="17" x2="13" y2="17"/></svg>
+          <h3 style="margin:0 0 7px; font-size:16.5px; font-weight:600;">Auditable outputs</h3>
+          <p style="margin:0; color:var(--muted); font-size:14.5px;">Resolved models, generated headers, build flags, manifests, and a first-party software BOM — all inspectable.</p>
+        </div>
+
+        <div style="border:1px solid var(--border); border-radius:14px; background:var(--surface); padding:24px;" style-hover="border-color:var(--border2)">
+          <svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true" style="margin-bottom:14px; stroke:var(--accent); fill:none" stroke-width="1.6"><path d="M12 3l7 3v5c0 4.2-2.8 7.4-7 9-4.2-1.6-7-4.8-7-9V6z"/><path d="M9 12l2.2 2.2L15.5 10" stroke-width="1.8"/></svg>
+          <h3 style="margin:0 0 7px; font-size:16.5px; font-weight:600;">Signed releases</h3>
+          <p style="margin:0; color:var(--muted); font-size:14.5px;">Release binaries are cryptographically signed, so you can verify exactly what you're running.</p>
+        </div>
+
+        <div style="border:1px solid var(--border); border-radius:14px; background:var(--surface); padding:24px;" style-hover="border-color:var(--border2)">
+          <svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true" style="margin-bottom:14px; stroke:var(--accent); fill:none" stroke-width="1.6"><circle cx="6" cy="6" r="2.2"/><circle cx="18" cy="6" r="2.2"/><circle cx="12" cy="18" r="2.2"/><path d="M7.6 7.4 11 16M16.4 7.4 13 16M8 6h8"/></svg>
+          <h3 style="margin:0 0 7px; font-size:16.5px; font-weight:600;">Requirement traceability</h3>
+          <p style="margin:0; color:var(--muted); font-size:14.5px;">Behavior maps back to tracked requirements, so your guarantees are auditable — not just asserted.</p>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== QUICKSTART ===================== -->
+  <section id="quickstart" style="padding:clamp(64px,8vw,104px) clamp(18px,5vw,40px); scroll-margin-top:72px;">
+    <div style="max-width:920px; margin:0 auto;">
+      <div style="font-family:'IBM Plex Mono', monospace; font-size:12px; color:var(--accent); letter-spacing:0.08em; text-transform:uppercase; margin-bottom:12px;">03 / Quickstart</div>
+      <h2 style="font-size:clamp(26px,3.2vw,38px); letter-spacing:-0.02em; margin:0 0 8px; font-weight:700;">Up and running in one command</h2>
+      <p style="color:var(--muted); margin:0 0 28px; font-size:16px;">Grab a signed release, or build from source. Either way it's hermetic and reproducible.</p>
+
+      <div style="border:1px solid var(--border2); border-radius:14px; background:var(--surface); overflow:hidden; box-shadow:var(--shadow);">
+        <div style="display:flex; border-bottom:1px solid var(--border); background:var(--surface2);">
+          <button data-action="tab-source" data-tab="source" style="flex:1 1 auto; padding:13px 18px; border:none; border-bottom:2px solid var(--accent); background:var(--surface); font-family:'IBM Plex Mono', monospace; font-size:13px; cursor:pointer; color:var(--fg); font-weight:500;">Build from source</button>
+          <button data-action="tab-binary" data-tab="binary" style="flex:1 1 auto; padding:13px 18px; border:none; border-bottom:2px solid transparent; background:transparent; font-family:'IBM Plex Mono', monospace; font-size:13px; cursor:pointer; color:var(--muted); font-weight:500;">Download signed release</button>
+        </div>
+
+        <div data-panel="source">
+          <div style="position:relative;">
+            <button data-action="copy-source" style="position:absolute; top:14px; right:14px; font-family:'IBM Plex Mono', monospace; font-size:12px; padding:6px 11px; border:1px solid var(--border2); border-radius:7px; background:var(--surface2); color:var(--muted); cursor:pointer;" style-hover="color:var(--fg); border-color:var(--accent)">Copy</button>
+            <pre style="margin:0; padding:22px 18px; font-family:'IBM Plex Mono', monospace; font-size:13.5px; line-height:1.85; color:var(--fg); overflow-x:auto; white-space:pre;"><span style="color:var(--accent)">$</span> git clone https://github.com/configflux/configflux
+<span style="color:var(--accent)">$</span> cd configflux
+<span style="color:var(--accent)">$</span> bazel build //...
+<span style="color:var(--accent)">$</span> bazel test //...</pre>
+          </div>
+        </div>
+
+        <div data-panel="binary" hidden>
+          <div style="position:relative;">
+            <button data-action="copy-binary" style="position:absolute; top:14px; right:14px; font-family:'IBM Plex Mono', monospace; font-size:12px; padding:6px 11px; border:1px solid var(--border2); border-radius:7px; background:var(--surface2); color:var(--muted); cursor:pointer;" style-hover="color:var(--fg); border-color:var(--accent)">Copy</button>
+            <pre style="margin:0; padding:22px 18px; font-family:'IBM Plex Mono', monospace; font-size:13.5px; line-height:1.85; color:var(--fg); overflow-x:auto; white-space:pre;"><span style="color:var(--dim)"># Download the tarball for your platform from the latest release:</span>
+<span style="color:var(--dim)">#   github.com/configflux/configflux/releases/latest</span>
+<span style="color:var(--accent)">$</span> tar -xzf configflux-v0.1.0-x86_64-linux.tar.gz
+<span style="color:var(--accent)">$</span> ./compiler --version        <span style="color:var(--dim)"># also: interpreter, runtime</span>
+
+<span style="color:var(--dim)"># Verify the signed checksums (keyless cosign):</span>
+<span style="color:var(--accent)">$</span> cosign verify-blob \
+    --certificate SHA256SUMS.crt --signature SHA256SUMS.sig \
+    --certificate-identity-regexp 'https://github.com/configflux/.*' \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+    SHA256SUMS</pre>
+          </div>
+        </div>
+
+        <div data-panel="source">
+          <div style="border-top:1px solid var(--border); padding:14px 18px; font-family:'IBM Plex Mono', monospace; font-size:12.5px; color:var(--muted);">
+            Requires <span style="color:var(--fg)">Bazel</span> (via Bazelisk), a <span style="color:var(--fg)">C++20</span> toolchain, and <span style="color:var(--fg)">Git</span>. Rust is fetched hermetically.
+          </div>
+        </div>
+        <div data-panel="binary" hidden>
+          <div style="border-top:1px solid var(--border); padding:14px 18px; font-family:'IBM Plex Mono', monospace; font-size:12.5px; color:var(--muted);">
+            No toolchain required — the release binaries are self-contained static builds. <span style="color:var(--fg)">curl</span> (or a browser) and <span style="color:var(--fg)">cosign</span> to verify the signature.
+          </div>
+        </div>
+      </div>
+
+      <a href="https://github.com/configflux/configflux/tree/main/examples" style="display:inline-flex; align-items:center; gap:7px; margin-top:18px; text-decoration:none; color:var(--accent); font-size:14.5px; font-weight:500;" style-hover="text-decoration:underline">Browse the worked examples in the repo →</a>
+    </div>
+  </section>
+
+  <!-- ===================== CONCEPTS ===================== -->
+  <section style="padding:clamp(56px,7vw,92px) clamp(18px,5vw,40px); border-top:1px solid var(--border); background-color:var(--bg2); background-image:url(assets/section-texture.webp); background-repeat:repeat; background-size:440px 440px;">
+    <div style="max-width:1180px; margin:0 auto;">
+      <div style="font-family:'IBM Plex Mono', monospace; font-size:12px; color:var(--accent); letter-spacing:0.08em; text-transform:uppercase; margin-bottom:12px;">04 / Concepts</div>
+      <h2 style="font-size:clamp(24px,3vw,34px); letter-spacing:-0.02em; margin:0 0 28px; font-weight:700;">A small glossary</h2>
+
+      <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(250px,1fr)); gap:14px;">
+        <div style="border:1px solid var(--border); border-radius:12px; background:var(--surface); padding:18px 20px;"><div style="font-family:'IBM Plex Mono', monospace; font-size:13px; color:var(--accent); margin-bottom:6px;">SPL</div><p style="margin:0; color:var(--muted); font-size:14px;">Software product line — a family of related systems built from shared, configurable building blocks.</p></div>
+        <div style="border:1px solid var(--border); border-radius:12px; background:var(--surface); padding:18px 20px;"><div style="font-family:'IBM Plex Mono', monospace; font-size:13px; color:var(--accent); margin-bottom:6px;">150% model</div><p style="margin:0; color:var(--muted); font-size:14px;">The superset model containing every option and variant, before any resolution is applied.</p></div>
+        <div style="border:1px solid var(--border); border-radius:12px; background:var(--surface); padding:18px 20px;"><div style="font-family:'IBM Plex Mono', monospace; font-size:13px; color:var(--accent); margin-bottom:6px;">100% model</div><p style="margin:0; color:var(--muted); font-size:14px;">The fully resolved configuration for one specific product or deployment.</p></div>
+        <div style="border:1px solid var(--border); border-radius:12px; background:var(--surface); padding:18px 20px;"><div style="font-family:'IBM Plex Mono', monospace; font-size:13px; color:var(--accent); margin-bottom:6px;">CUE</div><p style="margin:0; color:var(--muted); font-size:14px;">The typed configuration language used to author and constrain chunks.</p></div>
+        <div style="border:1px solid var(--border); border-radius:12px; background:var(--surface); padding:18px 20px;"><div style="font-family:'IBM Plex Mono', monospace; font-size:13px; color:var(--accent); margin-bottom:6px;">CMP</div><p style="margin:0; color:var(--muted); font-size:14px;">Compiled Model Package — the hash-addressable artifact the compiler emits from the validated 150% model.</p></div>
+      </div>
+
+      <div style="margin-top:18px; border:1px solid var(--border); border-radius:12px; background:var(--surface); overflow:hidden;">
+        <button data-action="toggle-concepts" aria-expanded="false" style="width:100%; display:flex; align-items:center; justify-content:space-between; gap:12px; padding:16px 20px; background:transparent; border:none; cursor:pointer; color:var(--fg); font-size:15px; font-weight:600; font-family:inherit; text-align:left;">
+          New to product lines?
+          <span style="color:var(--accent); font-family:'IBM Plex Mono', monospace; font-size:18px;">+</span>
+        </button>
+        <div id="concepts-detail" hidden>
+          <p style="margin:0; padding:0 20px 20px; color:var(--muted); font-size:14.5px; max-width:72ch;">Think of one product family — say, a line of pumps — where every unit shares most of its design but differs in a few options: motor size, firmware features, regional settings. A software product line captures all of those choices once, as constraints, instead of forking a config file per variant. ConfigFlux compiles that shared description, then resolves the exact configuration for the specific unit you're building — reproducibly, and with a record of how it got there.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== WHO IT'S FOR ===================== -->
+  <section style="padding:clamp(64px,8vw,104px) clamp(18px,5vw,40px); scroll-margin-top:72px; border-top:1px solid var(--border); background-color:var(--bg2); background-image:url(assets/section-texture.webp); background-repeat:repeat; background-size:440px 440px;">
+    <div style="max-width:1180px; margin:0 auto;">
+      <div style="font-family:'IBM Plex Mono', monospace; font-size:12px; color:var(--accent); letter-spacing:0.08em; text-transform:uppercase; margin-bottom:12px;">05 / Who it's for</div>
+      <h2 style="font-size:clamp(26px,3.2vw,38px); letter-spacing:-0.02em; margin:0 0 8px; font-weight:700;">Built for variants you can't afford to get wrong</h2>
+      <p style="color:var(--muted); margin:0 0 36px; max-width:60ch; font-size:16px;">If you ship many configurations of the same system — and someone needs to prove which one shipped — this is for you.</p>
+
+      <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px,1fr)); gap:14px; margin-bottom:36px;">
+        <div style="border:1px solid var(--border); border-radius:12px; background:var(--surface); padding:20px;"><h3 style="margin:0 0 5px; font-size:15.5px; font-weight:600;">Device fleets</h3><p style="margin:0; color:var(--muted); font-size:14px;">Many units, many firmware and feature combinations, one source of truth.</p></div>
+        <div style="border:1px solid var(--border); border-radius:12px; background:var(--surface); padding:20px;"><h3 style="margin:0 0 5px; font-size:15.5px; font-weight:600;">Industrial automation</h3><p style="margin:0; color:var(--muted); font-size:14px;">Cells and lines configured per site, with an audit trail for each.</p></div>
+        <div style="border:1px solid var(--border); border-radius:12px; background:var(--surface); padding:20px;"><h3 style="margin:0 0 5px; font-size:15.5px; font-weight:600;">Building systems</h3><p style="margin:0; color:var(--muted); font-size:14px;">HVAC and controls tuned per building from shared, validated blocks.</p></div>
+        <div style="border:1px solid var(--border); border-radius:12px; background:var(--surface); padding:20px;"><h3 style="margin:0 0 5px; font-size:15.5px; font-weight:600;">Multi-environment deploys</h3><p style="margin:0; color:var(--muted); font-size:14px;">Dev, staging and production resolved from one model — no drift.</p></div>
+      </div>
+
+      <div style="border:1px solid var(--border2); border-radius:14px; background:var(--surface); padding:24px clamp(20px,3vw,32px);">
+        <div style="font-family:'IBM Plex Mono', monospace; font-size:12px; color:var(--muted); margin-bottom:16px; letter-spacing:0.04em;">SCENARIO PACKS — same engine, increasing complexity</div>
+        <div style="display:flex; flex-wrap:wrap; align-items:center; gap:10px;">
+          <span style="font-family:'IBM Plex Mono', monospace; font-size:13.5px; padding:8px 14px; border:1px solid var(--border2); border-radius:8px; background:var(--surface2); color:var(--fg);">water pump</span>
+          <span style="color:var(--dim)">→</span>
+          <span style="font-family:'IBM Plex Mono', monospace; font-size:13.5px; padding:8px 14px; border:1px solid var(--border2); border-radius:8px; background:var(--surface2); color:var(--fg);">wind turbine</span>
+          <span style="color:var(--dim)">→</span>
+          <span style="font-family:'IBM Plex Mono', monospace; font-size:13.5px; padding:8px 14px; border:1px solid var(--border2); border-radius:8px; background:var(--surface2); color:var(--fg);">automation cell</span>
+          <span style="color:var(--dim)">→</span>
+          <span style="font-family:'IBM Plex Mono', monospace; font-size:13.5px; padding:8px 14px; border:1px solid var(--border2); border-radius:8px; background:var(--surface2); color:var(--fg);">mobile robot</span>
+          <span style="color:var(--dim)">→</span>
+          <span style="font-family:'IBM Plex Mono', monospace; font-size:13.5px; padding:8px 14px; border:1px solid var(--accent); border-radius:8px; background:var(--accent-soft); color:var(--fg);">building HVAC</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== STATUS ===================== -->
+  <section style="padding:clamp(40px,6vw,72px) clamp(18px,5vw,40px); border-top:1px solid var(--border); background-color:var(--bg2); background-image:url(assets/section-texture.webp); background-repeat:repeat; background-size:440px 440px;">
+    <div style="max-width:920px; margin:0 auto; border:1px solid var(--border2); border-radius:16px; background:var(--surface); padding:clamp(24px,3.5vw,40px); box-shadow:var(--shadow);">
+      <div style="display:flex; align-items:center; gap:10px; margin-bottom:16px;">
+        <span style="width:9px; height:9px; border-radius:50%; background:var(--accent2);"></span>
+        <span style="font-family:'IBM Plex Mono', monospace; font-size:12px; color:var(--muted); letter-spacing:0.06em; text-transform:uppercase;">Status — early and source-available</span>
+      </div>
+      <p style="margin:0 0 16px; font-size:clamp(16px,1.8vw,19px); line-height:1.6;">ConfigFlux is validated for <span style="font-weight:600;">small to mid-size models</span> today: deterministic compilation, validation, resolution, and signed, hashed outputs all work end to end.</p>
+      <p style="margin:0 0 20px; color:var(--muted); font-size:15px; line-height:1.6;">Very large or densely-constrained models are an area of <span style="color:var(--fg)">active research</span> — we don't claim to handle arbitrarily large problems yet. The <a href="https://github.com/configflux/configflux/blob/main/docs/benchmarks/public-benchmark.md" style="color:var(--accent); text-decoration:none;" style-hover="text-decoration:underline">measured performance benchmarks</a> report exactly the workloads validated for this release. Licensed BUSL-1.1 (source available).</p>
+      <a href="https://github.com/configflux/configflux/blob/main/CHANGELOG.md" style="display:inline-flex; align-items:center; gap:7px; text-decoration:none; color:var(--accent); font-size:14.5px; font-weight:500;" style-hover="text-decoration:underline">See what's shipped →</a>
+    </div>
+  </section>
+
+  <!-- ===================== DOCS ===================== -->
+  <section id="docs" style="padding:clamp(64px,8vw,104px) clamp(18px,5vw,40px); scroll-margin-top:72px; border-top:1px solid var(--border); background-color:var(--bg2); background-image:url(assets/section-texture.webp); background-repeat:repeat; background-size:440px 440px;">
+    <div style="max-width:1180px; margin:0 auto;">
+      <div style="font-family:'IBM Plex Mono', monospace; font-size:12px; color:var(--accent); letter-spacing:0.08em; text-transform:uppercase; margin-bottom:12px;">06 / Docs</div>
+      <h2 style="font-size:clamp(26px,3.2vw,38px); letter-spacing:-0.02em; margin:0 0 36px; font-weight:700;">Learn more</h2>
+      <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(260px,1fr)); gap:14px;">
+        <a href="https://github.com/configflux/configflux/blob/main/docs/design.md" style="text-decoration:none; border:1px solid var(--border); border-radius:12px; background:var(--surface); padding:22px; display:flex; flex-direction:column; gap:6px;" style-hover="border-color:var(--accent); background:var(--surface2)"><div style="display:flex; justify-content:space-between; align-items:center;"><span style="font-size:15.5px; font-weight:600; color:var(--fg);">Design overview</span><span style="color:var(--muted)">↗</span></div><span style="color:var(--muted); font-size:13.5px;">How the compiler, interpreter and runtime fit together.</span></a>
+        <a href="https://github.com/configflux/configflux/blob/main/docs/model-spec.md" style="text-decoration:none; border:1px solid var(--border); border-radius:12px; background:var(--surface); padding:22px; display:flex; flex-direction:column; gap:6px;" style-hover="border-color:var(--accent); background:var(--surface2)"><div style="display:flex; justify-content:space-between; align-items:center;"><span style="font-size:15.5px; font-weight:600; color:var(--fg);">Model spec</span><span style="color:var(--muted)">↗</span></div><span style="color:var(--muted); font-size:13.5px;">The 150% / 100% model and how resolution is defined.</span></a>
+        <a href="https://github.com/configflux/configflux/tree/main/examples" style="text-decoration:none; border:1px solid var(--border); border-radius:12px; background:var(--surface); padding:22px; display:flex; flex-direction:column; gap:6px;" style-hover="border-color:var(--accent); background:var(--surface2)"><div style="display:flex; justify-content:space-between; align-items:center;"><span style="font-size:15.5px; font-weight:600; color:var(--fg);">Worked examples</span><span style="color:var(--muted)">↗</span></div><span style="color:var(--muted); font-size:13.5px;">End-to-end runnable examples, from a minimal model to a composed fleet.</span></a>
+        <a href="https://github.com/configflux/configflux/blob/main/docs/interface-contracts.md" style="text-decoration:none; border:1px solid var(--border); border-radius:12px; background:var(--surface); padding:22px; display:flex; flex-direction:column; gap:6px;" style-hover="border-color:var(--accent); background:var(--surface2)"><div style="display:flex; justify-content:space-between; align-items:center;"><span style="font-size:15.5px; font-weight:600; color:var(--fg);">Interface contracts</span><span style="color:var(--muted)">↗</span></div><span style="color:var(--muted); font-size:13.5px;">The frozen compiler / interpreter / runtime API envelopes, diagnostics, and hash semantics.</span></a>
+        <a href="https://github.com/configflux/configflux/security/policy" style="text-decoration:none; border:1px solid var(--border); border-radius:12px; background:var(--surface); padding:22px; display:flex; flex-direction:column; gap:6px;" style-hover="border-color:var(--accent); background:var(--surface2)"><div style="display:flex; justify-content:space-between; align-items:center;"><span style="font-size:15.5px; font-weight:600; color:var(--fg);">Security policy</span><span style="color:var(--muted)">↗</span></div><span style="color:var(--muted); font-size:13.5px;">Reporting, signed releases and disclosure.</span></a>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== CTA BAND ===================== -->
+  <section style="position:relative; overflow:hidden; border-top:1px solid var(--border); padding:clamp(72px,9vw,116px) clamp(18px,5vw,40px);">
+    <img src="assets/cta-band.webp" alt="" aria-hidden="true" loading="lazy" style="position:absolute; inset:0; width:100%; height:100%; object-fit:cover; object-position:center; z-index:0;">
+    <div aria-hidden="true" style="position:absolute; inset:0; z-index:1; pointer-events:none; background:linear-gradient(180deg, var(--bg) 0%, rgba(13,17,23,0.6) 32%, rgba(13,17,23,0.6) 68%, var(--bg) 100%);"></div>
+    <div style="position:relative; z-index:2; max-width:760px; margin:0 auto; text-align:center;">
+      <h2 style="font-size:clamp(26px,3.6vw,40px); letter-spacing:-0.02em; font-weight:700; margin:0 0 16px;">Make configuration reproducible.</h2>
+      <p style="color:var(--muted); font-size:clamp(15px,1.7vw,18px); margin:0 auto 30px; max-width:52ch;">Build from source in one command, or grab a signed binary. Source-available under BUSL-1.1; free for production use under the license grant.</p>
+      <div style="display:flex; flex-wrap:wrap; gap:12px; justify-content:center;">
+        <a href="#quickstart" style="display:inline-flex; align-items:center; gap:8px; text-decoration:none; padding:13px 26px; border-radius:9px; background:var(--accent); color:var(--on-accent); font-size:15.5px; font-weight:600;" style-hover="filter:brightness(1.06)">Get started →</a>
+        <a href="https://github.com/configflux/configflux" style="display:inline-flex; align-items:center; gap:8px; text-decoration:none; padding:13px 24px; border-radius:9px; border:1px solid var(--border2); background:color-mix(in srgb, var(--surface) 72%, transparent); color:var(--fg); font-size:15.5px; font-weight:600;" style-hover="border-color:var(--accent)">View on GitHub</a>
+      </div>
+    </div>
+  </section>
+
+  </main>
+
+  <!-- ===================== FOOTER ===================== -->
+  <footer style="border-top:1px solid var(--border); background:var(--bg2); padding:clamp(48px,6vw,72px) clamp(18px,5vw,40px) 40px;">
+    <div style="max-width:1180px; margin:0 auto; display:grid; grid-template-columns:repeat(auto-fit, minmax(240px,1fr)); gap:36px;">
+      <div style="max-width:34ch;">
+        <a href="#top" style="display:flex; align-items:center; gap:10px; text-decoration:none; color:var(--fg); margin-bottom:14px;">
+          <svg width="20" height="20" viewBox="0 0 22 22" aria-hidden="true" fill="none"><rect x="2" y="2" width="7" height="7" rx="1.5" style="fill:var(--accent)"/><rect x="13" y="2" width="7" height="7" rx="1.5" style="fill:var(--border2)"/><rect x="2" y="13" width="7" height="7" rx="1.5" style="fill:var(--border2)"/><rect x="13" y="13" width="7" height="7" rx="1.5" style="fill:var(--accent)"/></svg>
+          <span style="font-weight:700; font-size:16px;">Config<span style="color:var(--accent)">Flux</span></span>
+        </a>
+        <p style="margin:0 0 14px; color:var(--muted); font-size:14px;">A deterministic configuration compiler. The same inputs always produce the same bytes.</p>
+        <span style="display:inline-block; font-family:'IBM Plex Mono', monospace; font-size:11.5px; color:var(--muted); padding:4px 9px; border:1px solid var(--border2); border-radius:6px;">BUSL-1.1</span>
+      </div>
+
+      <div>
+        <div style="font-family:'IBM Plex Mono', monospace; font-size:11px; color:var(--dim); letter-spacing:0.08em; text-transform:uppercase; margin-bottom:14px;">Project</div>
+        <div style="display:flex; flex-direction:column; gap:10px;">
+          <a href="https://github.com/configflux/configflux" style="text-decoration:none; color:var(--muted); font-size:14px;" style-hover="color:var(--fg)">GitHub</a>
+          <a href="https://github.com/configflux/configflux/blob/main/CHANGELOG.md" style="text-decoration:none; color:var(--muted); font-size:14px;" style-hover="color:var(--fg)">Changelog</a>
+          <a href="https://github.com/configflux/configflux/blob/main/LICENSE" style="text-decoration:none; color:var(--muted); font-size:14px;" style-hover="color:var(--fg)">License — BUSL-1.1</a>
+        </div>
+      </div>
+
+      <div>
+        <div style="font-family:'IBM Plex Mono', monospace; font-size:11px; color:var(--dim); letter-spacing:0.08em; text-transform:uppercase; margin-bottom:14px;">Contact</div>
+        <div style="display:flex; flex-direction:column; gap:10px;">
+          <a href="mailto:security@configflux.dev" style="text-decoration:none; color:var(--muted); font-size:14px; font-family:'IBM Plex Mono', monospace;" style-hover="color:var(--fg)">security@configflux.dev</a>
+          <a href="mailto:hello@configflux.dev" style="text-decoration:none; color:var(--muted); font-size:14px; font-family:'IBM Plex Mono', monospace;" style-hover="color:var(--fg)">hello@configflux.dev</a>
+        </div>
+      </div>
+    </div>
+
+    <div style="max-width:1180px; margin:36px auto 0; padding-top:24px; border-top:1px solid var(--border); display:flex; flex-wrap:wrap; gap:8px; justify-content:space-between; align-items:center;">
+      <span style="color:var(--dim); font-size:13px;">© <span id="cf-year">2026</span> ConfigFlux contributors.</span>
+      <span style="font-family:'IBM Plex Mono', monospace; font-size:12px; color:var(--dim);">configflux.dev</span>
+    </div>
+  </footer>
+
+  <template id="__bundler_thumbnail">
+    <svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg"><rect width="100" height="100" fill="#0d1117"/><g transform="translate(30 30)"><rect x="0" y="0" width="15" height="15" rx="3" fill="#5b8cff"/><rect x="22" y="0" width="15" height="15" rx="3" fill="#2c374f"/><rect x="0" y="22" width="15" height="15" rx="3" fill="#2c374f"/><rect x="22" y="22" width="15" height="15" rx="3" fill="#5b8cff"/></g></svg>
+  </template>
+
+</div>
+
+<script src="assets/main.js" defer></script>
+</body>
+</html>

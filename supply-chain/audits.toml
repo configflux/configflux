@@ -1,0 +1,92 @@
+
+# cargo-vet audits file
+
+[[audits.anyhow]]
+criteria = "safe-to-deploy"
+version = "1.0.101"
+notes = "Reviewed in dep-audit-v0.3.0.md Section 4.1 #1. Verdict: KEEP. dtolnay tier-1 maintainer, de-facto error handling crate. 0 CVEs."
+
+[[audits.anyhow]]
+criteria = "safe-to-deploy"
+delta = "1.0.101 -> 1.0.103"
+notes = """
+Delta is the RUSTSEC-2026-0190 soundness fix (UB in Error::downcast_mut after
+Error::context). Reviewed diff: reworked mutable-reference construction in
+src/error.rs (the fix itself) plus backtrace cfg-attribute cleanup
+(any(std_backtrace, feature = "backtrace") -> feature = "std"). Net +1 unsafe,
+all in the fixed downcast path; the unsafe_op_in_unsafe_fn lint is retained and
+no new ambient capabilities are introduced. dtolnay tier-1 maintainer.
+"""
+
+[[audits.clap]]
+criteria = "safe-to-deploy"
+version = "4.5.58"
+notes = "Reviewed in dep-audit-v0.3.0.md Section 4.1 #2. Verdict: KEEP. Actively maintained by clap-rs org. 0 CVEs."
+
+[[audits.evalexpr]]
+criteria = "safe-to-deploy"
+version = "8.2.0"
+notes = "Reviewed in dep-audit-v0.3.0.md Section 4.1 #9. Verdict: PIN. Pinned 5 major versions behind (8.2 vs 13.1). Single maintainer. 0 CVEs. Replacement tracked in FU-4."
+
+[[audits.flate2]]
+criteria = "safe-to-deploy"
+version = "1.1.9"
+notes = "Reviewed in dep-audit-v0.3.0.md Section 4.1 #10. Verdict: KEEP. rust-lang org stewardship, stable 1.x API. 0 CVEs."
+
+[[audits.hex]]
+criteria = "safe-to-deploy"
+version = "0.4.3"
+notes = "Reviewed in dep-audit-v0.3.0.md Section 4.1 #3. Verdict: KEEP. Tiny surface area, stable for years. 0 CVEs."
+
+[[audits.nom-kconfig]]
+criteria = "safe-to-deploy"
+version = "0.7.0"
+notes = "Reviewed in dep-audit-v0.3.0.md Section 5.4 (Kconfig Importer). Verdict: ADD as the Rust-native Linux Kconfig importer for v0.3.0 benchmark fixtures. MIT licence (verified on Mcdostone/nom-kconfig v0.7.0 tag). No build.rs (verified). 0 CVEs (cargo-audit clean). Single-maintainer flag (AC-5) acknowledged: the dep audit mitigation is that nom-kconfig is confined to the benchmarks crate (publish=false), Kconfig fixtures only need to be generated once, and a failed import does not affect production code paths. Landed in benchmarks/Cargo.toml under configflux-vp3z."
+
+[[audits.quick-xml]]
+criteria = "safe-to-deploy"
+version = "0.40.1"
+notes = "Reviewed under configflux-uonp (SPLOT corpus + .splx parser for v0.3.0 release-gate workload). Verdict: ADD as the XML envelope tokeniser for the SPLX feature-model parser in tools/gen_splot_fixtures/. The text bodies of <feature_tree> and <constraints> use indented mini-DSLs (hand-parsed); quick-xml is responsible only for the outer <feature_model>/<meta>/<feature_tree>/<constraints> wrapping. MIT licence (single, not dual — verified on the tafia/quick-xml v0.40.1 Cargo.toml). No build.rs (verified — `gh api repos/tafia/quick-xml/contents/build.rs?ref=v0.40.1` returns 404). 0 CVEs (cargo-audit clean at the time of add). Required transitive surface: only memchr 2.1+ (already in workspace lockfile at memchr 2.8.0 via other deps — verified empirically pre-add; quick-xml introduces zero new transitive crates). Optional features `encoding`, `serde`, `async-tokio` are NOT enabled (default-features=false in benchmarks/Cargo.toml). Maintainer footprint: tafia plus multi-contributor commit history (not single-maintainer). MSRV rustc 1.79 — well below the workspace floor (rustc 1.86 via rules_rust 0.68.1). Note: the original configflux-uonp brief expected the latest at v0.36.x; the 0.40.x line is current as of 2026-05-24 and a v0.36 → v0.40 bump is the standard SemVer-minor advancement (quick-xml has historically taken breaking changes across minor lines, hence the 0.40 pin rather than open-ended `0.36`). Confined to benchmarks/ + tools/gen_splot_fixtures/, which has publish=false, so the maintainer-risk surface does not reach downstream consumers."
+
+[[audits.quick-xml]]
+criteria = "safe-to-deploy"
+delta = "0.40.1 -> 0.41.0"
+notes = """
+Delta is the fix for the quadratic attribute duplicate-check DoS (upstream
+tafia/quick-xml#969; advisory id still unassigned in the RustSec DB snapshot
+that failed CI). Reviewed compare v0.40.1...v0.41.0 (4 commits, 10 files):
+src/events/attributes.rs +143 (O(1) hash pre-filter above a small-attribute
+threshold; AttrError::Duplicated positions unchanged), src/name.rs +113 and
+ns_reader.rs +10 (namespace-resolution support for the same check), a repro
+bench (benches/issue971.rs), Changelog and version metadata. Zero unsafe in
+the delta; no new dependencies (required transitive surface still only
+memchr 2.1+); no build.rs on the v0.41.0 tag (gh api 404); MIT single
+licence and MSRV 1.79 re-verified on the tag. Consumer surface unchanged:
+benchmarks/ + tools/gen_splot_fixtures (publish=false), default-features
+off. Bumped under configflux-fxy2.
+"""
+
+[[audits.rusqlite]]
+criteria = "safe-to-deploy"
+version = "0.39.0"
+notes = "Reviewed in dep-audit-v0.3.0.md Section 4.1 #4. Verdict: KEEP. Multi-contributor. 0 CVEs. Upgraded from 0.37 in configflux-mwa9."
+
+[[audits.serde]]
+criteria = "safe-to-deploy"
+version = "1.0.228"
+notes = "Reviewed in dep-audit-v0.3.0.md Section 4.1 #5. Verdict: KEEP. Ecosystem cornerstone, dtolnay primary maintainer. 0 CVEs."
+
+[[audits.serde_json]]
+criteria = "safe-to-deploy"
+version = "1.0.149"
+notes = "Reviewed in dep-audit-v0.3.0.md Section 4.1 #6. Verdict: KEEP. dtolnay primary maintainer. 0 CVEs."
+
+[[audits.sha2]]
+criteria = "safe-to-deploy"
+version = "0.10.9"
+notes = "Reviewed in dep-audit-v0.3.0.md Section 4.1 #7. Verdict: PIN at 0.10.x. RustCrypto working group. 0 CVEs. Version ceiling tracked in FU-5."
+
+[[audits.toml]]
+criteria = "safe-to-deploy"
+version = "0.9.12+spec-1.1.0"
+notes = "Reviewed in dep-audit-v0.3.0.md Section 4.1 #8. Verdict: PIN at 0.9.x. Multi-contributor org. 0 CVEs. Version ceiling tracked in FU-6."

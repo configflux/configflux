@@ -1,0 +1,101 @@
+{
+  "schema_version": 2,
+  "bom_version": 1,
+  "bom_hash": "__DYNAMIC_BOM_HASH__",
+  "hash_algo": "sha256",
+  "canonicalization_version": 1,
+  "model_hash": "__DYNAMIC_MODEL_HASH__",
+  "resolve_hash": "__DYNAMIC_RESOLVE_HASH__",
+  "selection_state_hash": "__DYNAMIC_SELECTION_STATE_HASH__",
+  "scope_root": "turbine_controller",
+  "generated_at": "1970-01-01T00:00:00Z",
+  "generator": {
+    "name": "configflux-sbom",
+    "version": "0.1.0"
+  },
+  "context_tags": {
+    "blade_class": "onshore",
+    "gearbox_type": "direct_drive",
+    "grid_code": "iec_61400",
+    "sensor_pack": "core"
+  },
+  "choices": {},
+  "components": [
+    {
+      "component_id": "grid_interface",
+      "type": "module",
+      "dependency_ids": []
+    },
+    {
+      "component_id": "sensor_stack",
+      "type": "module",
+      "dependency_ids": []
+    },
+    {
+      "component_id": "turbine_controller",
+      "type": "controller",
+      "dependency_ids": [
+        "grid_interface",
+        "sensor_stack"
+      ]
+    }
+  ],
+  "parameters": [
+    {
+      "path": "component.turbine_controller.param.control_driver",
+      "component_id": "turbine_controller",
+      "param_key": "control_driver",
+      "type": "artifact",
+      "value": "direct_drive_control_driver",
+      "safety": "q_m",
+      "lifecycle": "construction",
+      "binding_phase": "early",
+      "access": "developer",
+      "doc": "Selected control driver artifact"
+    },
+    {
+      "path": "component.turbine_controller.param.grid_profile",
+      "component_id": "turbine_controller",
+      "param_key": "grid_profile",
+      "type": "string",
+      "value": "iec_61400",
+      "safety": "q_m",
+      "lifecycle": "startup",
+      "binding_phase": "late",
+      "access": "integrator",
+      "doc": "Grid code commissioning profile"
+    },
+    {
+      "path": "component.turbine_controller.param.pitch_trim_gain",
+      "component_id": "turbine_controller",
+      "param_key": "pitch_trim_gain",
+      "type": "float",
+      "value": 0.08,
+      "unit": "ratio",
+      "safety": "q_m",
+      "lifecycle": "runtime",
+      "binding_phase": "runtime",
+      "access": "technician",
+      "doc": "Runtime pitch trim gain"
+    }
+  ],
+  "artifacts": [
+    {
+      "artifact_id": "direct_drive_control_driver",
+      "bound_paths": [
+        "component.turbine_controller.param.control_driver"
+      ],
+      "name": "direct_drive_control_driver",
+      "version": "3.4.1",
+      "hash": "sha256-direct-drive-control-driver",
+      "source": "artifact://wind/direct_drive_control_driver.so",
+      "target": "/opt/configflux/wind/direct_drive_control_driver.so",
+      "doc": "Control driver for direct-drive turbines"
+    }
+  ],
+  "stats": {
+    "component_count": 3,
+    "parameter_count": 3,
+    "artifact_count": 1
+  }
+}

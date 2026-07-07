@@ -1,0 +1,15 @@
+profile_id = "large"
+scenario_id = "s4_mobile_robot"
+
+[selection_domains]
+drive_type = ["differential", "mecanum"]
+localization_stack = ["visual", "lidar"]
+battery_pack = ["standard", "high_density", "long_life"]
+payload_module = ["light_load", "heavy_lift"]
+
+[default_context]
+drive_type = "mecanum"
+localization_stack = "lidar"
+battery_pack = "high_density"
+payload_module = "heavy_lift"
+region = "us"

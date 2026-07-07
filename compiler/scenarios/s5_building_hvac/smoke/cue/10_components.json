@@ -1,0 +1,99 @@
+{
+    "package": "s5_building_hvac",
+    "version": "1.0.0",
+    "artifacts": {
+        "office_standard_controller": {
+            "name": "office_standard_controller",
+            "version": "1.2.0",
+            "hash": "sha256-office-standard-controller",
+            "source": "artifact://hvac/office_standard_controller.so",
+            "target": "/opt/configflux/hvac/office_standard_controller.so",
+            "doc": "Standard office HVAC controller package"
+        },
+        "hospital_hepa_us_controller": {
+            "name": "hospital_hepa_us_controller",
+            "version": "2.0.0",
+            "hash": "sha256-hospital-hepa-us-controller",
+            "source": "artifact://hvac/hospital_hepa_us_controller.so",
+            "target": "/opt/configflux/hvac/hospital_hepa_us_controller.so",
+            "doc": "US hospital HVAC controller package for HEPA isolation zones"
+        },
+        "hospital_hepa_eu_controller": {
+            "name": "hospital_hepa_eu_controller",
+            "version": "2.1.0",
+            "hash": "sha256-hospital-hepa-eu-controller",
+            "source": "artifact://hvac/hospital_hepa_eu_controller.so",
+            "target": "/opt/configflux/hvac/hospital_hepa_eu_controller.so",
+            "doc": "EU hospital HVAC controller package for HEPA isolation zones"
+        }
+    },
+    "components": {
+        "power_distribution": {
+            "type": "module"
+        },
+        "air_handler": {
+            "type": "module"
+        },
+        "pressure_monitor": {
+            "type": "module"
+        },
+        "climate_controller": {
+            "type": "controller",
+            "depends_on": [
+                "power_distribution",
+                "air_handler",
+                "pressure_monitor"
+            ],
+            "params": {
+                "ventilation_profile": {
+                    "inherits": "ventilation_profile",
+                    "type": "string",
+                    "doc": "Commissioning profile selected for the building HVAC controller",
+                    "value": "office_comfort_vav",
+                    "lifecycle": "startup",
+                    "access": "integrator",
+                    "req_id": "req_s5_001",
+                    "overrides": [
+                        {
+                            "condition": "occupancy_class == 'hospital' && filtration_grade == 'hepa'",
+                            "value": "acute_care_isolation"
+                        }
+                    ]
+                },
+                "controller_package": {
+                    "inherits": "controller_package",
+                    "type": "artifact",
+                    "doc": "Selected HVAC controller package artifact",
+                    "value": "office_standard_controller",
+                    "lifecycle": "construction",
+                    "access": "developer",
+                    "req_id": "req_s5_002",
+                    "overrides": [
+                        {
+                            "condition": "occupancy_class == 'hospital' && filtration_grade == 'hepa' && region == 'us'",
+                            "value": "hospital_hepa_us_controller"
+                        },
+                        {
+                            "condition": "occupancy_class == 'hospital' && filtration_grade == 'hepa' && region == 'eu'",
+                            "value": "hospital_hepa_eu_controller"
+                        }
+                    ]
+                },
+                "airflow_trim_gain": {
+                    "inherits": "airflow_trim_gain",
+                    "type": "float",
+                    "unit": "ratio",
+                    "doc": "Runtime airflow trim gain for balancing after commissioning",
+                    "value": 0.07,
+                    "lifecycle": "runtime",
+                    "access": "technician",
+                    "req_id": "req_s5_003"
+                }
+            }
+        },
+        "isolation_monitor": {
+            "type": "module",
+            "condition": "occupancy_class == 'hospital' && filtration_grade == 'hepa'"
+        }
+    }
+}

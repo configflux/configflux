@@ -1,0 +1,3 @@
+string runtime_snapshot_json
+---
+configflux_ros2_sdk/RuntimeControlResult result

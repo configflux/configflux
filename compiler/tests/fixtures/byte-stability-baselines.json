@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "scenarios": {
+    "s1-medium": {
+      "scope": "component:thermal_control",
+      "model_hash": "7d89e7201c6901d42ab13fdd24f257f55b59610d7a66c17df6bf83a52859cd9d",
+      "selection_state_hash": "a3e276be87c9783b8b7f6840750e3315d56db63cb0073777cf2771c99eda04cd",
+      "resolve_hash": "dfc18cba424d0959e939746e902225b5d5cf237734bbc6fb8b849d79684a8b26",
+      "bom_hash": "1fe7eb9546396d5bf61e09f05ccdd9367d5b5f6bd76ee66c9430fe73082b042d"
+    },
+    "s1-smoke": {
+      "scope": "component:thermal_control",
+      "model_hash": "bb95722ca6375a1485583d6891b4826030560c6306af70a3c38e3fd3770dcae6",
+      "selection_state_hash": "6813c8149ed8848aaaf2a69e87a752787f2d06e9b59ca8e496c35a9225585049",
+      "resolve_hash": "5045bab39e585bfce4af5de73f1a3a19ab8e18c72ff768b3d1807043f2b4bb1e",
+      "bom_hash": "24c7a8ba6a60bb82d53c85d1f234151319079147771e4b6e96d874d11e62ac2d"
+    },
+    "s2-medium": {
+      "scope": "component:turbine_controller",
+      "model_hash": "4b8c8ed7f068f4457a90b06b922108cea2d3a3b08657f1f21a34fab6c0a16fa9",
+      "selection_state_hash": "d4ed4063f5c52f443b4a974441d17b308f5f725df153eef823dabed346e311a5",
+      "resolve_hash": "c7e5ac79d7d75f997df60d8d49915dc18cb052efcb328fc33175d556162083fd",
+      "bom_hash": "d85f1da01d13ab6bd84d0ce92a6da3cd39c6d4c49e4f1801eac6df78f424bc91"
+    },
+    "s2-smoke": {
+      "scope": "component:turbine_controller",
+      "model_hash": "08a6a600acdd7b466fe5e5987b36a56b47e667f06458c8e43b9318802374533b",
+      "selection_state_hash": "fb2df981b5ec677bdfa3d23ced953c8cdd04d0879296fa03cc832f5dad1d5ad7",
+      "resolve_hash": "d631910ba480f625147c6a6606d90d0cad3bd9987392b8b5cc0f6c3ea426c286",
+      "bom_hash": "846e341ea250f3962d6dde96a338128bbf504d3cb5117aae3491509d04facd16"
+    },
+    "s3-large": {
+      "scope": "component:large_cell_orchestrator",
+      "model_hash": "b863b552adacec38f96dc992bb9a009b249d55814ffe27e4dc40b48406583a34",
+      "selection_state_hash": "48cae1a697d9fa8a98009e560459e54828aba6f5a0f367d3ab57baad9a07de70",
+      "resolve_hash": "ce404714e7376c6d897a66794ff5c7e07aa1d6f0f99b41c6a6c1ad551de29b11",
+      "bom_hash": "2f1a0c16eb8b6a771f76fb71bb0a23ecc4f72759b5df1c6dcbb9911df4ab0047"
+    },
+    "s3-medium": {
+      "scope": "component:swift_ring_standard",
+      "model_hash": "8086e783c58e8b32e7fd7357af718566e854f79856c9f920756d37fcfb57d02d",
+      "selection_state_hash": "ba8ff4f81f32905ac7889e57d291fcd9cf92c28fb066ee922654c1400b3c6974",
+      "resolve_hash": "0ea6ade053551eaece585a2b59d024227b1d8e0e5aca5ba1ba206acf4d2265a2",
+      "bom_hash": "5368496e556be480ef83b2d96cfcd9768f4809ea5ff5d6e059c7d98551279a7f"
+    },
+    "s3-smoke": {
+      "scope": "component:swift_ring_standard",
+      "model_hash": "7df4a9b46dc32dffa1549c183d8979b055a0b8d28cee173bec0c7e399c80fe8a",
+      "selection_state_hash": "34aaafead69a25503f8016b8841e8f0120a8942f32ec669efaa5a51ce1d2ee29",
+      "resolve_hash": "7635693bc66f71715f7f49af988c8298655f42132584df4d4bcdc98194838ca9",
+      "bom_hash": "5d06f63b16b9a01878d6ca664f7c91d201689984b2acc42a7220a13a864f1457"
+    },
+    "s4-large": {
+      "scope": "component:robot_platform",
+      "model_hash": "da9302cd194979cfc4ce01c1c4d4d4f30dad9da2b6018ba85ee1a9bc2b84243e",
+      "selection_state_hash": "ac648182a3baed8c6b9ee3a6e437bbfbbe994350c25224db5b2ff528bb3471b4",
+      "resolve_hash": "98f34a6eec12692392be8f021a8822e97bde1bebc884d0cf8732f8a7ca858d07",
+      "bom_hash": "aa58c4ca777582b7b3cd499f4969d841eb3a0c1d66f19e0379cf4feb5aacb3e5"
+    },
+    "s4-medium": {
+      "scope": "component:robot_platform",
+      "model_hash": "02a84ab32bdb5c20419a8c0ad67bd00028104fb5aea8920a59cb28e2c29abb29",
+      "selection_state_hash": "b8764056320044d66021fd8cd0b232bae5dedfef3b70f423f2e8db50087765f1",
+      "resolve_hash": "c2429a4c80c64ead3cbbe00ca3ad45769bd1d21c90cb62162a5e09192e56d705",
+      "bom_hash": "f1105e8dfcaa9d9cb0971e4f0ad6b2083ce94a0713bb7e04834fd3e42bf9e811"
+    },
+    "s4-smoke": {
+      "scope": "component:robot_platform",
+      "model_hash": "c28d89071de14fe9162c5e8bf573daa1f684305ddafef78bbd0129210ee49e41",
+      "selection_state_hash": "2d0858c25660e6703236b1952eea1c4ef17bf8f772636dad8ff5a7899d27137e",
+      "resolve_hash": "f364200ac5993b1bcf505a21dd2b7bf71e9cc3e8a8d11b8e6e4cd3d13c5cde07",
+      "bom_hash": "9aecf3fea0e80d13e6e9e6b1a5cf2dec83754b6238029e858e2c05b47960b3f8"
+    },
+    "s5-smoke": {
+      "scope": "component:climate_controller",
+      "model_hash": "ef0291947531d3f247431a721a8b82dac47f85f765d38e971ac9648478e93dae",
+      "selection_state_hash": "2008743773e522465b441cd0ad90bb0101d0ce87916510c68025f8993aa7d363",
+      "resolve_hash": "a51c5f4f3d06e8027e7d436ac0fa1f859d424fdde478d06bf2a0cb35db5bcb2c",
+      "bom_hash": "8fbc68ec1ef6f271421d5a0c7ec485b942ee926762b4122defbdbf61a1bb8fb6"
+    }
+  }
+}

@@ -1,0 +1,16 @@
+[package]
+name = "interpreter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# The interpreter no longer depends on `solver` directly: the selection
+# composition moved to the shared `session_compose` crate (configflux-kkhc /
+# ADR-0003 §2 amendment), which owns the sole `compiler` + `solver` edge.
+[dependencies]
+clap = { version = "4.5.53", features = ["derive"] }
+compiler = { path = "../compiler" }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.140"
+session_compose = { path = "../session_compose" }

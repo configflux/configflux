@@ -1,0 +1,163 @@
+{
+    "package": "compose_fleet",
+    "version": "1.0.0",
+    "components": {
+        "platform": {
+            "type": "module",
+            "params": {
+                "instance_id": {
+                    "inherits": "instance_id",
+                    "type": "string",
+                    "doc": "Stable identifier for one running instance in a stack",
+                    "value": "instance-0001",
+                    "lifecycle": "construction",
+                    "access": "developer"
+                },
+                "log_level": {
+                    "inherits": "log_level",
+                    "type": "string",
+                    "doc": "Runtime log verbosity (info, debug, trace)",
+                    "value": "info",
+                    "lifecycle": "runtime",
+                    "access": "technician",
+                    "overrides": [
+                        {
+                            "condition": "log_profile == 'quiet'",
+                            "value": "warn"
+                        },
+                        {
+                            "condition": "log_profile == 'verbose'",
+                            "value": "debug"
+                        }
+                    ]
+                }
+            }
+        },
+        "vision_service": {
+            "type": "controller",
+            "depends_on": [
+                "platform"
+            ],
+            "params": {
+                "broker_endpoint": {
+                    "inherits": "broker_endpoint",
+                    "type": "string",
+                    "doc": "Message-broker endpoint the service connects to at startup",
+                    "value": "tcp://unset.invalid:1883",
+                    "lifecycle": "startup",
+                    "access": "integrator",
+                    "overrides": [
+                        {
+                            "condition": "deploy_env == 'robot'",
+                            "value": "tcp://broker.fleet.local:1883"
+                        },
+                        {
+                            "condition": "deploy_env == 'local'",
+                            "value": "tcp://127.0.0.1:1883"
+                        }
+                    ]
+                },
+                "tick_interval": {
+                    "inherits": "tick_interval_ms",
+                    "type": "integer",
+                    "unit": "ms",
+                    "doc": "Service work-loop interval in milliseconds",
+                    "value": 0,
+                    "lifecycle": "startup",
+                    "access": "integrator",
+                    "overrides": [
+                        {
+                            "condition": "deploy_env == 'robot'",
+                            "value": 33
+                        },
+                        {
+                            "condition": "deploy_env == 'local'",
+                            "value": 200
+                        }
+                    ]
+                },
+                "log_level": {
+                    "inherits": "log_level",
+                    "type": "string",
+                    "doc": "Runtime log verbosity (info, debug, trace)",
+                    "value": "info",
+                    "lifecycle": "runtime",
+                    "access": "technician",
+                    "overrides": [
+                        {
+                            "condition": "log_profile == 'quiet'",
+                            "value": "info"
+                        },
+                        {
+                            "condition": "log_profile == 'verbose'",
+                            "value": "trace"
+                        }
+                    ]
+                }
+            }
+        },
+        "telemetry_service": {
+            "type": "controller",
+            "depends_on": [
+                "platform"
+            ],
+            "params": {
+                "broker_endpoint": {
+                    "inherits": "broker_endpoint",
+                    "type": "string",
+                    "doc": "Message-broker endpoint the service connects to at startup",
+                    "value": "tcp://unset.invalid:1883",
+                    "lifecycle": "startup",
+                    "access": "integrator",
+                    "overrides": [
+                        {
+                            "condition": "deploy_env == 'robot'",
+                            "value": "tcp://broker.fleet.local:1883"
+                        },
+                        {
+                            "condition": "deploy_env == 'local'",
+                            "value": "tcp://127.0.0.1:1883"
+                        }
+                    ]
+                },
+                "tick_interval": {
+                    "inherits": "tick_interval_ms",
+                    "type": "integer",
+                    "unit": "ms",
+                    "doc": "Service work-loop interval in milliseconds",
+                    "value": 0,
+                    "lifecycle": "startup",
+                    "access": "integrator",
+                    "overrides": [
+                        {
+                            "condition": "deploy_env == 'robot'",
+                            "value": 1000
+                        },
+                        {
+                            "condition": "deploy_env == 'local'",
+                            "value": 5000
+                        }
+                    ]
+                },
+                "log_level": {
+                    "inherits": "log_level",
+                    "type": "string",
+                    "doc": "Runtime log verbosity (info, debug, trace)",
+                    "value": "info",
+                    "lifecycle": "runtime",
+                    "access": "technician",
+                    "overrides": [
+                        {
+                            "condition": "log_profile == 'quiet'",
+                            "value": "info"
+                        },
+                        {
+                            "condition": "log_profile == 'verbose'",
+                            "value": "debug"
+                        }
+                    ]
+                }
+            }
+        }
+    }
+}

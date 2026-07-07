@@ -1,0 +1,40 @@
+{
+  "package": "full_surface",
+  "version": "1.0.0",
+  "definitions": {
+    "d_int":   {"type": "integer", "safety": "sil1", "access": "supervisor", "lifecycle": "construction", "unit": "count", "req_id": "REQ-1", "doc": "int + sil1 + supervisor + limits", "limits": {"min": 0, "max": 100}},
+    "d_bool":  {"type": "boolean", "safety": "sil3", "access": "super_user", "lifecycle": "startup"},
+    "d_float": {"type": "float", "safety": "sil4", "lifecycle": "runtime", "unit": "ratio", "limits": {"min": 0.0, "max": 10.0}},
+    "d_str":   {"type": "string", "safety": "q_m", "access": "developer", "limits": {"min_len": 1, "max_len": 64}},
+    "d_sil2":  {"safety": "sil2", "access": "integrator"},
+    "d_tech":  {"access": "technician"}
+  },
+  "components": {
+    "comp_a": {
+      "type": "controller",
+      "condition": "region == 'us'",
+      "depends_on": ["comp_b"],
+      "params": {
+        "p1": {
+          "inherits": "d_int",
+          "value": 7,
+          "overrides": [
+            {"condition": "tier == 'a'", "value": 8,
+             "overrides": [
+               {"condition": "region == 'eu'", "value": 9}
+             ]}
+          ]
+        },
+        "p_int": {"inherits": "d_int", "value": 42},
+        "p_bool": {"inherits": "d_bool", "value": true},
+        "p_bool_lit": {"type": "boolean", "value": false},
+        "p_float": {"inherits": "d_float", "value": 1.5},
+        "p_str": {"inherits": "d_str", "value": "hello"}
+      }
+    },
+    "comp_b": {"type": "module"}
+  },
+  "artifacts": {
+    "art_x": {"name": "art_x", "version": "3.2.0", "hash": "sha256-x", "source": "artifact://x.so", "target": "/opt/x.so", "doc": "driver"}
+  }
+}

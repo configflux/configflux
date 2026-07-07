@@ -1,0 +1,118 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "runtime_parameter_path",
+    srcs = ["src/configflux_ros2_sdk/src/runtime_parameter_path.cc"],
+    hdrs = ["src/configflux_ros2_sdk/include/configflux/ros2/runtime_parameter_path.h"],
+    copts = ["-std=c++20"],
+    includes = ["src/configflux_ros2_sdk/include"],
+)
+
+cc_library(
+    name = "runtime_parameter_adapter",
+    srcs = ["src/configflux_ros2_sdk/src/runtime_parameter_adapter.cc"],
+    hdrs = ["src/configflux_ros2_sdk/include/configflux/ros2/runtime_parameter_adapter.h"],
+    copts = ["-std=c++20"],
+    includes = ["src/configflux_ros2_sdk/include"],
+    deps = [
+        ":runtime_parameter_path",
+        "//sdk/cpp:runtime_sdk_core",
+    ],
+)
+
+cc_library(
+    name = "runtime_control_adapter",
+    srcs = ["src/configflux_ros2_sdk/src/runtime_control_adapter.cc"],
+    hdrs = ["src/configflux_ros2_sdk/include/configflux/ros2/runtime_control_adapter.h"],
+    copts = ["-std=c++20"],
+    includes = ["src/configflux_ros2_sdk/include"],
+    deps = [
+        ":runtime_parameter_path",
+        "//sdk/cpp:runtime_sdk_core",
+    ],
+)
+
+cc_library(
+    name = "runtime_diagnostics_bridge",
+    srcs = ["src/configflux_ros2_sdk/src/runtime_diagnostics_bridge.cc"],
+    hdrs = ["src/configflux_ros2_sdk/include/configflux/ros2/runtime_diagnostics_bridge.h"],
+    copts = ["-std=c++20"],
+    includes = ["src/configflux_ros2_sdk/include"],
+    deps = ["//sdk/cpp:runtime_sdk_core"],
+)
+
+cc_test(
+    name = "runtime_parameter_path_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["tests/runtime_parameter_path_test.cc"],
+    copts = ["-std=c++20"],
+    tags = [
+        "ci",
+        "owner:sdk",
+        "ros2",
+        "sdk",
+    ],
+    deps = [":runtime_parameter_path"],
+)
+
+cc_test(
+    name = "runtime_parameter_adapter_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["tests/runtime_parameter_adapter_test.cc"],
+    copts = ["-std=c++20"],
+    tags = [
+        "ci",
+        "owner:sdk",
+        "ros2",
+        "sdk",
+    ],
+    deps = [":runtime_parameter_adapter"],
+)
+
+cc_test(
+    name = "runtime_control_adapter_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["tests/runtime_control_adapter_test.cc"],
+    copts = ["-std=c++20"],
+    tags = [
+        "ci",
+        "owner:sdk",
+        "ros2",
+        "sdk",
+    ],
+    deps = [":runtime_control_adapter"],
+)
+
+cc_test(
+    name = "runtime_diagnostics_bridge_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["tests/runtime_diagnostics_bridge_test.cc"],
+    copts = ["-std=c++20"],
+    tags = [
+        "ci",
+        "owner:sdk",
+        "ros2",
+        "sdk",
+    ],
+    deps = [":runtime_diagnostics_bridge"],
+)
+
+filegroup(
+    name = "docs",
+    srcs = glob(["**/*.md"]),
+)
+
+filegroup(
+    name = "all_files",
+    srcs = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ),
+)

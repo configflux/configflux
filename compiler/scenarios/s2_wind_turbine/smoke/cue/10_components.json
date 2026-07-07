@@ -1,0 +1,76 @@
+{
+    "package": "s2_wind_turbine",
+    "version": "1.0.0",
+    "artifacts": {
+        "async_control_driver": {
+            "name": "async_control_driver",
+            "version": "3.2.0",
+            "hash": "sha256-async-control-driver",
+            "source": "artifact://wind/async_control_driver.so",
+            "target": "/opt/configflux/wind/async_control_driver.so",
+            "doc": "Asynchronous control driver for geared turbines"
+        },
+        "direct_drive_control_driver": {
+            "name": "direct_drive_control_driver",
+            "version": "3.4.1",
+            "hash": "sha256-direct-drive-control-driver",
+            "source": "artifact://wind/direct_drive_control_driver.so",
+            "target": "/opt/configflux/wind/direct_drive_control_driver.so",
+            "doc": "Control driver for direct-drive turbines"
+        }
+    },
+    "components": {
+        "grid_interface": {
+            "type": "module"
+        },
+        "sensor_stack": {
+            "type": "module"
+        },
+        "turbine_controller": {
+            "type": "controller",
+            "depends_on": [
+                "grid_interface",
+                "sensor_stack"
+            ],
+            "params": {
+                "grid_profile": {
+                    "inherits": "grid_profile",
+                    "type": "string",
+                    "doc": "Grid code commissioning profile",
+                    "value": "ieee_1547",
+                    "lifecycle": "startup",
+                    "access": "integrator",
+                    "overrides": [
+                        {
+                            "condition": "grid_code == 'iec_61400'",
+                            "value": "iec_61400"
+                        }
+                    ]
+                },
+                "control_driver": {
+                    "inherits": "control_driver_slot",
+                    "type": "artifact",
+                    "doc": "Selected control driver artifact",
+                    "value": "async_control_driver",
+                    "lifecycle": "construction",
+                    "access": "developer",
+                    "overrides": [
+                        {
+                            "condition": "gearbox_type == 'direct_drive'",
+                            "value": "direct_drive_control_driver"
+                        }
+                    ]
+                },
+                "pitch_trim_gain": {
+                    "inherits": "pitch_trim_gain",
+                    "type": "float",
+                    "unit": "ratio",
+                    "doc": "Runtime pitch trim gain",
+                    "value": 0.08,
+                    "lifecycle": "runtime",
+                    "access": "technician"
+                }
+            }
+        }
+    }
+}

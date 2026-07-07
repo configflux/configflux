@@ -1,0 +1,10 @@
+facet cooling_brand [open]
+  aeroflux
+  hydra
+facet cooling_model [open]
+  a9
+  x200
+facet pump_type [open]
+  dual
+facet region [open]
+  eu

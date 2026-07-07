@@ -1,0 +1,39 @@
+# ===========================
+# 1. Version Control
+# ===========================
+.git
+.gitignore
+
+# ===========================
+# 2. Bazel Artifacts (CRITICAL)
+# ===========================
+# Bazel creates symlinks in the root workspace. 
+# Ignoring these prevents massive build contexts and symlink loops.
+bazel-*
+
+# User-specific local overrides
+.bazelrc.local
+
+# Local disk cache if located in project root
+bazel-disk-cache
+
+# ===========================
+# 3. Rust Artifacts
+# ===========================
+# Ignore local Cargo build artifacts to ensure the container builds from scratch
+target/
+
+# ===========================
+# 4. IDE & Editor Settings
+# ===========================
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ===========================
+# 5. Devcontainer
+# ===========================
+# We don't need the definition inside the image build context usually
+.devcontainer/

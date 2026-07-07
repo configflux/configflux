@@ -1,0 +1,143 @@
+{
+    "package": "s3_automation_cell",
+    "version": "1.0.0",
+    "artifacts": {
+        "swift_ring_driver": {
+            "name": "swift_ring_driver",
+            "version": "1.0.0",
+            "hash": "sha256-swift-ring-driver",
+            "source": "artifact://automation/swift_ring_driver.so",
+            "target": "/opt/configflux/drivers/swift_ring_driver.so",
+            "doc": "Driver for swiftmove + opticore ring topology"
+        },
+        "swift_ring_safety_driver": {
+            "name": "swift_ring_safety_driver",
+            "version": "1.0.0",
+            "hash": "sha256-swift-ring-safety-driver",
+            "source": "artifact://automation/swift_ring_safety_driver.so",
+            "target": "/opt/configflux/drivers/swift_ring_safety_driver.so",
+            "doc": "Safety-enhanced driver for swiftmove ring topology"
+        },
+        "belt_star_driver": {
+            "name": "belt_star_driver",
+            "version": "2.1.0",
+            "hash": "sha256-belt-star-driver",
+            "source": "artifact://automation/belt_star_driver.so",
+            "target": "/opt/configflux/drivers/belt_star_driver.so",
+            "doc": "Driver for beltmax + camplus star topology"
+        },
+        "belt_star_safety_driver": {
+            "name": "belt_star_safety_driver",
+            "version": "2.1.0",
+            "hash": "sha256-belt-star-safety-driver",
+            "source": "artifact://automation/belt_star_safety_driver.so",
+            "target": "/opt/configflux/drivers/belt_star_safety_driver.so",
+            "doc": "Safety-enhanced driver for beltmax star topology"
+        }
+    },
+    "components": {
+        "cell_root": {
+            "type": "cell"
+        },
+        "swift_ring_standard": {
+            "type": "module",
+            "condition": "conveyor_brand == 'swiftmove' && vision_stack == 'opticore' && safety_mode == 'pl_d' && network_topology == 'ring'",
+            "depends_on": [
+                "cell_root"
+            ],
+            "params": {
+                "profile": {
+                    "inherits": "module_profile",
+                    "type": "string",
+                    "doc": "Automation module profile selected by constrained facets",
+                    "value": "swift_ring_standard",
+                    "lifecycle": "startup",
+                    "access": "integrator"
+                },
+                "driver": {
+                    "inherits": "driver_slot",
+                    "type": "artifact",
+                    "doc": "Driver artifact selected for the automation cell path",
+                    "value": "swift_ring_driver",
+                    "lifecycle": "construction",
+                    "access": "developer"
+                }
+            }
+        },
+        "swift_ring_high_safety": {
+            "type": "module",
+            "condition": "conveyor_brand == 'swiftmove' && vision_stack == 'opticore' && safety_mode == 'pl_e' && network_topology == 'ring'",
+            "depends_on": [
+                "cell_root"
+            ],
+            "params": {
+                "profile": {
+                    "inherits": "module_profile",
+                    "type": "string",
+                    "doc": "Automation module profile selected by constrained facets",
+                    "value": "swift_ring_high_safety",
+                    "lifecycle": "startup",
+                    "access": "integrator"
+                },
+                "driver": {
+                    "inherits": "driver_slot",
+                    "type": "artifact",
+                    "doc": "Driver artifact selected for the automation cell path",
+                    "value": "swift_ring_safety_driver",
+                    "lifecycle": "construction",
+                    "access": "developer"
+                }
+            }
+        },
+        "belt_star_standard": {
+            "type": "module",
+            "condition": "conveyor_brand == 'beltmax' && vision_stack == 'camplus' && safety_mode == 'pl_d' && network_topology == 'star'",
+            "depends_on": [
+                "cell_root"
+            ],
+            "params": {
+                "profile": {
+                    "inherits": "module_profile",
+                    "type": "string",
+                    "doc": "Automation module profile selected by constrained facets",
+                    "value": "belt_star_standard",
+                    "lifecycle": "startup",
+                    "access": "integrator"
+                },
+                "driver": {
+                    "inherits": "driver_slot",
+                    "type": "artifact",
+                    "doc": "Driver artifact selected for the automation cell path",
+                    "value": "belt_star_driver",
+                    "lifecycle": "construction",
+                    "access": "developer"
+                }
+            }
+        },
+        "belt_star_high_safety": {
+            "type": "module",
+            "condition": "conveyor_brand == 'beltmax' && vision_stack == 'camplus' && safety_mode == 'pl_e' && network_topology == 'star'",
+            "depends_on": [
+                "cell_root"
+            ],
+            "params": {
+                "profile": {
+                    "inherits": "module_profile",
+                    "type": "string",
+                    "doc": "Automation module profile selected by constrained facets",
+                    "value": "belt_star_high_safety",
+                    "lifecycle": "startup",
+                    "access": "integrator"
+                },
+                "driver": {
+                    "inherits": "driver_slot",
+                    "type": "artifact",
+                    "doc": "Driver artifact selected for the automation cell path",
+                    "value": "belt_star_safety_driver",
+                    "lifecycle": "construction",
+                    "access": "developer"
+                }
+            }
+        }
+    }
+}

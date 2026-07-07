@@ -1,0 +1,55 @@
+# cudd-sys (configflux fork)
+#
+# In-tree fork of upstream cudd-sys 1.1.2-alpha.2
+# (https://crates.io/crates/cudd-sys, CC0-1.0).
+#
+# Per ADR-0004 §3 second-pass amendment (2026-05-09, configflux-7hn2):
+#   - Relicensed MIT (CC0-1.0 is a public-domain dedication and
+#     explicitly permits relicensing). The MIT licence clears
+#     `cargo deny check` via the existing `[licenses] allow` entry
+#     (`deny.toml` line 53) — no allow-list change required.
+#   - Under Bazel, the vendored CUDD 3.0.0 C source at
+#     //third_party/cudd/ is built by the hand-authored Bazel
+#     `cc_library` target `//third_party/cudd:cudd` and linked into
+#     `solver/` via that crate's `rust_library.deps`. There is no
+#     autotools step, no `http_archive`, no network fetch at build
+#     time. Bazel never executes `build.rs` (the `rust_library` srcs
+#     list does not include it).
+#   - Under *cargo* (release binary cross-builds per ADR-0009 §2 and
+#     public source builds without Bazel), `build.rs` compiles the same
+#     vendored C sources via the `cc` crate, mirroring the Bazel recipe
+#     1:1. Restored 2026-06-11 (configflux-eged, ADR-0009 amendment):
+#     once the solver became the engine (ADR-0017/ADR-0030) every
+#     shipped binary links cudd-sys, and the cargo graph previously had
+#     no provider for the C symbols.
+#   - `default-features = false` semantics: no feature flag controls
+#     whether CUDD is built (upstream's `build_cudd` toggle is gone),
+#     so no `[features]` section is needed.
+#
+# See third_party/cudd-sys/README.md for the upstream provenance note
+# and the relicensing rationale.
+[package]
+name = "cudd-sys"
+version = "1.1.2-alpha.2"
+edition = "2021"
+authors = ["ConfigFlux contributors"]
+description = "ConfigFlux fork of cudd-sys: unsafe Rust FFI bindings for CUDD 3.0.0. Bazel links the cc_library; cargo builds the vendored C via build.rs."
+license = "MIT"
+publish = false
+
+[build-dependencies]
+# Compiles the vendored CUDD C sources on the cargo path only (Bazel
+# links `//third_party/cudd:cudd` instead and never runs build.rs).
+# Already in the workspace lock as a transitive dependency.
+cc = "1"
+
+[dependencies]
+# `libc` provides the C type aliases (`c_int`, `c_uint`, ...) the
+# upstream FFI surface uses. Pinned to the same `0.2` major the rest of
+# the workspace uses (cargo will resolve a single compatible version
+# across the workspace's lock).
+libc = "0.2"
+
+[lib]
+name = "cudd_sys"
+path = "src/lib.rs"

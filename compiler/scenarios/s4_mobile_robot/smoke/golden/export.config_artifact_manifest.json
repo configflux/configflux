@@ -1,0 +1,26 @@
+{
+  "artifacts": [
+    {
+      "artifact_id": "lidar_localization_driver",
+      "bound_paths": [
+        "component.localization_stack.param.localization_driver"
+      ]
+    },
+    {
+      "artifact_id": "mecanum_drive_driver",
+      "bound_paths": [
+        "component.drive_stack.param.drive_driver"
+      ]
+    },
+    {
+      "artifact_id": "payload_heavy_driver",
+      "bound_paths": [
+        "component.payload_stack.param.payload_driver"
+      ]
+    }
+  ],
+  "model_hash": "__DYNAMIC_MODEL_HASH__",
+  "profile": "cpp_early_binding_v1",
+  "resolve_hash": "__DYNAMIC_RESOLVE_HASH__",
+  "schema_version": 2
+}

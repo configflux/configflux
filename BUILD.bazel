@@ -1,0 +1,51 @@
+package(default_visibility = ["//visibility:public"])
+
+# Expose Cargo files so crate_universe can read them
+exports_files([
+    ".bazelignore",
+    ".bazelrc",
+    ".clang-format",
+    "Cargo.toml",
+    "Cargo.lock",
+    # Single source of truth for the workspace version; consumed as
+    # compile_data by //compiler:compiler_lib in the published tree. Keep in
+    # sync with the internal root BUILD.bazel exports (audit-enforced).
+    "VERSION",
+    "docs/cpp-engineering-standards.md",
+    "docs/ros2-bazel-colcon-guidelines.md",
+    "docs/requirement-test-matrix.tsv",
+])
+
+# Optional: Alias for easy building of the main components
+alias(
+    name = "compiler",
+    actual = "//compiler:compiler",
+)
+
+alias(
+    name = "interpreter",
+    actual = "//interpreter:interpreter",
+)
+
+alias(
+    name = "runtime",
+    actual = "//runtime:runtime",
+)
+
+test_suite(
+    name = "system_scenario_smoke_test",
+    tests = [
+        "//compiler:scenario_smoke_test",
+        "//interpreter:interpreter_scenario_smoke_test",
+        "//runtime:runtime_scenario_smoke_test",
+    ],
+)
+
+test_suite(
+    name = "system_scenario_medium_test",
+    tests = [
+        "//compiler:scenario_medium_test",
+        "//interpreter:interpreter_scenario_medium_test",
+        "//runtime:runtime_scenario_medium_test",
+    ],
+)

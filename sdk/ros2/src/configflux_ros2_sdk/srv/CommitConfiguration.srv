@@ -1,0 +1,7 @@
+string runtime_snapshot_json
+string actor
+string reason
+string expected_base_configuration_id
+string[] changed_ros_parameter_hints
+---
+configflux_ros2_sdk/RuntimeControlResult result

@@ -1,0 +1,6 @@
+cannot select psu.bronze:
+  blocked by your earlier choice: cpu.highperf
+  blocked by model rule: blocked by model rule relating: cooling.air, cooling.liquid, cpu.highperf
+  blocked by model rule: blocked by model rule relating: cooling.air, cooling.liquid, cpu.highperf, cpu.standard, psu.bronze
+  blocked by model rule: blocked by model rule relating: cooling.air, cooling.liquid, cpu.highperf, psu.bronze
+(one minimal explanation; other minimal cores may exist)

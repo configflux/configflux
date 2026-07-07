@@ -1,0 +1,85 @@
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("//tools:cue_toolchain.bzl", "CUE_VERSION")
+
+package(default_visibility = ["//visibility:public"])
+
+# Public //tools targets. Only build helpers whose source scripts (and their
+# deps) are present in this repository are declared here; helpers without
+# shipped sources are intentionally omitted so `bazel build //...` stays green.
+# The hermetic cue toolchain targets ARE shipped (their sources —
+# cue_toolchain.bzl + cue_wrapper.sh.tpl — and the @cue_linux_* toolchain repos
+# from MODULE.bazel all ship), so the cue authoring/validation scripts
+# (compiler/cue/*.sh) that resolve //tools:cue_binary work in the public tree.
+# The cue_pinned_version_test / cue_pin_test targets stay internal (their test
+# scripts are .publishignore-excluded).
+
+sh_binary(
+    name = "generate_release_notes",
+    srcs = ["generate_release_notes.sh"],
+)
+
+sh_test(
+    name = "generate_release_notes_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["test_generate_release_notes.sh"],
+    data = [
+        "generate_release_notes.sh",
+        "testdata/CHANGELOG.sample.md",
+    ],
+)
+
+sh_binary(
+    name = "run_ros2_colcon",
+    srcs = ["run_ros2_colcon.sh"],
+)
+
+# --- Hermetic cue toolchain (mirrors the internal //tools cue targets; the two
+# internal-only *_test targets are omitted). Lets the shipped cue scripts
+# resolve //tools:cue_binary in the public tree. ---
+
+config_setting(
+    name = "linux_arm64",
+    constraint_values = ["@platforms//os:linux", "@platforms//cpu:arm64"],
+)
+
+config_setting(
+    name = "linux_amd64",
+    constraint_values = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
+
+# Host-correct cue binary under a stable label. Default = amd64.
+alias(
+    name = "cue_binary",
+    actual = select({
+        ":linux_arm64": "@cue_linux_arm64//:cue",
+        ":linux_amd64": "@cue_linux_amd64//:cue",
+        "//conditions:default": "@cue_linux_amd64//:cue",
+    }),
+)
+
+# Bake the selected binary's runfiles path into the wrapper at build time.
+genrule(
+    name = "cue_wrapper_gen",
+    srcs = ["cue_wrapper.sh.tpl"],
+    outs = ["cue_wrapper.sh"],
+    cmd = "sed 's|@@CUE_RLOCATION@@|$(rlocationpath :cue_binary)|g' $(location cue_wrapper.sh.tpl) > $@",
+    tools = [":cue_binary"],
+)
+
+# Runnable wrapper (`bazel run //tools:cue -- version`) + canonical tool dep.
+sh_binary(
+    name = "cue",
+    srcs = [":cue_wrapper_gen"],
+    data = [":cue_binary"],
+    deps = ["@bazel_tools//tools/bash/runfiles"],
+)
+
+# Build-provenance / SBOM surface for the pin. Single source of truth is
+# CUE_VERSION in cue_toolchain.bzl.
+genrule(
+    name = "cue_version",
+    outs = ["cue_version.txt"],
+    cmd = "echo 'cue {version}' > $@".format(version = CUE_VERSION),
+)

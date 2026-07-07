@@ -1,0 +1,14 @@
+profile_id = "smoke"
+scenario_id = "s1_water_pump"
+
+[selection_domains]
+cooling_brand = ["hydra", "aeroflux"]
+cooling_model = ["x200", "a9"]
+pump_type = ["single", "dual"]
+region = ["us", "eu"]
+
+[default_context]
+cooling_brand = "hydra"
+cooling_model = "x200"
+pump_type = "dual"
+region = "us"

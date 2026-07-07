@@ -1,0 +1,6 @@
+package = "s1_water_pump_mutation"
+version = "1.0.0"
+
+[components.control_extension]
+type = "module"
+depends_on = ["missing_power_bus"]

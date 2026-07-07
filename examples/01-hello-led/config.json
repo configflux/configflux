@@ -1,0 +1,29 @@
+{
+  "package": "hello_led",
+  "version": "1.0.0",
+  "definitions": {
+    "blink_interval_ms": {
+      "type": "integer",
+      "unit": "ms",
+      "lifecycle": "startup",
+      "access": "integrator",
+      "doc": "LED blink interval in milliseconds"
+    }
+  },
+  "components": {
+    "led_driver": {
+      "type": "module",
+      "params": {
+        "blink_interval": {
+          "inherits": "blink_interval_ms",
+          "type": "integer",
+          "unit": "ms",
+          "lifecycle": "startup",
+          "access": "integrator",
+          "doc": "LED blink interval in milliseconds",
+          "value": 500
+        }
+      }
+    }
+  }
+}

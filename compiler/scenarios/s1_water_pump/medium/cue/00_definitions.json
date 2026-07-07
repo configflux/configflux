@@ -1,0 +1,28 @@
+{
+    "package": "s1_water_pump",
+    "version": "1.0.0",
+    "definitions": {
+        "safe_flow": {
+            "type": "float",
+            "unit": "lpm",
+            "doc": "Safe commissioning flow limit",
+            "lifecycle": "startup",
+            "safety": "sil2",
+            "access": "integrator"
+        },
+        "driver_slot": {
+            "type": "artifact",
+            "doc": "Control driver artifact reference",
+            "lifecycle": "construction",
+            "access": "developer"
+        },
+        "trim_gain": {
+            "type": "float",
+            "unit": "ratio",
+            "doc": "Runtime trim gain",
+            "lifecycle": "runtime",
+            "safety": "q_m",
+            "access": "technician"
+        }
+    }
+}

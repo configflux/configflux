@@ -1,0 +1,50 @@
+{
+    "package": "s4_mobile_robot",
+    "version": "1.0.0",
+    "definitions": {
+        "drive_profile": {
+            "type": "string",
+            "doc": "Drive control compile profile",
+            "lifecycle": "construction",
+            "access": "developer"
+        },
+        "drive_driver_slot": {
+            "type": "artifact",
+            "doc": "Drive driver artifact",
+            "lifecycle": "construction",
+            "access": "developer"
+        },
+        "localization_driver_slot": {
+            "type": "artifact",
+            "doc": "Localization stack artifact",
+            "lifecycle": "construction",
+            "access": "developer"
+        },
+        "payload_driver_slot": {
+            "type": "artifact",
+            "doc": "Payload module artifact",
+            "lifecycle": "construction",
+            "access": "developer"
+        },
+        "battery_profile": {
+            "type": "string",
+            "doc": "Battery profile for compile-time feature gates",
+            "lifecycle": "construction",
+            "access": "developer"
+        },
+        "max_speed_commissioning": {
+            "type": "float",
+            "unit": "mps",
+            "doc": "Commissioning speed limit",
+            "lifecycle": "startup",
+            "access": "integrator"
+        },
+        "runtime_trim": {
+            "type": "float",
+            "unit": "ratio",
+            "doc": "Runtime trim gain",
+            "lifecycle": "runtime",
+            "access": "technician"
+        }
+    }
+}

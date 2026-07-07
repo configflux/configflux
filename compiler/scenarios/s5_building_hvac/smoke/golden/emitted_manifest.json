@@ -1,0 +1,25 @@
+{
+  "format_version": 1,
+  "chunk_count": 2,
+  "source_ids": [
+    "scenarios/s5_building_hvac/smoke/chunks/00_definitions.toml",
+    "scenarios/s5_building_hvac/smoke/chunks/10_components.toml"
+  ],
+  "definition_ids": [
+    "airflow_trim_gain",
+    "controller_package",
+    "ventilation_profile"
+  ],
+  "component_ids": [
+    "air_handler",
+    "climate_controller",
+    "isolation_monitor",
+    "power_distribution",
+    "pressure_monitor"
+  ],
+  "artifact_ids": [
+    "hospital_hepa_eu_controller",
+    "hospital_hepa_us_controller",
+    "office_standard_controller"
+  ]
+}

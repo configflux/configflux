@@ -1,0 +1,44 @@
+[package]
+name = "compiler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+anyhow = "1.0.103"
+clap = { version = "4.5.53", features = ["derive"] }
+hex = "0.4.3"
+rusqlite = { version = "0.39.0", features = ["bundled"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.140"
+sha2 = ">=0.10.9, <0.11.0"
+toml = ">=0.9.8, <1.0.0"
+flate2 = "1.1.0"
+
+# cudd-sys (configflux fork) — in-tree path dep per ADR-0011
+# (configflux-yu76 / configflux-wbzw). Consumed ONLY by
+# `compiler/src/cudd_build/mod.rs` — the single-importer module per
+# ADR-0011 Amendment 1 §A1.3. Every other file in `compiler/`
+# (including `ccm_emitter/`) calls through the `Construction::Cudd`
+# selector in `ccm_emitter.rs` and never references CUDD types.
+#
+# configflux-4jmc: gated behind the default-off `cudd` feature (below) so the
+# lean default build links no CUDD C backend. This keeps the heavy native link
+# off resource-constrained consumers — notably the solver-free edge agent
+# (//agent:agent, ADR-0036 sec3), which uses the compiler only for runtime op
+# handlers and never the BDD construction path. `optional = true` makes the
+# crate pull `cudd-sys` in only when the `cudd` feature is enabled.
+#
+# Bazel BUILD.bazel mirrors the split: //compiler:compiler_lib is lean (no
+# cudd_sys dep, feature off) and //compiler:compiler_lib_cudd carries
+# crate_features=["cudd"] plus the cudd_sys dep. The LGPL boundary is still
+# enforced at the file level via review + ripgrep, mirroring the solver-side
+# discipline.
+cudd-sys = { path = "../third_party/cudd-sys", default-features = false, optional = true }
+
+[features]
+# Opt-in CUDD-backed BDD construction path (configflux-4jmc / ADR-0011). Off by
+# default: enabling it compiles `src/cudd_build/` and links the cudd-sys native
+# backend. With the feature off, `Construction::Cudd` fails closed.
+cudd = ["dep:cudd-sys"]

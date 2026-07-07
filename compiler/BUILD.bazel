@@ -1,0 +1,442 @@
+load(
+    "@rules_rust//rust:defs.bzl",
+    "rust_binary",
+    "rust_library",
+    "rust_test",
+)
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["Cargo.toml"])
+
+COMPILER_LIB_SRCS = [
+    "src/ccm_emitter.rs",
+    "src/ccm_emitter/bdd.rs",
+    "src/ccm_emitter/multi_part.rs",
+    "src/ccm_emitter/multi_part_more_tests.rs",
+    "src/ccm_emitter/multi_part_tests.rs",
+    "src/ccm_emitter/partitioner.rs",
+    "src/ccm_emitter/partitioner_tests.rs",
+    "src/ccm_emitter/tests.rs",
+    "src/ccm_emitter/timings.rs",
+    "src/ccm_emitter/var_order.rs",
+    "src/ccm_emitter/var_order/force_tests.rs",
+    "src/conditions/ast.rs",
+    "src/conditions/ast/parser_tests.rs",
+    "src/compiler_core.rs",
+    "src/conditions/eval.rs",
+    "src/conditions/implication.rs",
+    "src/conditions/implication/tests.rs",
+    "src/conditions/mod.rs",
+    "src/conditions/rewrite.rs",
+    "src/conditions/rewrite_tests.rs",
+    "src/conditions/selection_eval.rs",
+    # configflux-wbzw: CUDD-side compiler build path. Single-importer
+    # module per ADR-0011 + Amendment 1 §A1.3. The cudd_sys dep below
+    # is on the COMPILER_LIB_DEPS list because Bazel rust_library deps
+    # are per-target (not per-file); the LGPL boundary is enforced at
+    # the file level via review + ripgrep, mirroring the discipline
+    # already established by solver/src/backend_cudd.rs +
+    # solver/src/cudd_translate.rs. ccm_emitter/*.rs files MUST NOT
+    # add a `use cudd_sys::*` import.
+    "src/cudd_build/checkpoint.rs",
+    "src/cudd_build/mod.rs",
+    "src/cudd_build/tests.rs",
+    "src/ingest_merge.rs",
+    "src/ir.rs",
+    "src/lib.rs",
+    "src/lib_tests.rs",
+    "src/link_verify.rs",
+    "src/loader_api/contracts.rs",
+    "src/loader_api/export_resolved_ops.rs",
+    "src/loader_api/mod.rs",
+    "src/loader_api/open_model_ops.rs",
+    "src/loader_api/operations.rs",
+    "src/loader_api/resolve_ops.rs",
+    "src/loader_api/selection_ops.rs",
+    "src/loader_api/shared_ops.rs",
+    "src/loader_api/software_bom_ops.rs",
+    "src/loader_api/tests.rs",
+    "src/prelude.rs",
+    "src/proc_rss.rs",
+    "src/progress.rs",
+    "src/product_api.rs",
+    "src/provenance_sidecar.rs",
+    "src/resolved_models.rs",
+    "src/resolver.rs",
+    "src/resource_budget.rs",
+    "src/runtime_api/authority.rs",
+    "src/runtime_api/authority_tests.rs",
+    "src/runtime_api/contracts.rs",
+    "src/runtime_api/commit_identity_ops.rs",
+    "src/runtime_api/lifecycle_driver_ops.rs",
+    "src/runtime_api/mod.rs",
+    "src/runtime_api/open_read_ops.rs",
+    "src/runtime_api/operations.rs",
+    "src/runtime_api/override_intent.rs",
+    "src/runtime_api/shared_ops.rs",
+    "src/runtime_api/sync_ops.rs",
+    "src/runtime_api/tests.rs",
+    "src/runtime_api/write_reset_ops.rs",
+    "src/scenario_byte_stability_tests.rs",
+    "src/scenario_loop0_tests.rs",
+    "src/scenario_loop10_tests.rs",
+    "src/scenario_loop3_tests.rs",
+    "src/scenario_loop4_tests.rs",
+    "src/scenario_loop5_tests.rs",
+    "src/scenario_loop6_tests.rs",
+    "src/scenario_loop7_tests.rs",
+    "src/scenario_loop9_tests.rs",
+    "src/scenario_resource_budget_tests.rs",
+    "src/scenario_test_support.rs",
+    "src/schema.rs",
+    "src/sync_transport.rs",
+    "src/telemetry_sink.rs",
+]
+
+# Lean dependency set — configflux-4jmc. cudd_sys is NOT here. The CUDD
+# construction path (`src/cudd_build/`) is gated behind the compiler crate's
+# `cudd` feature (compiler/Cargo.toml [features]); the lean `compiler_lib` built
+# from this list compiles without that feature and links no CUDD C backend. This
+# is the target the solver-free edge agent (//agent:agent, ADR-0036 sec3) and
+# every pure-runtime consumer (runtime, interpreter, ledger, relay, examples,
+# sdk, the compiler CLI) link.
+COMPILER_LIB_DEPS = [
+    "@crates//:anyhow",
+    "@crates//:flate2",
+    "@crates//:serde",
+    "@crates//:serde_json",
+    "@crates//:sha2",
+    "@crates//:toml",
+]
+
+# CUDD-bearing dependency set — configflux-4jmc / configflux-wbzw. cudd_sys is
+# wired here ONLY because of the single-importer module at
+# `src/cudd_build/mod.rs` (ADR-0011 §2 + Amendment 1 §A1.3), which compiles only
+# under the `cudd` feature. The boundary that ccm_emitter/*.rs MUST NOT import
+# cudd_sys is reviewed at the FILE level (ripgrep `use cudd_sys` enumerates every
+# importer; the only compiler-side match is `compiler/src/cudd_build/mod.rs`).
+# The compiler crate's BUSL-1.1 posture (repo-wide per ADR-0046) is unchanged
+# by linking cudd_sys (BSD-3-Clause C source through MIT bindings; both on the
+# deny.toml allow list per ADR-0004 dwwv §3 addendum). Only the few CUDD
+# consumers (compiler_lib_cudd's tests + cudd_construction_roundtrip_test +
+# //tools/gen_synthetic --construction=cudd) link this.
+COMPILER_LIB_CUDD_DEPS = COMPILER_LIB_DEPS + [
+    "//third_party/cudd-sys:cudd_sys",
+]
+
+# Shared compile-time data — configflux-4jmc. The lean and cudd-feature builds of
+# the compiler crate must `include_str!`/`include_bytes!` the same scenario and
+# fixture inputs, so they share one glob (kept identical by construction).
+COMPILER_LIB_COMPILE_DATA = glob([
+    "scenarios/**/*.cmake",
+    "scenarios/**/*.hpp",
+    "scenarios/**/*.json",
+    "scenarios/**/*.toml",
+    "tests/fixtures/**/*.json",
+]) + [
+    # configflux-pq2w.1 / ADR-0044 D1: the repo-root VERSION file, baked into
+    # the crate via `include_str!("../../VERSION")` in `provenance_sidecar.rs`
+    # so the real workspace version (not the Bazel `0.0.0` default of
+    # `env!("CARGO_PKG_VERSION")` for a library) stamps the provenance sidecar
+    # and the envelope `tool_version`. Shared by the lean and cudd lib builds;
+    # `crate=`-based rust_test targets inherit `compile_data` from the crate.
+    "//:VERSION",
+]
+
+rust_library(
+    name = "compiler_lib",
+    srcs = COMPILER_LIB_SRCS,
+    compile_data = COMPILER_LIB_COMPILE_DATA,
+    crate_name = "compiler",
+    edition = "2021",
+    deps = COMPILER_LIB_DEPS,
+)
+
+# CUDD-feature build of the SAME sources — configflux-4jmc. Identical crate
+# (crate_name = "compiler") over the SAME COMPILER_LIB_SRCS, distinguished only
+# by `crate_features = ["cudd"]` + the cudd_sys dep. Sources are NOT duplicated;
+# `src/cudd_build/*.rs` already live in COMPILER_LIB_SRCS and compile in only
+# under the feature (rules_rust permits srcs not reached by a `mod` in the lean
+# build). Consumed by the CUDD construction tests and the synthetic fixture
+# generator's --construction=cudd path.
+rust_library(
+    name = "compiler_lib_cudd",
+    srcs = COMPILER_LIB_SRCS,
+    compile_data = COMPILER_LIB_COMPILE_DATA,
+    crate_features = ["cudd"],
+    crate_name = "compiler",
+    edition = "2021",
+    deps = COMPILER_LIB_CUDD_DEPS,
+)
+
+rust_test(
+    name = "compiler_test",
+    size = "small",
+    timeout = "short",
+    crate = ":compiler_lib",
+)
+
+# configflux-4jmc: runs the crate's in-source `#[cfg(test)]` tests under the
+# `cudd` feature so `src/cudd_build/tests.rs` (the CUDD-builder unit tests, which
+# gate out of the lean `compiler_test` with their parent module) keeps running.
+# Also covers the `#[cfg(feature = "cudd")]` real `Construction::Cudd` arms.
+rust_test(
+    name = "compiler_cudd_test",
+    size = "small",
+    timeout = "short",
+    # rules_rust 0.69.0 does NOT inherit `crate_features` from the crate
+    # under test, so this MUST be repeated here — without it the test
+    # compiles the lean crate, `#[cfg(feature = "cudd")] mod cudd_build`
+    # gates out, and `src/cudd_build/tests.rs` silently never runs
+    # (configflux-xh57). Mirrors `compiler_lib_cudd`'s feature set so the
+    # CUDD construction path + its unit tests are actually exercised.
+    crate = ":compiler_lib_cudd",
+    crate_features = ["cudd"],
+)
+
+rust_test(
+    name = "compiler_cli_test",
+    srcs = ["src/main.rs"],
+    edition = "2021",
+    deps = [
+        ":compiler_lib",
+        "@crates//:anyhow",
+        "@crates//:clap",
+        "@crates//:serde",
+        "@crates//:serde_json",
+    ],
+)
+
+rust_test(
+    name = "ccm_emitter_roundtrip_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["tests/ccm_emitter_roundtrip.rs"],
+    edition = "2021",
+    deps = [
+        ":compiler_lib",
+        "//solver:solver",
+    ],
+)
+
+# configflux-ok46: fail-closed assertion at the resolve-time safety/lifecycle/
+# access sink. Black-box tests driven through the public `resolve()` API; they
+# assert a parameter that carries `inherits` and drops a metadata field its
+# parent definition declared fails closed (no silent QM/Runtime/Technician
+# default), while the legitimate CUE-origin shapes (artifact-slot inheritor;
+# standalone/root param) still resolve to the documented defaults.
+# configflux-pq2w.1 / ADR-0044 D1: the product compile path must emit a
+# deterministic, non-hashed provenance.json sidecar next to the CMP and CCM
+# artifact sets, carrying the real workspace tool_version and recomputable
+# content hashes, byte-stable without --stamp-time. Black-box through the
+# public product API; needs the s1 smoke fixtures at compile time.
+rust_test(
+    name = "provenance_sidecar_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["tests/provenance_sidecar.rs"],
+    compile_data = glob(["scenarios/s1_water_pump/smoke/cue/*.json"]),
+    edition = "2021",
+    deps = [
+        ":compiler_lib",
+        "@crates//:serde_json",
+    ],
+)
+
+rust_test(
+    name = "resolver_fail_closed_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["tests/resolver_fail_closed.rs"],
+    edition = "2021",
+    deps = [":compiler_lib"],
+)
+
+# configflux-9hi2: the product compile path (compile_model -> emit_ir) must
+# emit the v2 multi-part .ccm directory alongside the CMP package, surface its
+# path on ModelHandle, and bind it to the CMP model_hash (ADR-0005 §9). This
+# test drives the real product API and asserts the solver constructs a
+# non-empty Ccm from the emitted dir — clearing the g3f.2 load_ccm blocker.
+rust_test(
+    name = "product_compile_ccm_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["tests/product_compile_ccm.rs"],
+    # The test `include_str!`s the smoke scenario fixtures at compile time;
+    # they must be available as a compile input to the test crate.
+    compile_data = glob(["scenarios/s1_water_pump/smoke/cue/*.json"]),
+    edition = "2021",
+    deps = [
+        ":compiler_lib",
+        "//solver:solver",
+    ],
+)
+
+# CUDD-side construction round-trip — configflux-wbzw (ADR-0011
+# acceptance bar 4). Emits a small `ConditionModel` via the
+# --construction=cudd path and asserts: produced .ccm decodes via
+# solver (under both OxiddBackend and CuddBackend); valid_options
+# returns a non-empty result; no panic. The 10k×50/50 gf2o bench
+# regression is the next bd issue (configflux-vfx4); this test
+# covers the smoke acceptance bar only.
+rust_test(
+    name = "cudd_construction_roundtrip_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["tests/cudd_construction_roundtrip.rs"],
+    edition = "2021",
+    # configflux-4jmc: this is the one integration test that exercises the real
+    # CUDD construction path (`emit_ccm_dir_with_construction(.., "cudd")`), so it
+    # must link the CUDD-feature crate, not the lean default `compiler_lib`.
+    deps = [
+        ":compiler_lib_cudd",
+        "//solver:solver",
+    ],
+)
+
+# Cross-heuristic Boolean-equivalence test: pins ADR-0005 §6 R2 by
+# emitting the same ConditionModel under both var_order_heuristic
+# values, loading each into Session<OxiddBackend>, and asserting
+# valid_options is set-equal per facet while ccm.bdd.bin bytes
+# differ. See compiler/tests/ccm_emitter_equivalence.rs.
+rust_test(
+    name = "ccm_emitter_equivalence_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["tests/ccm_emitter_equivalence.rs"],
+    edition = "2021",
+    deps = [
+        ":compiler_lib",
+        "//solver:solver",
+    ],
+)
+
+# Scale test, per-change gate tier (1k/5k): light, sub-2-minute, low RSS.
+# The heavy 10k tier is split off below (configflux-nnob, ADR-0045).
+rust_test(
+    name = "ccm_emitter_scale_test",
+    size = "large",
+    timeout = "moderate",
+    srcs = ["tests/ccm_emitter_scale.rs"],
+    edition = "2021",
+    deps = [":compiler_lib"],
+)
+
+# Scale test, on-demand 10k tier: same binary, runs only the `#[ignore]`d
+# 10k case via `--ignored --exact`. `manual` (out of the `test //...`
+# wildcard) + `exclusive`; member of //validation:acceptance (ADR-0040).
+# Split off the per-change gate because its multi-GB RSS peak trips
+# tools/resource_guard.sh's memory reap under concurrent load, not a
+# Bazel timeout (configflux-nnob, ADR-0045).
+rust_test(
+    name = "ccm_emitter_scale_10k_test",
+    size = "enormous",
+    timeout = "long",
+    srcs = ["tests/ccm_emitter_scale.rs"],
+    edition = "2021",
+    args = [
+        "--ignored",
+        "--exact",
+        "scale_emit_10k_under_clause_grouped_dfs",
+    ],
+    tags = [
+        "exclusive",
+        "manual",
+    ],
+    deps = [":compiler_lib"],
+)
+
+rust_test(
+    name = "scenario_smoke_test",
+    size = "small",
+    timeout = "short",
+    args = [
+        "loop",
+        "--skip",
+        "medium",
+        "--skip",
+        "large",
+    ],
+    crate = ":compiler_lib",
+)
+
+rust_test(
+    name = "scenario_medium_test",
+    size = "small",
+    timeout = "short",
+    args = [
+        "loop",
+        "--skip",
+        "large",
+    ],
+    crate = ":compiler_lib",
+)
+
+rust_test(
+    name = "scenario_large_test",
+    size = "small",
+    timeout = "short",
+    args = ["loop"],
+    crate = ":compiler_lib",
+)
+
+rust_test(
+    name = "scenario_loop10_test",
+    size = "small",
+    timeout = "short",
+    args = ["scenario_loop10_tests::"],
+    crate = ":compiler_lib",
+)
+
+# Pre-flight byte-stability snapshot test for the v0.3.0 solver rewrite.
+# Drives every scenario pack under compiler/scenarios/ through the full
+# loader_api closed loop (compile -> open_model -> resolve -> export SBOM)
+# and pins model_hash, selection_state_hash, resolve_hash, bom_hash against
+# the checked-in baseline fixture at compiler/tests/fixtures/.
+# See compiler/src/scenario_byte_stability_tests.rs for triage guidance.
+rust_test(
+    name = "scenario_byte_stability_test",
+    size = "small",
+    timeout = "short",
+    args = ["scenario_byte_stability_tests::"],
+    crate = ":compiler_lib",
+)
+
+# configflux-9pjy.5: core-contract verification + hardening suite for the
+# product-compile resource budget (ADR-0039 §8). Pins graceful-degradation
+# monotonicity (derived memo_cap non-increasing as the budget shrinks),
+# byte-neutrality (budget=None and a memory-only budget produce
+# byte-identical artifacts — no cluster_size derivation, no fixture
+# rotation), and the progress / serde / precedence hardening contracts. The
+# adaptive-shrink-count half of the core contract is verified with an
+# injected deterministic RSS sampler inside the ccm_emitter unit tests (run
+# by compiler_test), the only scope that can reach the test-only sampler
+# seam; the CLI --max-rss-mb/--max-threads round-trip lives in main.rs's own
+# #[cfg(test)] (run by compiler_cli_test). All assertions are deterministic
+# — no real /proc RSS or wall-clock is asserted.
+rust_test(
+    name = "scenario_resource_budget_test",
+    size = "small",
+    timeout = "short",
+    args = ["scenario_resource_budget_tests::"],
+    crate = ":compiler_lib",
+)
+
+rust_binary(
+    name = "compiler",
+    srcs = ["src/main.rs"],
+    edition = "2021",
+    # ADR-0002 §5: feeds CARGO_PKG_VERSION so `#[command(version)]` in
+    # src/main.rs resolves `--version` to the workspace release version.
+    # rules_rust defaults CARGO_PKG_VERSION to "0.0.0" when this attr is
+    # absent, so it must mirror /VERSION and [workspace.package] version.
+    version = "0.3.0",
+    deps = [
+        ":compiler_lib",
+        "@crates//:anyhow",
+        "@crates//:clap",
+        "@crates//:serde",
+        "@crates//:serde_json",
+    ],
+)

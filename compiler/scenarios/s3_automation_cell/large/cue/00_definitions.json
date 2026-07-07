@@ -1,0 +1,18 @@
+{
+    "package": "s3_automation_cell",
+    "version": "1.0.0",
+    "definitions": {
+        "module_profile": {
+            "type": "string",
+            "doc": "Automation module profile selected by constrained facets",
+            "lifecycle": "startup",
+            "access": "integrator"
+        },
+        "driver_slot": {
+            "type": "artifact",
+            "doc": "Driver artifact selected for the automation cell path",
+            "lifecycle": "construction",
+            "access": "developer"
+        }
+    }
+}

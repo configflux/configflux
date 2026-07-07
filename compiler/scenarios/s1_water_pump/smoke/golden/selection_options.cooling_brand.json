@@ -1,0 +1,7 @@
+{
+  "facet": "cooling_brand",
+  "valid_options": [
+    "aeroflux",
+    "hydra"
+  ]
+}

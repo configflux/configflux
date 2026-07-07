@@ -1,0 +1,74 @@
+module(
+    name = "configflux",
+    version = "0.0.1",
+)
+
+# 1. Pull in rules_rust
+# rules_rust 0.69.0 defaults to rustc 1.93.1, a further toolchain bump beyond
+# the 0.68.1 / 1.86.0 minimum that unblocked criterion 0.8.x (see
+# docs/security/dep-audit-v0.3.0.md §5.5). Newer rustc provides improved
+# diagnostics and performance at no functional cost to the workspace.
+bazel_dep(name = "rules_rust", version = "0.69.0")
+bazel_dep(name = "rules_cc", version = "0.2.8")
+bazel_dep(name = "rules_shell", version = "0.6.1")
+
+# Explicit dep so //tools BUILD config_settings can reference @platforms//os
+# and @platforms//cpu constraints (used to select the host-correct hermetic cue
+# binary). platforms is already pulled in transitively by rules_rust/rules_cc;
+# declaring it makes the repo visible from the main module. Pinned to the
+# version already resolved transitively (1.0.0) so the direct-dep check is
+# satisfied with no warning and no version change to the graph.
+bazel_dep(name = "platforms", version = "1.0.0")
+
+# 2. Initialize the Rust toolchain
+rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
+rust.toolchain(edition = "2021")
+use_repo(rust, "rust_toolchains")
+
+register_toolchains("@rust_toolchains//:all")
+
+# 3. Configure Crate Universe (The Bridge to Cargo.toml)
+crate = use_extension("@rules_rust//crate_universe:extension.bzl", "crate")
+crate.from_cargo(
+    name = "crates",
+    cargo_lockfile = "//:Cargo.lock",
+    manifests = [
+        "//:Cargo.toml",
+        # Presentation-only one-shot resolver CLI (ADR-0042, configflux-2awb.2).
+        # Listed so crate_universe sees its path dep (compiler) and produces a
+        # complete lockfile resolution. Adds no external dependency beyond what
+        # is already vendored (clap / serde / serde_json).
+        "//cfx:Cargo.toml",
+        "//compiler:Cargo.toml",
+        "//interpreter:Cargo.toml",
+        "//runtime:Cargo.toml",
+        # Shared solver-composition crate (ADR-0003 §2 amendment,
+        # configflux-kkhc). Listed so crate_universe sees its path deps
+        # (compiler, solver) and produces a complete lockfile resolution. Adds
+        # no external dependency beyond what is already vendored.
+        "//session_compose:Cargo.toml",
+        "//solver:Cargo.toml",
+        # cudd-sys fork (MIT) — third_party/cudd-sys is a workspace
+        # member per ADR-0004 §3 second-pass amendment
+        # (configflux-7hn2 / configflux-d1cc). Its manifest must be
+        # listed here so crate_universe sees its libc dep and produces
+        # a complete lockfile resolution. The fork is exposed to the
+        # rest of the graph as `//third_party/cudd-sys:cudd_sys` (a
+        # hand-authored rust_library that links against the
+        # `//third_party/cudd:cudd` cc_library), NOT as
+        # `@crates//:cudd-sys` — path deps live outside the
+        # crate_universe registry projection.
+        "//third_party/cudd-sys:Cargo.toml",
+    ],
+)
+use_repo(crate, "crates")
+
+# 4. Hermetic, version-pinned `cue` binary (ADR-0021 Decision 5).
+# The CUE authoring front-end's evaluator is now fetched and version-locked
+# through Bazel rather than taken from $PATH. Per-platform sha256s and their
+# upstream provenance live in tools/cue_toolchain.bzl; //tools:cue is the
+# runnable wrapper. Since ADR-0027 (L2) the cue version is load-bearing for
+# model semantics, so it is also recorded in the build provenance surface
+# (//tools:cue_version) and SBOM (docs/sbom/configflux-0.1.0.cdx.json).
+cue = use_extension("//tools:cue_toolchain.bzl", "cue_repos")
+use_repo(cue, "cue_linux_amd64", "cue_linux_arm64")

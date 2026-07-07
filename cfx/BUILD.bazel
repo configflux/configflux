@@ -1,0 +1,185 @@
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["Cargo.toml"])
+
+filegroup(
+    name = "all_files",
+    srcs = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ),
+)
+
+# `cfx` is presentation only (ADR-0042 §2, amended 2026-07-03): it parses
+# arguments, builds request envelopes, and renders results. It obtains
+# solver-authoritative decision content (the `options` post-selection valid set)
+# through the shared `//session_compose` crate — the sole seam permitted to
+# depend on BOTH `//compiler` and `//solver` (ADR-0003 §2 amendment). `cfx` has
+# NO direct `//solver` edge; it reaches the solver only via `//session_compose`.
+# It still depends on the cudd-free default `compiler` library
+# (`//compiler:compiler_lib`, ADR-0036 amendment 1) for the loader-only ops
+# (open/init/apply/list-facets/resolve) that carry no solver decision.
+CFX_DEPS = [
+    "//session_compose",
+    "//compiler:compiler_lib",
+    # configflux-2awb.3 / CFX-2 (ADR-0042 §2): the shared unsat-core text
+    # renderer, extracted from the interpreter into `//interpreter:explain_renderer`
+    # so `cfx explain` and the interpreter render one wording, never a fork.
+    "//interpreter:explain_renderer",
+    "@crates//:clap",
+    "@crates//:serde",
+    "@crates//:serde_json",
+]
+
+CFX_SRCS = [
+    "src/main.rs",
+    "src/explain.rs",
+    "src/options.rs",
+    "src/pipeline.rs",
+    "src/render.rs",
+]
+
+rust_binary(
+    name = "cfx",
+    srcs = CFX_SRCS,
+    crate_root = "src/main.rs",
+    edition = "2021",
+    # ADR-0002 §5: feeds CARGO_PKG_VERSION so `#[command(version)]` resolves
+    # `--version` to the workspace release version. Mirror /VERSION and
+    # [workspace.package].
+    version = "0.4.0",
+    deps = CFX_DEPS,
+)
+
+# In-process unit tests: arg parsing, exit-code classification, path safety,
+# and text/JSON rendering (the parts that need no compiled model).
+rust_test(
+    name = "cfx_unit_test",
+    size = "small",
+    timeout = "short",
+    srcs = CFX_SRCS,
+    crate_root = "src/main.rs",
+    edition = "2021",
+    tags = [
+        "ci",
+        "cfx",
+        "owner:cfx",
+    ],
+    deps = CFX_DEPS,
+)
+
+# Differential anchor (ADR-0042 §5): S1 + S5 byte-identical vs the interpreter
+# envelope path, plus double-run determinism, the 0/2/3 exit-code contract, and
+# committed golden transcripts. Drives the REAL compiler / interpreter / cfx
+# binaries. E2E impact: smoke.
+sh_test(
+    name = "cfx_resolve_differential_test",
+    size = "medium",
+    timeout = "moderate",
+    srcs = ["tests/cfx_resolve_differential_test.sh"],
+    data = [
+        "tests/cfx_resolve_differential.py",
+        "tests/golden/resolve_s1_happy.stdout",
+        "tests/golden/resolve_unsat.stderr",
+        "tests/golden/resolve_usage.stderr",
+        ":cfx",
+        "//compiler:compiler",
+        "//interpreter:interpreter",
+        "//compiler:scenarios/s1_water_pump/smoke/cue/00_definitions.json",
+        "//compiler:scenarios/s1_water_pump/smoke/cue/10_components.json",
+        "//compiler:scenarios/s5_building_hvac/smoke/cue/00_definitions.json",
+        "//compiler:scenarios/s5_building_hvac/smoke/cue/10_components.json",
+    ],
+    env = {
+        "COMPILER_RLOCATION": "$(rootpath //compiler:compiler)",
+        "INTERPRETER_RLOCATION": "$(rootpath //interpreter:interpreter)",
+        "CFX_RLOCATION": "$(rootpath :cfx)",
+        "S1_DEFS_RLOCATION": "$(rootpath //compiler:scenarios/s1_water_pump/smoke/cue/00_definitions.json)",
+        "S1_COMPONENTS_RLOCATION": "$(rootpath //compiler:scenarios/s1_water_pump/smoke/cue/10_components.json)",
+        "S5_DEFS_RLOCATION": "$(rootpath //compiler:scenarios/s5_building_hvac/smoke/cue/00_definitions.json)",
+        "S5_COMPONENTS_RLOCATION": "$(rootpath //compiler:scenarios/s5_building_hvac/smoke/cue/10_components.json)",
+        "GOLDEN_HAPPY_RLOCATION": "$(rootpath tests/golden/resolve_s1_happy.stdout)",
+    },
+    tags = [
+        "cfx",
+        "owner:cfx",
+        "system",
+    ],
+)
+
+# `cfx options` validation (configflux-2awb.4 / CFX-3, ADR-0042 §3 + plan §4):
+# for S1 with an empty selection AND after one --select, every per-facet JSON
+# result is byte-identical to the interpreter `options` envelope path (which
+# cross-checks via the solver, ADR-0030); plus committed text goldens and
+# double-run determinism. Drives the REAL compiler / interpreter / cfx binaries.
+# E2E impact: none (cfx-only presentation).
+sh_test(
+    name = "cfx_options_differential_test",
+    size = "medium",
+    timeout = "moderate",
+    srcs = ["tests/cfx_options_differential_test.sh"],
+    data = [
+        "tests/cfx_options_differential.py",
+        "tests/golden/options_s1_empty.stdout",
+        "tests/golden/options_s1_after_select.stdout",
+        ":cfx",
+        "//compiler:compiler",
+        "//interpreter:interpreter",
+        "//compiler:scenarios/s1_water_pump/smoke/cue/00_definitions.json",
+        "//compiler:scenarios/s1_water_pump/smoke/cue/10_components.json",
+    ],
+    env = {
+        "COMPILER_RLOCATION": "$(rootpath //compiler:compiler)",
+        "INTERPRETER_RLOCATION": "$(rootpath //interpreter:interpreter)",
+        "CFX_RLOCATION": "$(rootpath :cfx)",
+        "S1_DEFS_RLOCATION": "$(rootpath //compiler:scenarios/s1_water_pump/smoke/cue/00_definitions.json)",
+        "S1_COMPONENTS_RLOCATION": "$(rootpath //compiler:scenarios/s1_water_pump/smoke/cue/10_components.json)",
+        "GOLDEN_EMPTY_RLOCATION": "$(rootpath tests/golden/options_s1_empty.stdout)",
+    },
+    tags = [
+        "cfx",
+        "owner:cfx",
+        "system",
+    ],
+)
+
+# `cfx explain` validation (configflux-2awb.3 / CFX-2, ADR-0042 §3 + ADR-0031 +
+# plan §3): for two known-unsat selections over the committed cross-facet
+# `s_labeled_mus` fixture, `cfx explain --format json` is byte-identical to the
+# interpreter `explain` envelope response for the SAME request (both route the
+# labeled unsat core through `session_compose`, ADR-0031 D3); plus committed
+# text goldens (the shared `explain_renderer` wording), the satisfiable->exit-3
+# contract, and double-run determinism. Drives the REAL compiler / interpreter /
+# cfx binaries. E2E impact: smoke.
+sh_test(
+    name = "cfx_explain_differential_test",
+    size = "medium",
+    timeout = "moderate",
+    srcs = ["tests/cfx_explain_differential_test.sh"],
+    data = [
+        "tests/cfx_explain_differential.py",
+        "tests/golden/explain_labeled_mus_cpu_cooling.stdout",
+        "tests/golden/explain_labeled_mus_cpu_psu.stdout",
+        ":cfx",
+        "//compiler:compiler",
+        "//interpreter:interpreter",
+        "//compiler:scenarios/s_labeled_mus/00_definitions.json",
+        "//compiler:scenarios/s_labeled_mus/10_components.json",
+    ],
+    env = {
+        "COMPILER_RLOCATION": "$(rootpath //compiler:compiler)",
+        "INTERPRETER_RLOCATION": "$(rootpath //interpreter:interpreter)",
+        "CFX_RLOCATION": "$(rootpath :cfx)",
+        "MUS_DEFS_RLOCATION": "$(rootpath //compiler:scenarios/s_labeled_mus/00_definitions.json)",
+        "MUS_COMPONENTS_RLOCATION": "$(rootpath //compiler:scenarios/s_labeled_mus/10_components.json)",
+        "GOLDEN_CPU_COOLING_RLOCATION": "$(rootpath tests/golden/explain_labeled_mus_cpu_cooling.stdout)",
+    },
+    tags = [
+        "cfx",
+        "owner:cfx",
+        "system",
+    ],
+)

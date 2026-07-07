@@ -1,0 +1,99 @@
+{
+  "schema_version": 2,
+  "bom_version": 1,
+  "bom_hash": "__DYNAMIC_BOM_HASH__",
+  "hash_algo": "sha256",
+  "canonicalization_version": 1,
+  "model_hash": "__DYNAMIC_MODEL_HASH__",
+  "resolve_hash": "__DYNAMIC_RESOLVE_HASH__",
+  "selection_state_hash": "__DYNAMIC_SELECTION_STATE_HASH__",
+  "scope_root": "thermal_control",
+  "generated_at": "1970-01-01T00:00:00Z",
+  "generator": {
+    "name": "configflux-sbom",
+    "version": "0.1.0"
+  },
+  "context_tags": {
+    "cooling_brand": "hydra",
+    "cooling_model": "x200",
+    "pump_type": "dual",
+    "region": "us"
+  },
+  "choices": {},
+  "components": [
+    {
+      "component_id": "power_bus",
+      "type": "power_module",
+      "dependency_ids": []
+    },
+    {
+      "component_id": "thermal_control",
+      "type": "controller",
+      "dependency_ids": [
+        "power_bus"
+      ]
+    }
+  ],
+  "parameters": [
+    {
+      "path": "component.thermal_control.param.control_driver",
+      "component_id": "thermal_control",
+      "param_key": "control_driver",
+      "type": "artifact",
+      "value": "hydra_x200_dual_driver",
+      "safety": "q_m",
+      "lifecycle": "construction",
+      "binding_phase": "early",
+      "access": "developer",
+      "req_id": "req_s1_002",
+      "doc": "Control driver artifact reference"
+    },
+    {
+      "path": "component.thermal_control.param.max_flow_at_commissioning",
+      "component_id": "thermal_control",
+      "param_key": "max_flow_at_commissioning",
+      "type": "float",
+      "value": 42.5,
+      "unit": "lpm",
+      "safety": "sil2",
+      "lifecycle": "startup",
+      "binding_phase": "late",
+      "access": "integrator",
+      "req_id": "req_s1_001",
+      "doc": "Safe commissioning flow limit"
+    },
+    {
+      "path": "component.thermal_control.param.runtime_trim_gain",
+      "component_id": "thermal_control",
+      "param_key": "runtime_trim_gain",
+      "type": "float",
+      "value": 0.15,
+      "unit": "ratio",
+      "safety": "q_m",
+      "lifecycle": "runtime",
+      "binding_phase": "runtime",
+      "access": "technician",
+      "req_id": "req_s1_003",
+      "doc": "Runtime trim gain"
+    }
+  ],
+  "artifacts": [
+    {
+      "artifact_id": "hydra_x200_dual_driver",
+      "bound_paths": [
+        "component.thermal_control.param.control_driver"
+      ],
+      "name": "hydra_x200_dual_driver",
+      "version": "1.0.0",
+      "hash": "sha256-hydra-x200-dual",
+      "source": "artifact://drivers/hydra_x200_dual.so",
+      "target": "/opt/configflux/drivers/hydra_x200_dual.so",
+      "doc": "Hydra X200 dual-pump driver"
+    }
+  ],
+  "stats": {
+    "component_count": 2,
+    "parameter_count": 3,
+    "artifact_count": 1
+  }
+}

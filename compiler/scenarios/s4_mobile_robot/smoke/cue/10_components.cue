@@ -1,0 +1,156 @@
+// s4_mobile_robot/smoke -- 10_components chunk for the CUE authoring front-end
+// (ADR 0021, phase 7; configflux-ujh6). Bootstrapped from ../chunks/10_components.toml,
+// validated against compiler/cue/schema.cue, and exported to 10_components.json by the
+// pinned cue binary (compiler/cue/export_fixtures.sh). The differential gate
+// (scenario_cue_equivalence_tests.rs) proves the CUE-derived CMP is byte-identical
+// to the TOML-derived CMP. `condition`/`overrides` are opaque pass-through data
+// (ADR 0021 decision 1): CUE types and emits them verbatim.
+package configflux
+
+chunk: #Config & {
+  "package": "s4_mobile_robot",
+  "version": "1.0.0",
+  "artifacts": {
+    "differential_drive_driver": {
+      "name": "differential_drive_driver",
+      "version": "4.1.0",
+      "hash": "sha256-differential-drive",
+      "source": "artifact://drivers/differential_drive.so",
+      "target": "/opt/configflux/drivers/differential_drive.so",
+      "doc": "Differential-drive control artifact"
+    },
+    "mecanum_drive_driver": {
+      "name": "mecanum_drive_driver",
+      "version": "5.2.0",
+      "hash": "sha256-mecanum-drive",
+      "source": "artifact://drivers/mecanum_drive.so",
+      "target": "/opt/configflux/drivers/mecanum_drive.so",
+      "doc": "Mecanum-drive control artifact"
+    },
+    "lidar_localization_driver": {
+      "name": "lidar_localization_driver",
+      "version": "7.0.3",
+      "hash": "sha256-lidar-localization",
+      "source": "artifact://localization/lidar_stack.so",
+      "target": "/opt/configflux/localization/lidar_stack.so",
+      "doc": "Lidar localization artifact"
+    },
+    "visual_localization_driver": {
+      "name": "visual_localization_driver",
+      "version": "6.8.4",
+      "hash": "sha256-visual-localization",
+      "source": "artifact://localization/visual_stack.so",
+      "target": "/opt/configflux/localization/visual_stack.so",
+      "doc": "Visual localization artifact"
+    },
+    "payload_heavy_driver": {
+      "name": "payload_heavy_driver",
+      "version": "2.4.1",
+      "hash": "sha256-payload-heavy",
+      "source": "artifact://payload/heavy_lift.so",
+      "target": "/opt/configflux/payload/heavy_lift.so",
+      "doc": "Heavy-lift payload artifact"
+    },
+    "payload_light_driver": {
+      "name": "payload_light_driver",
+      "version": "2.4.1",
+      "hash": "sha256-payload-light",
+      "source": "artifact://payload/light_load.so",
+      "target": "/opt/configflux/payload/light_load.so",
+      "doc": "Light-load payload artifact"
+    }
+  },
+  "components": {
+    "robot_platform": {
+      "type": "platform",
+      "depends_on": [
+        "drive_stack",
+        "localization_stack",
+        "payload_stack",
+        "battery_manager"
+      ]
+    },
+    "drive_stack": {
+      "type": "module",
+      "params": {
+        "drive_profile": {
+          "inherits": "drive_profile",
+          "value": "differential",
+          "overrides": [
+            {
+              "condition": "drive_type == 'mecanum'",
+              "value": "mecanum"
+            }
+          ]
+        },
+        "drive_driver": {
+          "inherits": "drive_driver_slot",
+          "value": "differential_drive_driver",
+          "overrides": [
+            {
+              "condition": "drive_type == 'mecanum'",
+              "value": "mecanum_drive_driver"
+            }
+          ]
+        },
+        "max_speed_at_startup": {
+          "inherits": "max_speed_commissioning",
+          "value": 1.8
+        },
+        "runtime_trim_gain": {
+          "inherits": "runtime_trim",
+          "value": 0.2
+        }
+      }
+    },
+    "localization_stack": {
+      "type": "module",
+      "params": {
+        "localization_driver": {
+          "inherits": "localization_driver_slot",
+          "value": "visual_localization_driver",
+          "overrides": [
+            {
+              "condition": "localization_stack == 'lidar'",
+              "value": "lidar_localization_driver"
+            }
+          ]
+        }
+      }
+    },
+    "payload_stack": {
+      "type": "module",
+      "params": {
+        "payload_driver": {
+          "inherits": "payload_driver_slot",
+          "value": "payload_light_driver",
+          "overrides": [
+            {
+              "condition": "payload_module == 'heavy_lift'",
+              "value": "payload_heavy_driver"
+            }
+          ]
+        }
+      }
+    },
+    "battery_manager": {
+      "type": "module",
+      "params": {
+        "battery_profile": {
+          "inherits": "battery_profile",
+          "value": "standard",
+          "overrides": [
+            {
+              "condition": "battery_pack == 'high_density'",
+              "value": "high_density"
+            },
+            {
+              "condition": "battery_pack == 'long_life'",
+              "value": "long_life"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

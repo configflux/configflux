@@ -1,0 +1,519 @@
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_static_library", "rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["Cargo.toml"])
+
+filegroup(
+    name = "all_files",
+    srcs = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ),
+)
+
+COMMON_DEPS = [
+    "//compiler:compiler_lib",
+    "//solver:solver",
+    "@crates//:clap",
+    "@crates//:serde",
+    "@crates//:serde_json",
+]
+
+RUNTIME_BINARY_SRCS = [
+    "src/main.rs",
+    "src/cli_adapter.rs",
+    "src/explain_rejection.rs",
+    # configflux-9d28 (ADR-0031 D5): pure human-readable unsat-core renderer.
+    # CLI-only — deliberately absent from RUNTIME_C_ABI_STATIC_SRCS below.
+    "src/explain_renderer.rs",
+    "src/runtime_c_abi.rs",
+    "src/solver_validation.rs",
+]
+
+RUNTIME_TEST_SRCS = RUNTIME_BINARY_SRCS + [
+    "src/tests.rs",
+]
+
+# configflux-u32v: the runtime C ABI staticlib the C++/ROS2 SDKs link against.
+# It moved here from the compiler crate (was //compiler:runtime_c_abi_static) so
+# the open entrypoint can enforce the ADR-0030 D2 `.ccm` solver-model
+# precondition, which needs `//solver:solver` — a dependency the compiler crate
+# may not take (ADR-0003 §2). The crate root (`c_abi_lib.rs`) includes only
+# `runtime_c_abi` + `solver_validation`, so the staticlib stays free of the
+# clap-based CLI shell (no clap dep here).
+RUNTIME_C_ABI_STATIC_SRCS = [
+    "src/c_abi_lib.rs",
+    "src/runtime_c_abi.rs",
+    "src/solver_validation.rs",
+]
+
+SCENARIO_COMPILE_DATA = [
+    "//compiler:scenarios/s5_building_hvac/smoke/cue/00_definitions.json",
+    "//compiler:scenarios/s5_building_hvac/smoke/cue/10_components.json",
+    "//compiler:scenarios/s1_water_pump/smoke/cue/00_definitions.json",
+    "//compiler:scenarios/s1_water_pump/smoke/cue/10_components.json",
+    "//compiler:scenarios/s1_water_pump/medium/cue/00_definitions.json",
+    "//compiler:scenarios/s1_water_pump/medium/cue/10_components.json",
+    "//compiler:scenarios/s2_wind_turbine/smoke/cue/00_definitions.json",
+    "//compiler:scenarios/s2_wind_turbine/smoke/cue/10_components.json",
+    "//compiler:scenarios/s2_wind_turbine/medium/cue/00_definitions.json",
+    "//compiler:scenarios/s2_wind_turbine/medium/cue/10_components.json",
+    "//compiler:scenarios/s3_automation_cell/smoke/cue/00_definitions.json",
+    "//compiler:scenarios/s3_automation_cell/smoke/cue/10_components.json",
+    "//compiler:scenarios/s3_automation_cell/medium/cue/00_definitions.json",
+    "//compiler:scenarios/s3_automation_cell/medium/cue/10_components.json",
+    "//compiler:scenarios/s4_mobile_robot/smoke/cue/00_definitions.json",
+    "//compiler:scenarios/s4_mobile_robot/smoke/cue/10_components.json",
+    "//compiler:scenarios/s4_mobile_robot/medium/cue/00_definitions.json",
+    "//compiler:scenarios/s4_mobile_robot/medium/cue/10_components.json",
+    # configflux-vwhj: committed synthetic THREE-facet cross-facet-`requires`
+    # fixture, include_str!'d by the labeled-MUS exit-criterion E2E test.
+    "//compiler:scenarios/s_labeled_mus/00_definitions.json",
+    "//compiler:scenarios/s_labeled_mus/10_components.json",
+]
+
+rust_binary(
+    name = "runtime",
+    srcs = RUNTIME_BINARY_SRCS,
+    crate_root = "src/main.rs",
+    edition = "2021",
+    # ADR-0002 §5: feeds CARGO_PKG_VERSION so `#[command(version)]` in
+    # src/cli_adapter.rs resolves `--version` to the workspace release
+    # version. rules_rust defaults CARGO_PKG_VERSION to "0.0.0" when this
+    # attr is absent, so it must mirror /VERSION and [workspace.package].
+    version = "0.3.0",
+    deps = COMMON_DEPS,
+)
+
+rust_static_library(
+    name = "runtime_c_abi_static",
+    srcs = RUNTIME_C_ABI_STATIC_SRCS,
+    crate_name = "runtime_c_abi",
+    crate_root = "src/c_abi_lib.rs",
+    edition = "2021",
+    deps = [
+        "//compiler:compiler_lib",
+        "//solver:solver",
+        "@crates//:serde",
+        "@crates//:serde_json",
+    ],
+)
+
+rust_test(
+    name = "runtime_cli_test",
+    size = "small",
+    timeout = "short",
+    srcs = RUNTIME_TEST_SRCS,
+    crate_root = "src/main.rs",
+    compile_data = SCENARIO_COMPILE_DATA,
+    edition = "2021",
+    tags = [
+        "ci",
+        "owner:runtime",
+        "runtime",
+        "security",
+    ],
+    deps = COMMON_DEPS,
+)
+
+rust_test(
+    name = "runtime_contract_gate_test",
+    size = "small",
+    timeout = "short",
+    srcs = RUNTIME_TEST_SRCS,
+    crate_root = "src/main.rs",
+    args = [
+        "--exact",
+        "tests::run_001_open_snapshot_happy_path",
+    ],
+    compile_data = SCENARIO_COMPILE_DATA,
+    edition = "2021",
+    tags = [
+        "ci",
+        "owner:runtime",
+        "runtime",
+    ],
+    deps = COMMON_DEPS,
+)
+
+rust_test(
+    name = "runtime_policy_gate_test",
+    size = "small",
+    timeout = "short",
+    srcs = RUNTIME_TEST_SRCS,
+    crate_root = "src/main.rs",
+    args = [
+        "--exact",
+        "tests::run_010_set_parameter_runtime_mutable_happy_path",
+    ],
+    compile_data = SCENARIO_COMPILE_DATA,
+    edition = "2021",
+    tags = [
+        "ci",
+        "owner:runtime",
+        "runtime",
+        "security",
+    ],
+    deps = COMMON_DEPS,
+)
+
+rust_test(
+    name = "runtime_security_gate_test",
+    size = "small",
+    timeout = "short",
+    srcs = RUNTIME_TEST_SRCS,
+    crate_root = "src/main.rs",
+    args = [
+        "--exact",
+        "tests::run_015_transport_malformed_json_fail_closed",
+    ],
+    compile_data = SCENARIO_COMPILE_DATA,
+    edition = "2021",
+    tags = [
+        "ci",
+        "owner:runtime",
+        "runtime",
+        "security",
+    ],
+    deps = COMMON_DEPS,
+)
+
+rust_test(
+    name = "runtime_transport_gate_test",
+    size = "small",
+    timeout = "short",
+    srcs = RUNTIME_TEST_SRCS,
+    crate_root = "src/main.rs",
+    args = [
+        "--exact",
+        "tests::run_017_transport_request_file_io_failures",
+    ],
+    compile_data = SCENARIO_COMPILE_DATA,
+    edition = "2021",
+    tags = [
+        "ci",
+        "owner:runtime",
+        "runtime",
+        "security",
+    ],
+    deps = COMMON_DEPS,
+)
+
+rust_test(
+    name = "runtime_determinism_replay_gate_test",
+    size = "small",
+    timeout = "short",
+    srcs = RUNTIME_TEST_SRCS,
+    crate_root = "src/main.rs",
+    args = [
+        "--exact",
+        "tests::run_019_determinism_replay_read_paths_byte_stable",
+    ],
+    compile_data = SCENARIO_COMPILE_DATA,
+    edition = "2021",
+    tags = [
+        "ci",
+        "owner:runtime",
+        "runtime",
+        "security",
+    ],
+    deps = COMMON_DEPS,
+)
+
+rust_test(
+    name = "runtime_system_e2e_gate_test",
+    size = "small",
+    timeout = "short",
+    srcs = RUNTIME_TEST_SRCS,
+    crate_root = "src/main.rs",
+    args = [
+        "--exact",
+        "tests::run_020_determinism_write_readback_consistency_and_hash_lineage",
+    ],
+    compile_data = SCENARIO_COMPILE_DATA,
+    edition = "2021",
+    tags = [
+        "ci",
+        "owner:runtime",
+        "runtime",
+        "security",
+        "system",
+    ],
+    deps = COMMON_DEPS,
+)
+
+# Solver-backed option validation on set_parameter — configflux-g3f.3 /
+# ADR-0017 (B.1). Compiles the product scenario, loads the real `.ccm`
+# sibling through `solver::Session::<CuddBackend>`, and proves that a
+# constraint-violating selection write is rejected with the `E_SELECTION_*`
+# family while a satisfiable write succeeds. Product-stack + system tagged
+# (E2E impact: regression).
+rust_test(
+    name = "runtime_solver_option_validation_test",
+    size = "small",
+    timeout = "short",
+    srcs = RUNTIME_TEST_SRCS,
+    crate_root = "src/main.rs",
+    args = [
+        "--exact",
+        "tests::run_036_set_parameter_solver_option_validation",
+    ],
+    compile_data = SCENARIO_COMPILE_DATA,
+    edition = "2021",
+    tags = [
+        "ci",
+        "owner:runtime",
+        "runtime",
+        "security",
+        "solver",
+        "system",
+    ],
+    deps = COMMON_DEPS,
+)
+
+# Solver-backed `explain-rejection` — configflux-3b5y / ADR-0031 D1–D4.
+# Compiles the mutually-exclusive solver fixture, opens a runtime session,
+# and proves: (a) explaining a constraint-violating value returns a labeled
+# `unsat_core` with `{facet}.{option}` names at exit 0; (b) explaining a
+# valid value succeeds at exit 0 with no core; (c) an unknown facet/value
+# fails closed at exit 2 with `E_SELECTION_UNKNOWN_FACET` and no core.
+# Product-stack + system tagged (E2E impact: smoke).
+rust_test(
+    name = "runtime_explain_rejection_test",
+    size = "small",
+    timeout = "short",
+    srcs = RUNTIME_TEST_SRCS,
+    crate_root = "src/main.rs",
+    args = [
+        "--exact",
+        "tests::run_046_explain_rejection_solver_unsat_core",
+    ],
+    compile_data = SCENARIO_COMPILE_DATA,
+    edition = "2021",
+    tags = [
+        "ci",
+        "owner:runtime",
+        "runtime",
+        "security",
+        "solver",
+        "system",
+    ],
+    deps = COMMON_DEPS,
+)
+
+rust_test(
+    name = "runtime_explain_rejection_unknown_facet_test",
+    size = "small",
+    timeout = "short",
+    srcs = RUNTIME_TEST_SRCS,
+    crate_root = "src/main.rs",
+    args = [
+        "--exact",
+        "tests::run_047_explain_rejection_unknown_facet_fails_closed",
+    ],
+    compile_data = SCENARIO_COMPILE_DATA,
+    edition = "2021",
+    tags = [
+        "ci",
+        "owner:runtime",
+        "runtime",
+        "security",
+        "solver",
+        "system",
+    ],
+    deps = COMMON_DEPS,
+)
+
+# configflux-vwhj — labeled-MUS exit-criterion E2E on the runtime
+# `explain-rejection` path (configflux-osp M4 hard exit criterion). Compiles
+# the committed THREE-facet cross-facet-`requires` fixture, opens a snapshot
+# carrying the prior `cpu=highperf` selection, and asserts the returned
+# `unsat_core` carries NO raw BDD variable index (a bare integer) in any
+# facet/option position (ADR-0031 D3). E2E impact: regression. Named so CI
+# never skips it.
+rust_test(
+    name = "runtime_labeled_mus_exit_criterion_test",
+    size = "small",
+    timeout = "short",
+    srcs = RUNTIME_TEST_SRCS,
+    crate_root = "src/main.rs",
+    args = [
+        "--exact",
+        "tests::run_048_explain_rejection_labeled_mus_has_no_raw_indices",
+    ],
+    compile_data = SCENARIO_COMPILE_DATA,
+    edition = "2021",
+    tags = [
+        "ci",
+        "owner:runtime",
+        "runtime",
+        "security",
+        "solver",
+        "system",
+    ],
+    deps = COMMON_DEPS,
+)
+
+rust_test(
+    name = "runtime_v2_sync_delta_gate_test",
+    size = "small",
+    timeout = "short",
+    srcs = RUNTIME_TEST_SRCS,
+    crate_root = "src/main.rs",
+    args = [
+        "--exact",
+        "tests::run_029_pull_updates_enforces_delta_preconditions_and_upstream_wins_conflicts",
+    ],
+    compile_data = SCENARIO_COMPILE_DATA,
+    edition = "2021",
+    tags = [
+        "ci",
+        "owner:runtime",
+        "runtime",
+        "security",
+        "v2",
+    ],
+    deps = COMMON_DEPS,
+)
+
+rust_test(
+    name = "runtime_v2_direct_push_gate_test",
+    size = "small",
+    timeout = "short",
+    srcs = RUNTIME_TEST_SRCS,
+    crate_root = "src/main.rs",
+    args = [
+        "--exact",
+        "tests::run_030_direct_push_offline_and_export_pending_sync_bundle",
+    ],
+    compile_data = SCENARIO_COMPILE_DATA,
+    edition = "2021",
+    tags = [
+        "ci",
+        "owner:runtime",
+        "runtime",
+        "security",
+        "v2",
+    ],
+    deps = COMMON_DEPS,
+)
+
+rust_test(
+    name = "runtime_v2_audit_replay_gate_test",
+    size = "small",
+    timeout = "short",
+    srcs = RUNTIME_TEST_SRCS,
+    crate_root = "src/main.rs",
+    args = [
+        "--exact",
+        "tests::run_033_deferred_audit_replay_is_recoverable_across_reboot",
+    ],
+    compile_data = SCENARIO_COMPILE_DATA,
+    edition = "2021",
+    tags = [
+        "ci",
+        "owner:runtime",
+        "runtime",
+        "security",
+        "v2",
+    ],
+    deps = COMMON_DEPS,
+)
+
+rust_test(
+    name = "runtime_v2_persistence_negative_gate_test",
+    size = "small",
+    timeout = "short",
+    srcs = RUNTIME_TEST_SRCS,
+    crate_root = "src/main.rs",
+    args = [
+        "--exact",
+        "tests::run_031_malformed_state_event_bus_is_rejected_deterministically",
+    ],
+    compile_data = SCENARIO_COMPILE_DATA,
+    edition = "2021",
+    tags = [
+        "ci",
+        "owner:runtime",
+        "runtime",
+        "security",
+        "v2",
+    ],
+    deps = COMMON_DEPS,
+)
+
+rust_test(
+    name = "runtime_v2_persistence_corrupt_gate_test",
+    size = "small",
+    timeout = "short",
+    srcs = RUNTIME_TEST_SRCS,
+    crate_root = "src/main.rs",
+    args = [
+        "--exact",
+        "tests::run_032_corrupted_persistence_audit_state_is_rejected_deterministically",
+    ],
+    compile_data = SCENARIO_COMPILE_DATA,
+    edition = "2021",
+    tags = [
+        "ci",
+        "owner:runtime",
+        "runtime",
+        "security",
+        "v2",
+    ],
+    deps = COMMON_DEPS,
+)
+
+test_suite(
+    name = "runtime_v2_gate_test",
+    tags = [
+        "ci",
+        "owner:runtime",
+        "runtime",
+        "security",
+        "v2",
+    ],
+    tests = [
+        ":runtime_v2_audit_replay_gate_test",
+        ":runtime_v2_direct_push_gate_test",
+        ":runtime_v2_persistence_corrupt_gate_test",
+        ":runtime_v2_persistence_negative_gate_test",
+        ":runtime_v2_sync_delta_gate_test",
+    ],
+)
+
+test_suite(
+    name = "runtime_scenario_smoke_test",
+    tags = [
+        "ci",
+        "owner:runtime",
+        "runtime",
+    ],
+    tests = [
+        ":runtime_contract_gate_test",
+        ":runtime_policy_gate_test",
+        ":runtime_security_gate_test",
+        ":runtime_transport_gate_test",
+    ],
+)
+
+test_suite(
+    name = "runtime_scenario_medium_test",
+    tags = [
+        "ci",
+        "owner:runtime",
+        "runtime",
+        "security",
+    ],
+    tests = [
+        ":runtime_cli_test",
+        ":runtime_determinism_replay_gate_test",
+        ":runtime_explain_rejection_test",
+        ":runtime_explain_rejection_unknown_facet_test",
+        ":runtime_labeled_mus_exit_criterion_test",
+        ":runtime_solver_option_validation_test",
+        ":runtime_system_e2e_gate_test",
+        ":runtime_v2_gate_test",
+    ],
+)

@@ -1,0 +1,6 @@
+string runtime_snapshot_json
+string actor
+string reason
+string[] rollback_ros_parameter_names
+---
+configflux_ros2_sdk/RuntimeControlResult result

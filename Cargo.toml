@@ -1,0 +1,45 @@
+[workspace]
+members = [
+    # Presentation-only one-shot CLI over the resolution pipeline (ADR-0042,
+    # configflux-2awb.2). It has NO direct `//solver` edge; it obtains
+    # solver-authoritative decision content through the shared `session_compose`
+    # crate (wired in the CFX-2 / CFX-3 follow-ups, configflux-2awb.3/.4), never
+    # by importing `solver` directly.
+    "cfx",
+    "compiler",
+    "interpreter",
+    # Shared solver-composition crate (ADR-0003 §2 amendment / ADR-0042 §2
+    # amendment, configflux-szwp / configflux-kkhc). Extracted verbatim from the
+    # interpreter's former `solver_session` module so the interpreter and `cfx`
+    # share one implementation and produce byte-identical `options` / `select` /
+    # `resolve` / `explain` envelopes. It is the sole composition seam depending
+    # on both `compiler` and `solver`; neither library imports the other.
+    "session_compose",
+    "runtime",
+    "solver",
+    # In-tree fork of cudd-sys (MIT) per ADR-0004 §3 second-pass
+    # amendment (configflux-7hn2 / configflux-d1cc). The fork strips
+    # the upstream `build.rs`; CUDD itself is vendored at
+    # `third_party/cudd/` and built by the Bazel cc_library at
+    # `//third_party/cudd:cudd`. Workspace-member status is required so
+    # `cargo metadata` resolves the path dep declared in
+    # `solver/Cargo.toml` and so `crate_universe` can include the
+    # manifest in its `from_cargo` extension.
+    "third_party/cudd-sys",
+]
+resolver = "2"
+
+# ADR-0002 §1: single source of truth for the workspace release version.
+# The three product binaries (compiler, runtime, interpreter) and the
+# first-party solver crate inherit `version` from here via
+# `version.workspace = true`. The plain-text `/VERSION` file mirrors this
+# value for non-Rust tooling (release notes, audit, publish) and is kept
+# in sync by hand during a release cut per ADR-0002 §6. `edition` and
+# `license` are inherited workspace-wide; the entire repository is
+# BUSL-1.1 per ADR-0046 (dual license: BUSL-1.1 + commercial; supersedes
+# the ADR-0029 Apache-2.0 relicense; the former solver-only carve-out
+# under ADR-0007 stays dissolved).
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "BUSL-1.1"

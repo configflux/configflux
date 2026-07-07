@@ -1,0 +1,20 @@
+[package]
+name = "cfx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# `cfx` is presentation only (ADR-0042 §2, amended 2026-07-03). It has NO direct
+# `solver` edge: it obtains solver-authoritative decision content (the `options`
+# post-selection valid set) through the shared `session_compose` crate — the sole
+# seam permitted to depend on both `compiler` and `solver` (ADR-0003 §2
+# amendment) — never by importing `solver` directly. It still depends on the
+# cudd-free default `compiler` library for the loader-only ops that carry no
+# solver decision. No new external dependency beyond what the workspace vendors.
+[dependencies]
+clap = { version = "4.5.53", features = ["derive"] }
+compiler = { path = "../compiler" }
+session_compose = { path = "../session_compose" }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.140"

@@ -1,0 +1,65 @@
+{
+  "package": "sensor_gateway",
+  "version": "1.0.0",
+  "components": {
+    "sensor_bus": {
+      "type": "module",
+      "params": {
+        "protocol": {
+          "inherits": "protocol",
+          "type": "string",
+          "lifecycle": "construction",
+          "access": "developer",
+          "doc": "Field-bus protocol used by the gateway",
+          "value": "modbus_rtu",
+          "overrides": [
+            {
+              "condition": "bus_type == 'ethernet'",
+              "value": "modbus_tcp"
+            }
+          ]
+        }
+      }
+    },
+    "data_logger": {
+      "type": "module",
+      "depends_on": ["sensor_bus"],
+      "params": {
+        "poll_interval": {
+          "inherits": "poll_interval_ms",
+          "type": "integer",
+          "unit": "ms",
+          "lifecycle": "startup",
+          "access": "integrator",
+          "doc": "Sensor poll interval in milliseconds",
+          "value": 1000,
+          "overrides": [
+            {
+              "condition": "environment == 'high_speed'",
+              "value": 100
+            }
+          ]
+        },
+        "buffer_depth": {
+          "inherits": "buffer_depth",
+          "type": "integer",
+          "lifecycle": "startup",
+          "access": "integrator",
+          "doc": "Number of readings held in the ring buffer",
+          "value": 64,
+          "overrides": [
+            {
+              "condition": "environment == 'high_speed'",
+              "value": 256
+            }
+          ]
+        }
+      }
+    },
+    "network_monitor": {
+      "type": "module",
+      "depends_on": ["sensor_bus"],
+      "condition": "bus_type == 'ethernet'"
+    }
+  }
+}

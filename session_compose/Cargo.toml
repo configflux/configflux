@@ -1,0 +1,19 @@
+[package]
+name = "session_compose"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# Shared solver-composition crate (ADR-0003 §2 amendment / ADR-0042 §2
+# amendment, configflux-szwp / configflux-kkhc). Extracted VERBATIM from the
+# interpreter's former `solver_session` module so both the interpreter and `cfx`
+# consume one implementation and produce byte-identical `options` / `select` /
+# `resolve` / `explain` envelopes. It sits ABOVE both libraries: it imports
+# `compiler` (request/response envelopes + legacy delegations) and `solver` (the
+# `Session` API) — the single composition seam permitted to depend on both,
+# without either library importing the other (ADR-0003 §2). No new external
+# dependency: the moved code uses only std collections plus the two path deps.
+[dependencies]
+compiler = { path = "../compiler" }
+solver = { path = "../solver" }

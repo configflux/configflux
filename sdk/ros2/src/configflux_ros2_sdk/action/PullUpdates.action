@@ -1,0 +1,17 @@
+uint8 SOURCE_BACKEND=0
+uint8 SOURCE_DIRECT_PUSH=1
+
+string runtime_snapshot_json
+string actor
+string reason
+bool backend_connected
+uint8 source
+configflux_ros2_sdk/PullUpdateWrite[] writes
+string base_configuration_id
+bool full_snapshot
+string pending_update_summary
+string target_configuration_id
+---
+configflux_ros2_sdk/RuntimeControlResult result
+---
+string stage

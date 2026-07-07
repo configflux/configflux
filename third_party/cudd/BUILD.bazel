@@ -1,0 +1,268 @@
+# Bazel build for vendored CUDD 3.0.0 (BSD-3-Clause).
+#
+# Per ADR-0004 §3 second-pass amendment (2026-05-09, configflux-7hn2),
+# CUDD is consumed in-tree as a hand-authored cc_library — no autotools,
+# no rules_foreign_cc, no http_archive, no network or build-time fetches.
+# The upstream `cplusplus/` and `nanotrav/` directories are excluded
+# (demo/benchmark surface area we do not link); `config.h` in this
+# directory is hand-authored as a Linux/LP64 substitute for the
+# autotools-generated `config.h.in` (see the header comment for scope
+# and maintenance notes).
+#
+# Sub-libraries enumerated below match the upstream Makefile layout:
+#   util/  — POSIX wrappers (cpu_time, datalimit, safe_mem, ...)
+#   epd/   — extended-precision floating point
+#   st/    — generic hash table
+#   mtr/   — multiway-branching trees
+#   cudd/  — the BDD/ADD/ZDD package itself (depends on util/epd/st/mtr)
+#   dddmp/ — decision-diagram serialisation (depends on cudd)
+#
+# The cudd-sys fork at //third_party/cudd-sys/ is a path-dep on the
+# `solver/` crate and links against `:cudd` indirectly via the
+# `solver/BUILD.bazel` `rust_library.deps`. solver/ is the only crate
+# allowed to link cudd_sys per ADR-0003 §3 / ADR-0004 §3 amendment.
+
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+# Verbatim upstream LICENSE — required for REUSE / source distribution.
+exports_files([
+    "LICENSE",
+    "README",
+    "RELEASE.NOTES",
+])
+
+# Common copts for every CUDD sub-library.
+#
+# - `-DHAVE_CONFIG_H=1` and `-include config.h` mirror what the
+#   upstream Makefile does (`AM_CPPFLAGS = -DHAVE_CONFIG_H -I...`)
+#   so the C source's `#if HAVE_*` checks resolve against our
+#   hand-authored `config.h`.
+# - `-w` suppresses upstream warnings; CUDD 3.0.0 predates several
+#   modern warning categories and we are not patching upstream source.
+#   The repo lint posture only enforces warnings on first-party code.
+CUDD_COMMON_COPTS = [
+    # `HAVE_CONFIG_H` makes the `#if HAVE_CONFIG_H` guards in upstream
+    # source pull in `config.h` from the include search path. Each
+    # cc_library below sets `includes = [..., "."]`, so the
+    # hand-authored `config.h` at this directory's root is reachable
+    # as a bare `<config.h>` for every translation unit that includes
+    # `cuddInt.h` or directly probes the autotools macros.
+    "-DHAVE_CONFIG_H=1",
+    "-w",
+    "-fno-strict-aliasing",
+    "-pthread",
+]
+
+# Generated header substitute — see file comment for scope.
+filegroup(
+    name = "config_header",
+    srcs = ["config.h"],
+)
+
+# `util/` — POSIX wrappers used by every other sub-library.
+cc_library(
+    name = "util",
+    srcs = [
+        "util/cpu_stats.c",
+        "util/cpu_time.c",
+        "util/cstringstream.c",
+        "util/datalimit.c",
+        "util/pathsearch.c",
+        "util/pipefork.c",
+        "util/prtime.c",
+        "util/safe_mem.c",
+        "util/strsav.c",
+        "util/texpand.c",
+        "util/ucbqsort.c",
+    ],
+    hdrs = [
+        "config.h",
+        "util/cstringstream.h",
+        "util/util.h",
+    ],
+    copts = CUDD_COMMON_COPTS,
+    includes = ["util", "."],
+    linkstatic = True,
+)
+
+# `epd/` — extended double precision.
+cc_library(
+    name = "epd",
+    srcs = ["epd/epd.c"],
+    hdrs = [
+        "config.h",
+        "epd/epd.h",
+        "epd/epdInt.h",
+    ],
+    copts = CUDD_COMMON_COPTS,
+    includes = ["epd", "util", "."],
+    linkstatic = True,
+    deps = [":util"],
+)
+
+# `st/` — symbol-table hash.
+cc_library(
+    name = "st",
+    srcs = ["st/st.c"],
+    hdrs = [
+        "config.h",
+        "st/st.h",
+    ],
+    copts = CUDD_COMMON_COPTS,
+    includes = ["st", "util", "."],
+    linkstatic = True,
+    deps = [":util"],
+)
+
+# `mtr/` — multiway-branching trees.
+cc_library(
+    name = "mtr",
+    srcs = [
+        "mtr/mtrBasic.c",
+        "mtr/mtrGroup.c",
+    ],
+    hdrs = [
+        "config.h",
+        "mtr/mtr.h",
+        "mtr/mtrInt.h",
+    ],
+    copts = CUDD_COMMON_COPTS,
+    includes = ["mtr", "util", "."],
+    linkstatic = True,
+    deps = [":util"],
+)
+
+# `cudd/` — BDD/ADD/ZDD core. Depends on every other sub-library.
+cc_library(
+    name = "cudd_core",
+    srcs = [
+        "cudd/cuddAPI.c",
+        "cudd/cuddAddAbs.c",
+        "cudd/cuddAddApply.c",
+        "cudd/cuddAddFind.c",
+        "cudd/cuddAddInv.c",
+        "cudd/cuddAddIte.c",
+        "cudd/cuddAddNeg.c",
+        "cudd/cuddAddWalsh.c",
+        "cudd/cuddAndAbs.c",
+        "cudd/cuddAnneal.c",
+        "cudd/cuddApa.c",
+        "cudd/cuddApprox.c",
+        "cudd/cuddBddAbs.c",
+        "cudd/cuddBddCorr.c",
+        "cudd/cuddBddIte.c",
+        "cudd/cuddBridge.c",
+        "cudd/cuddCache.c",
+        "cudd/cuddCheck.c",
+        "cudd/cuddClip.c",
+        "cudd/cuddCof.c",
+        "cudd/cuddCompose.c",
+        "cudd/cuddDecomp.c",
+        "cudd/cuddEssent.c",
+        "cudd/cuddExact.c",
+        "cudd/cuddExport.c",
+        "cudd/cuddGenCof.c",
+        "cudd/cuddGenetic.c",
+        "cudd/cuddGroup.c",
+        "cudd/cuddHarwell.c",
+        "cudd/cuddInit.c",
+        "cudd/cuddInteract.c",
+        "cudd/cuddLCache.c",
+        "cudd/cuddLevelQ.c",
+        "cudd/cuddLinear.c",
+        "cudd/cuddLiteral.c",
+        "cudd/cuddMatMult.c",
+        "cudd/cuddPriority.c",
+        "cudd/cuddRead.c",
+        "cudd/cuddRef.c",
+        "cudd/cuddReorder.c",
+        "cudd/cuddSat.c",
+        "cudd/cuddSign.c",
+        "cudd/cuddSolve.c",
+        "cudd/cuddSplit.c",
+        "cudd/cuddSubsetHB.c",
+        "cudd/cuddSubsetSP.c",
+        "cudd/cuddSymmetry.c",
+        "cudd/cuddTable.c",
+        "cudd/cuddUtil.c",
+        "cudd/cuddWindow.c",
+        "cudd/cuddZddCount.c",
+        "cudd/cuddZddFuncs.c",
+        "cudd/cuddZddGroup.c",
+        "cudd/cuddZddIsop.c",
+        "cudd/cuddZddLin.c",
+        "cudd/cuddZddMisc.c",
+        "cudd/cuddZddPort.c",
+        "cudd/cuddZddReord.c",
+        "cudd/cuddZddSetop.c",
+        "cudd/cuddZddSymm.c",
+        "cudd/cuddZddUtil.c",
+    ],
+    hdrs = [
+        "config.h",
+        "cudd/cudd.h",
+        "cudd/cuddInt.h",
+    ],
+    copts = CUDD_COMMON_COPTS,
+    includes = ["cudd", "epd", "mtr", "st", "util", "."],
+    linkopts = ["-lm", "-pthread"],
+    linkstatic = True,
+    deps = [
+        ":epd",
+        ":mtr",
+        ":st",
+        ":util",
+    ],
+)
+
+# `dddmp/` — decision-diagram serialisation. Depends on cudd_core.
+cc_library(
+    name = "dddmp",
+    srcs = [
+        "dddmp/dddmpBinary.c",
+        "dddmp/dddmpConvert.c",
+        "dddmp/dddmpDbg.c",
+        "dddmp/dddmpLoad.c",
+        "dddmp/dddmpLoadCnf.c",
+        "dddmp/dddmpNodeAdd.c",
+        "dddmp/dddmpNodeBdd.c",
+        "dddmp/dddmpNodeCnf.c",
+        "dddmp/dddmpStoreAdd.c",
+        "dddmp/dddmpStoreBdd.c",
+        "dddmp/dddmpStoreCnf.c",
+        "dddmp/dddmpStoreMisc.c",
+        "dddmp/dddmpUtil.c",
+    ],
+    hdrs = [
+        "config.h",
+        "dddmp/dddmp.h",
+        "dddmp/dddmpInt.h",
+    ],
+    copts = CUDD_COMMON_COPTS,
+    includes = ["cudd", "dddmp", "epd", "mtr", "st", "util", "."],
+    linkstatic = True,
+    deps = [
+        ":cudd_core",
+        ":epd",
+        ":mtr",
+        ":st",
+        ":util",
+    ],
+)
+
+# Public alias — the single dep that the cudd-sys fork (and any other
+# downstream caller) links against.
+cc_library(
+    name = "cudd",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":cudd_core",
+        ":dddmp",
+        ":epd",
+        ":mtr",
+        ":st",
+        ":util",
+    ],
+)

@@ -1,0 +1,6 @@
+{
+  "facet": "cooling_model",
+  "valid_options": [
+    "x200"
+  ]
+}

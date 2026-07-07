@@ -1,0 +1,25 @@
+{
+    "package": "s5_building_hvac",
+    "version": "1.0.0",
+    "definitions": {
+        "ventilation_profile": {
+            "type": "string",
+            "doc": "Commissioning profile selected for the building HVAC controller",
+            "lifecycle": "startup",
+            "access": "integrator"
+        },
+        "controller_package": {
+            "type": "artifact",
+            "doc": "Selected HVAC controller package artifact",
+            "lifecycle": "construction",
+            "access": "developer"
+        },
+        "airflow_trim_gain": {
+            "type": "float",
+            "unit": "ratio",
+            "doc": "Runtime airflow trim gain for balancing after commissioning",
+            "lifecycle": "runtime",
+            "access": "technician"
+        }
+    }
+}
