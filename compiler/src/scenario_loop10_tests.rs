@@ -168,6 +168,7 @@ fn runtime_open_request_from_resolve(result: &crate::loader_api::ResolveResult) 
         resolved_artifacts: result.resolved_artifacts.clone(),
         context_tags: result.context_tags.clone(),
         choices: result.choices.clone(),
+        defaulted_choices: result.defaulted_choices.clone(),
         committed_overlay: std::collections::BTreeMap::new(),
         dirty_overlay: std::collections::BTreeMap::new(),
         dirty_generations: std::collections::BTreeMap::new(),

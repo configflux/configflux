@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-use crate::product_api::{E_COMPONENT_DEP_CYCLE, E_COMPONENT_DEP_DIAMOND};
+use crate::product_api::E_COMPONENT_DEP_CYCLE;
 use crate::scenario_test_support::{unique_temp_dir, TempDirGuard};
 use crate::loader_api::{
     apply_selection, canonical_selection_state, export_resolved, export_software_bom,
@@ -705,7 +705,10 @@ fn loop7_medium_mutations_cycle_and_unsatisfied_emit_stable_codes() -> Result<()
 }
 
 #[test]
-fn loop7_large_mutations_diamond_and_unsatisfied_emit_stable_codes() -> Result<()> {
+fn loop7_large_diamond_accepted_and_unsatisfied_emits_stable_code() -> Result<()> {
+    // ADR-0048: a diamond mutation (`loop7_diamond_shared` reached via both
+    // `left` and `right`) is a permitted DAG and verifies cleanly on a large
+    // scenario. Only cycle/unsatisfied paths still carry stable codes.
     let diamond_manifest = manifest_for_spec(
         &S4_LARGE_SPEC,
         &[(DIAMOND_MUTATION_SOURCE, DIAMOND_MUTATION_CHUNK)],
@@ -714,11 +717,8 @@ fn loop7_large_mutations_diamond_and_unsatisfied_emit_stable_codes() -> Result<(
         schema_version: PRODUCT_SCHEMA_VERSION,
         source_manifest: diamond_manifest,
     });
-    assert_eq!(diamond_verify.status, OperationStatus::Error);
-    assert_eq!(
-        diamond_verify.diagnostics.diagnostics[0].code,
-        E_COMPONENT_DEP_DIAMOND.to_string()
-    );
+    assert_eq!(diamond_verify.status, OperationStatus::Ok);
+    assert_eq!(diamond_verify.error_count, 0);
 
     let large_unsat_manifest = manifest_for_spec(&S3_LARGE_SPEC, &[]);
     let large_unsat_compile_dir = temp_output_dir("unsat-resolve-large")?;

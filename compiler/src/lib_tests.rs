@@ -51,6 +51,7 @@
             definitions: HashMap::new(),
             components,
             artifacts: HashMap::new(),
+            facets: Default::default(),
         }
     }
 
@@ -66,6 +67,7 @@
             definitions,
             components: HashMap::new(),
             artifacts: HashMap::new(),
+            facets: Default::default(),
         }
     }
 
@@ -168,6 +170,72 @@
     }
 
     #[test]
+    fn test_duplicate_facet_across_chunks_is_rejected_at_ingest() {
+        // ADR-0047 §2: a facet is a pack-global domain declared by at most one
+        // chunk; the second declaration fails at ingest merge.
+        let mut compiler = Compiler::new();
+        let chunk_a = r#"
+            package = "p1"
+            version = "1.0"
+
+            [facets.region]
+            values = ["eu", "us"]
+            default = "eu"
+        "#;
+        let chunk_b = r#"
+            package = "p1"
+            version = "1.0"
+
+            [facets.region]
+            values = ["eu", "apac"]
+        "#;
+        compiler.add_chunk_auto("00_defs.toml", chunk_a).unwrap();
+        let err = compiler.add_chunk_auto("01_more.toml", chunk_b).unwrap_err();
+        assert!(
+            format!("{err}").contains("Facet 'region' is declared in more than one chunk"),
+            "err: {err}"
+        );
+    }
+
+    #[test]
+    fn test_link_and_verify_rejects_facet_default_not_in_values() {
+        let mut compiler = Compiler::new();
+        let chunk = r#"
+            package = "p1"
+            version = "1.0"
+
+            [facets.region]
+            values = ["eu", "us"]
+            default = "mars"
+        "#;
+        compiler.add_chunk_auto("chunk.toml", chunk).unwrap();
+        let err = compiler.link_and_verify().unwrap_err();
+        assert!(
+            format!("{err}").contains("default 'mars' is not one of"),
+            "err: {err}"
+        );
+    }
+
+    #[test]
+    fn test_link_and_verify_accepts_declared_facet_with_matching_condition() {
+        let mut compiler = Compiler::new();
+        let chunk = r#"
+            package = "p1"
+            version = "1.0"
+
+            [facets.region]
+            values = ["eu", "us"]
+            default = "eu"
+
+            [components.motor]
+            type = "actuator"
+            condition = "region == 'us'"
+        "#;
+        compiler.add_chunk_auto("chunk.toml", chunk).unwrap();
+        assert!(compiler.link_and_verify().is_ok());
+    }
+
+    #[test]
     fn test_link_and_verify_cycle() {
         let mut compiler = Compiler::new();
 
@@ -193,7 +261,10 @@
     }
 
     #[test]
-    fn test_link_and_verify_diamond_dependency() {
+    fn test_link_and_verify_diamond_dependency_is_accepted() {
+        // ADR-0048: diamonds (here `shared` reached from `root` via both `left`
+        // and `right`) are a permitted DAG shape. Link/verify accepts them;
+        // acyclicity is still enforced by the cycle check.
         let mut compiler = Compiler::new();
 
         let chunk = r#"
@@ -217,10 +288,9 @@
         "#;
 
         compiler.add_chunk_auto("chunk.toml", chunk).unwrap();
-        let err = compiler.link_and_verify().unwrap_err();
         assert!(
-            format!("{err}").contains("Diamond dependency detected"),
-            "err: {err}"
+            compiler.link_and_verify().is_ok(),
+            "a diamond dependency must be accepted after ADR-0048"
         );
     }
 

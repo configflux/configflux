@@ -7,7 +7,9 @@ now want to model your own equipment, product family, or system.
 
 Models are authored in **CUE**. You write typed `.cue` chunks, export them to
 inheritance-resolved JSON, and feed that JSON to the compiler. CUE is the sole
-authoring and ingestion format; this guide teaches that flow end to end.
+authoring format; the exported JSON the compiler ingests is an internal artifact
+of that export pipeline, not a format you hand-write. This guide teaches the flow
+end to end.
 
 ## Prerequisites
 
@@ -109,9 +111,9 @@ time, not a silent no-op.
 
 If one component requires another to be present, declare it with `depends_on`.
 The compiler validates that dependency targets exist and that the dependency
-graph is acyclic. The project's dependency model is also designed to reject
-diamond shapes (a component reachable via two paths from the same root); keep
-your dependencies a simple tree where you can:
+graph is acyclic. The graph may be any DAG: a component reachable via multiple
+paths from the same root (a diamond) is fine — model a shared platform or HAL
+layer with many consumers directly (ADR-0048). Only cycles are rejected:
 
 ```cue
 components: {
@@ -360,11 +362,42 @@ chunks describe the components those choices select among.
 | Automation cell | `conveyor_brand`, `vision_stack`, `safety_mode`, `network_topology` | vendor names, pl_d/pl_e, ring/star |
 | Building HVAC | `occupancy_class`, `filtration_grade`, `region` | office/hospital, merv13/hepa, us/eu |
 
+### Declaring a facet's domain and default (optional)
+
+By default a facet is *implicit*: its domain is inferred from the values your
+conditions compare it against. That is enough for many models, but it cannot
+represent a **default arm** — a value that is correct when nothing is selected
+and that therefore appears in no condition. To make the full domain and its
+default first-class, declare the facet with a `#Facet` in your
+`00_definitions` chunk (ADR-0047):
+
+```cue
+facets: {
+    region: {
+        values:  ["us", "eu"]   // ordered, non-empty, unique
+        default: "us"           // must be one of values; the arm no condition names
+        doc:     "Deployment region"
+    }
+}
+```
+
+A declared **closed** facet (the default; add `open: true` only for an
+extensible domain) publishes its whole vocabulary into the option universe, and
+at resolve time an unbound declared facet **auto-binds to its `default`** — so a
+user who selects nothing still gets a valid resolution, and the resolved output
+records the auto-bind under `defaulted_choices`. Declare a facet only when you
+want its full domain or its default to be first-class; leaving a facet implicit
+keeps today's inferred behavior. Every value your conditions reference must be
+in a closed facet's `values`, and `default` must be one of them — the compiler
+re-checks both.
+
 ### The default context
 
 Every profile must provide a `default_context` that assigns a value to each
-facet. This is the starting point for selection and must produce a valid
-resolved model. The compiler and interpreter use it as the baseline.
+facet. This is the starting point for selection. For an implicit facet it must
+name a value the model can resolve; for a declared facet you may instead rely on
+its declared `default`, which auto-binds when the facet is left unbound. The
+compiler and interpreter use the default context as the baseline.
 
 ## 5) Artifact References
 
@@ -852,8 +885,8 @@ bazel-bin/compiler/compiler verify \
 
 Validation covers: JSON parse validity, snake_case id enforcement, definition
 inheritance integrity (targets exist, no cycles), component dependency
-validation (targets exist, no cycles, no diamonds), and condition compatibility
-(dependent components have compatible conditions).
+validation (targets exist, no cycles; any DAG including diamonds is allowed),
+and condition compatibility (dependent components have compatible conditions).
 
 `inspect ... summary` prints an overview of the merged model:
 

@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-use crate::schema::{Artifact, Component, Config, Parameter};
+use crate::schema::{Artifact, Component, Config, Facet, Parameter};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
-pub const IR_FORMAT_VERSION: u32 = 1;
+// Bumped 1 -> 2 (ADR-0047): `IrIndex.facet_index` joins the `model_hash`
+// preimage (it is a field of `IrIndexContent`), so every model's `model_hash`
+// rotates once this release — whether or not it declares a facet.
+pub const IR_FORMAT_VERSION: u32 = 2;
 pub const CMP_MANIFEST_SCHEMA_VERSION: u32 = 1;
 pub const CMP_HASH_ALGO: &str = "sha256";
 pub const CMP_CANONICALIZATION_VERSION: u32 = 1;
@@ -24,6 +27,11 @@ pub struct IrChunk {
     pub components: BTreeMap<String, Component>,
     #[serde(default)]
     pub artifacts: BTreeMap<String, Artifact>,
+    // Facet declarations authored in this chunk (ADR-0047). A facet is declared
+    // by at most one chunk; the cross-chunk uniqueness invariant is enforced in
+    // `build_ir_index` (E_INGEST_DUPLICATE_FACET).
+    #[serde(default)]
+    pub facets: BTreeMap<String, Facet>,
     pub metadata: Option<serde_json::Value>,
 }
 
@@ -41,6 +49,10 @@ pub struct IrIndex {
     pub definition_index: BTreeMap<String, String>,
     #[serde(default)]
     pub artifact_index: BTreeMap<String, String>,
+    // Facet declaration -> owning chunk hash (ADR-0047). Enters the canonical
+    // `model_hash` preimage exactly as the other entity indices do.
+    #[serde(default)]
+    pub facet_index: BTreeMap<String, String>,
     pub config_hash: String,
 }
 
@@ -75,6 +87,7 @@ struct IrIndexContent {
     component_index: BTreeMap<String, String>,
     definition_index: BTreeMap<String, String>,
     artifact_index: BTreeMap<String, String>,
+    facet_index: BTreeMap<String, String>,
 }
 
 impl IrChunk {
@@ -94,6 +107,11 @@ impl IrChunk {
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
+        let facets = config
+            .facets
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
 
         Self {
             format_version: IR_FORMAT_VERSION,
@@ -102,6 +120,7 @@ impl IrChunk {
             definitions,
             components,
             artifacts,
+            facets,
             metadata: None,
         }
     }
@@ -113,6 +132,7 @@ impl IrIndex {
         component_index: BTreeMap<String, String>,
         definition_index: BTreeMap<String, String>,
         artifact_index: BTreeMap<String, String>,
+        facet_index: BTreeMap<String, String>,
     ) -> Result<Self> {
         let content = IrIndexContent {
             format_version: IR_FORMAT_VERSION,
@@ -120,6 +140,7 @@ impl IrIndex {
             component_index,
             definition_index,
             artifact_index,
+            facet_index,
         };
         let config_hash = hash_index_content(&content)?;
         Ok(Self {
@@ -128,6 +149,7 @@ impl IrIndex {
             component_index: content.component_index,
             definition_index: content.definition_index,
             artifact_index: content.artifact_index,
+            facet_index: content.facet_index,
             config_hash,
         })
     }
@@ -139,6 +161,7 @@ impl IrIndex {
             component_index: self.component_index.clone(),
             definition_index: self.definition_index.clone(),
             artifact_index: self.artifact_index.clone(),
+            facet_index: self.facet_index.clone(),
         };
         hash_index_content(&content)
     }
@@ -240,6 +263,15 @@ pub fn verify_index_integrity(index: &IrIndex, chunk_dir: impl AsRef<Path>) -> R
             );
         }
     }
+    for (facet_id, chunk_hash) in &index.facet_index {
+        if !chunk_refs.contains_key(chunk_hash.as_str()) {
+            bail!(
+                "Facet '{}' references unknown chunk '{}'",
+                facet_id,
+                chunk_hash
+            );
+        }
+    }
 
     let mut components_by_chunk: HashMap<&str, HashSet<&str>> = HashMap::new();
     for (component_id, chunk_hash) in &index.component_index {
@@ -263,6 +295,14 @@ pub fn verify_index_integrity(index: &IrIndex, chunk_dir: impl AsRef<Path>) -> R
             .entry(chunk_hash.as_str())
             .or_default()
             .insert(artifact_id.as_str());
+    }
+
+    let mut facets_by_chunk: HashMap<&str, HashSet<&str>> = HashMap::new();
+    for (facet_id, chunk_hash) in &index.facet_index {
+        facets_by_chunk
+            .entry(chunk_hash.as_str())
+            .or_default()
+            .insert(facet_id.as_str());
     }
 
     for chunk_ref in &index.chunks {
@@ -302,6 +342,7 @@ pub fn verify_index_integrity(index: &IrIndex, chunk_dir: impl AsRef<Path>) -> R
         let chunk_definitions: HashSet<&str> =
             chunk.definitions.keys().map(|k| k.as_str()).collect();
         let chunk_artifacts: HashSet<&str> = chunk.artifacts.keys().map(|k| k.as_str()).collect();
+        let chunk_facets: HashSet<&str> = chunk.facets.keys().map(|k| k.as_str()).collect();
 
         for component_id in &chunk_components {
             match index.component_index.get(*component_id) {
@@ -354,6 +395,23 @@ pub fn verify_index_integrity(index: &IrIndex, chunk_dir: impl AsRef<Path>) -> R
             }
         }
 
+        for facet_id in &chunk_facets {
+            match index.facet_index.get(*facet_id) {
+                Some(hash) if hash == &chunk_ref.chunk_hash => {}
+                Some(hash) => bail!(
+                    "Facet '{}' expected in chunk '{}' but index points to '{}'",
+                    facet_id,
+                    chunk_ref.chunk_hash,
+                    hash
+                ),
+                None => bail!(
+                    "Facet '{}' is present in chunk '{}' but missing from index",
+                    facet_id,
+                    chunk_ref.chunk_hash
+                ),
+            }
+        }
+
         if let Some(expected) = components_by_chunk.get(chunk_ref.chunk_hash.as_str()) {
             for component_id in expected {
                 if !chunk_components.contains(component_id) {
@@ -382,6 +440,17 @@ pub fn verify_index_integrity(index: &IrIndex, chunk_dir: impl AsRef<Path>) -> R
                     bail!(
                         "Artifact '{}' listed in index for chunk '{}' but not in chunk data",
                         artifact_id,
+                        chunk_ref.chunk_hash
+                    );
+                }
+            }
+        }
+        if let Some(expected) = facets_by_chunk.get(chunk_ref.chunk_hash.as_str()) {
+            for facet_id in expected {
+                if !chunk_facets.contains(facet_id) {
+                    bail!(
+                        "Facet '{}' listed in index for chunk '{}' but not in chunk data",
+                        facet_id,
                         chunk_ref.chunk_hash
                     );
                 }
@@ -552,6 +621,7 @@ mod tests {
             definitions,
             components,
             artifacts,
+            facets: HashMap::new(),
         };
 
         let chunk = IrChunk::from_config("src/config.toml", "abc", &config);
@@ -569,8 +639,14 @@ mod tests {
             chunk_hash: "hash1".to_string(),
             source_id: "source1".to_string(),
         }];
-        let index =
-            IrIndex::from_parts(chunks, BTreeMap::new(), BTreeMap::new(), BTreeMap::new()).unwrap();
+        let index = IrIndex::from_parts(
+            chunks,
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+        )
+        .unwrap();
         assert_eq!(index.compute_config_hash().unwrap(), index.config_hash);
     }
 
@@ -617,6 +693,7 @@ mod tests {
             definitions,
             components,
             artifacts,
+            facets: HashMap::new(),
         };
 
         let chunk_hash = "hash_ok";
@@ -650,6 +727,7 @@ mod tests {
             component_index,
             definition_index,
             artifact_index,
+            BTreeMap::new(),
         )
         .unwrap();
 
@@ -668,6 +746,7 @@ mod tests {
             BTreeMap::new(),
             BTreeMap::new(),
             BTreeMap::new(),
+            BTreeMap::new(),
         )
         .unwrap();
 
@@ -676,6 +755,121 @@ mod tests {
         std::fs::create_dir_all(&temp_dir).unwrap();
         let err = verify_index_integrity(&index, &temp_dir).unwrap_err();
         assert!(format!("{err}").contains("Missing IR chunk"), "err: {err}");
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn ir_format_version_is_two_for_facet_indexed_model() {
+        // ADR-0047: the facet_index preimage change ships as the one train
+        // version bump (1 -> 2). model_hash rotates globally as a result.
+        assert_eq!(IR_FORMAT_VERSION, 2);
+    }
+
+    #[test]
+    fn from_config_carries_facets() {
+        let mut facets = HashMap::new();
+        facets.insert(
+            "region".to_string(),
+            Facet {
+                values: vec!["eu".to_string(), "us".to_string(), "apac".to_string()],
+                default: Some("eu".to_string()),
+                open: false,
+                doc: None,
+            },
+        );
+        let config = Config {
+            package: "pkg".to_string(),
+            version: "1.0".to_string(),
+            definitions: HashMap::new(),
+            components: HashMap::new(),
+            artifacts: HashMap::new(),
+            facets,
+        };
+        let chunk = IrChunk::from_config("src", "h", &config);
+        assert_eq!(chunk.facets.len(), 1);
+        let region = chunk.facets.get("region").expect("facet carried");
+        assert_eq!(region.values, vec!["eu", "us", "apac"]);
+        assert_eq!(region.default.as_deref(), Some("eu"));
+        assert!(!region.open);
+    }
+
+    #[test]
+    fn facet_index_enters_model_hash_preimage() {
+        // A model that declares a facet must not collide with the same model
+        // without the declaration: facet_index is in the hash preimage.
+        let chunks = vec![IrChunkRef {
+            chunk_hash: "h".to_string(),
+            source_id: "s".to_string(),
+        }];
+        let without = IrIndex::from_parts(
+            chunks.clone(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+        )
+        .unwrap();
+        let mut facet_index = BTreeMap::new();
+        facet_index.insert("region".to_string(), "h".to_string());
+        let with = IrIndex::from_parts(
+            chunks,
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            facet_index,
+        )
+        .unwrap();
+        assert_ne!(without.config_hash, with.config_hash);
+        assert_eq!(with.compute_config_hash().unwrap(), with.config_hash);
+    }
+
+    #[test]
+    fn verify_index_integrity_rejects_facet_index_missing_from_chunk() {
+        // A facet listed in the index but absent from the chunk data must fail
+        // closed, mirroring the definition/component/artifact symmetry checks.
+        let config = Config {
+            package: "pkg".to_string(),
+            version: "1.0".to_string(),
+            definitions: HashMap::new(),
+            components: HashMap::new(),
+            artifacts: HashMap::new(),
+            facets: HashMap::new(),
+        };
+        let chunk_hash = "hf";
+        let chunk = IrChunk::from_config("source.toml", chunk_hash, &config);
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!(
+            "configflux-ir-facet-{}-{}",
+            std::process::id(),
+            unique
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let chunk_path = temp_dir.join(format!("chunk-{}.cfir", chunk_hash));
+        std::fs::write(&chunk_path, serde_json::to_vec(&chunk).unwrap()).unwrap();
+
+        let mut facet_index = BTreeMap::new();
+        facet_index.insert("region".to_string(), chunk_hash.to_string());
+        let index = IrIndex::from_parts(
+            vec![IrChunkRef {
+                chunk_hash: chunk_hash.to_string(),
+                source_id: "source.toml".to_string(),
+            }],
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            facet_index,
+        )
+        .unwrap();
+
+        let err = verify_index_integrity(&index, &temp_dir).unwrap_err();
+        assert!(
+            format!("{err}").contains("Facet 'region'"),
+            "err: {err}"
+        );
         std::fs::remove_dir_all(&temp_dir).ok();
     }
 }

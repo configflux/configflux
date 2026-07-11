@@ -46,7 +46,7 @@ flowchart LR
 ## 3) Model Layers
 | Layer | Owner App | Canonical Artifact | Persistence |
 |---|---|---|---|
-| Source chunks (150%) | Compiler | TOML files (today) | Repository |
+| Source chunks (150%) | Compiler | CUE-exported JSON files | Repository |
 | Merged in-memory model (150%) | Compiler | `schema::Config` | Process memory |
 | Compiled model package | Compiler | `index.cfir.json` + `chunk-<hash>.cfir` | Filesystem/object storage |
 | Selection state | Parser/Loader | `selection_state` (canonical stateless payload) | Caller payload and optional local session |
@@ -93,6 +93,7 @@ Config150
 - definitions: map<definition_id, Parameter150>
 - components: map<component_id, Component150>
 - artifacts: map<artifact_id, Artifact150>
+- facets: map<facet_id, Facet150>        // first-class facet/domain declarations (ADR-0047)
 
 Component150
 - type?: string
@@ -124,9 +125,33 @@ Artifact150
 - source?: string
 - target?: string
 - doc?: string
+
+Facet150                                 // ADR-0047; declared in a pack's 00_definitions chunk by convention
+- values: list<string>                   // ordered, non-empty, unique — the facet's full domain
+- default?: string                       // must be an element of values
+- open: bool                             // default false; true = domain is extensible by condition literals
+- doc?: string
 ```
 
 `Value` supports integer, float, boolean, and string.
+
+A **facet** is a first-class, named selection dimension with a declared domain
+(ADR-0047). Facet keys occupy a fourth top-level namespace alongside
+definitions, components, and artifacts, carry the `snake_case` ID constraint,
+and may be declared by at most one chunk (`E_INGEST_DUPLICATE_FACET`). A facet
+declaration closes what was previously inferred: prior to ADR-0047 a facet's
+domain was implicit — exactly the literals some condition compared it against —
+so a default arm that no condition names was unrepresentable. Declaration rules:
+
+- **closed facet** (`open: false`): a condition using a value outside `values`
+  is an error (`E_FACET_VALUE_UNDECLARED`).
+- **open facet** (`open: true`): condition literals outside `values` extend the
+  effective domain (declared ∪ inferred).
+- an **undeclared** facet keeps the legacy inferred-domain behavior, so adoption
+  is incremental (opt-in per facet).
+- `default` must be a member of `values`; `values` must be unique and non-empty
+  (re-validated in Rust per the CUE-authors/Rust-revalidates principle,
+  ADR-0021).
 
 ## 6) Compile-Time Model (CMP)
 
@@ -142,6 +167,7 @@ IrIndex
 - component_index: map<component_id, chunk_hash>
 - definition_index: map<definition_id, chunk_hash>
 - artifact_index: map<artifact_id, chunk_hash>
+- facet_index: map<facet_id, chunk_hash>   // ADR-0047; declaration → owning chunk, enters model_hash preimage
 - config_hash: string  // canonical model_hash
 ```
 
@@ -193,6 +219,21 @@ Rules:
 - returned options must be valid under current constraints
 - invalid options must not be returned as selectable
 - same input state must produce same option set and same hashes
+- a declared facet's full domain (ADR-0047), including any default arm no
+  condition references, appears in `valid_options`; the default is annotated
+  (`cfx options` renders `[default: <value>]`)
+
+Facet defaults at resolve time (ADR-0047): an unbound declared facet with a
+declared `default` is **auto-bound** to that default during resolution.
+Precedence is explicit choice > context tag > declared default. The binding is
+recorded as first-class provenance in the resolved output
+(`defaulted_choices: map<facet, value>`) and folded into `resolve_hash`
+(skip-if-empty, so facet-free models are byte-unchanged). `SelectionState` and
+`selection_state_hash` remain **pure user input** — auto-binding is a
+resolve-time act, not a mutation of the user's selection. A declared facet with
+**no** default that an active condition needs fails resolution with
+`E_RESOLVE_FACET_UNBOUND`, naming the facet and its domain (replacing the
+generic `E_RESOLVE_CONTEXT_UNSATISFIED` for that case).
 
 ## 8) Resolved Model (100%)
 
@@ -227,10 +268,22 @@ ResolvedOutput
 - resolve_hash: string
 - scope_root: string
 - context_tags: map<string, string>
+- choices: map<facet, option>
+- defaulted_choices: map<facet, option>   # declared facets auto-bound to their
+                                          # default arm (absent when empty)
 - resolved_core: ResolvedConfigCore
 - artifact_bindings: list<{ path, artifact_id }>
 - trace: { compiler_version?, generated_at?, diagnostics_ref? }
 ```
+
+`defaulted_choices` is resolve-time provenance: it records exactly the declared
+facets (§5) whose resolved value came from the facet's declared default rather
+than from a `context_tag` or an explicit `choice` (precedence: explicit choice >
+context tag > declared default). It folds into `resolve_hash` with the same
+skip-if-empty rule, so a model with no declared facets — or none that defaulted —
+leaves the `resolve_hash` pre-image byte-unchanged. It is deliberately absent
+from `selection_state_hash`, which stays pure user input: two users, one who
+explicitly chose the default and one who left it unset, still hash differently.
 
 Software BOM relation:
 - A software BOM is exported from `ResolvedOutput` and includes:
@@ -268,9 +321,9 @@ Rules:
 ## 10) Validation and Invariants by Stage
 | Stage | Required Invariants |
 |---|---|
-| Ingestion | snake_case IDs/keys, parse validity |
-| Link/Verify | reference integrity, dependency DAG, no diamonds, inheritance cycle checks, condition compatibility |
-| Resolve | required component type, required parameter type/value, condition evaluation correctness, artifact parameter target exists |
+| Ingestion | snake_case IDs/keys, parse validity, no duplicate facet declaration across chunks (`E_INGEST_DUPLICATE_FACET`) |
+| Link/Verify | reference integrity, dependency DAG (any acyclic shape; diamonds permitted per ADR-0048), inheritance cycle checks, condition compatibility, facet invariants (non-empty/unique `values`, `default ∈ values`, closed facet fully covers its condition-referenced values — `E_FACET_VALUE_UNDECLARED`) |
+| Resolve | required component type, required parameter type/value, condition evaluation correctness, artifact parameter target exists, declared facets auto-bind to their default (a defaultless declared facet an active condition needs → `E_RESOLVE_FACET_UNBOUND`) |
 | Runtime write (deferred) | canonical path validity, type/limits/unit validation, baseline+overlay consistency |
 
 Verification severity policy:

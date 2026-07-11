@@ -2,7 +2,7 @@
 
 [![License: BUSL-1.1](https://img.shields.io/badge/license-BUSL--1.1-blue.svg)](LICENSE)
 
-<!-- evaluator-note: latest=v0.1.0 -->
+<!-- evaluator-note: latest=v0.2.0 -->
 
 
 **ConfigFlux compiles scattered configuration definitions into one validated
@@ -70,6 +70,12 @@ A few terms used throughout ConfigFlux and its docs:
 **Prerequisites:** Bazel (via Bazelisk), a C++20 toolchain (Clang/Clang++), and
 Git. The Rust toolchain is fetched hermetically by Bazel.
 
+Authoring your own model additionally requires the pinned `cue` binary
+(**version 0.16.1**), which exports your CUE chunks to the JSON the compiler
+ingests. The quick-start below does not need it: it runs against the committed
+exported JSON under `compiler/scenarios/`, which is a generated artifact checked
+into the repository.
+
 ```bash
 # clone
 git clone https://github.com/configflux/configflux.git
@@ -102,9 +108,9 @@ lineage that makes the result reproducible:
 ```console
 $ configflux-compiler compile --source compiler/scenarios/s1_water_pump/smoke/cue/00_definitions.json --source compiler/scenarios/s1_water_pump/smoke/cue/10_components.json --out build > /dev/null
 $ cfx resolve --model build/cmp.manifest.json --select cooling_brand=hydra --select cooling_model=x200 --select pump_type=dual --select region=eu --out snapshot
-model_hash: d617d8d6ebbc1f1b9c6be6cc791a1d590720d96a881e3f594dc9ca8f5bb39261
-selection_state_hash: 07aec27325650f35fab59a7a558241e3b3ba4aa69c11a04e6b8cbd323f4df1a4
-resolve_hash: 2954bc133248f69a4fb2157d03bc70db91a322ded63886094a09483a32466ea0
+model_hash: 76153d964da312bf4f5951ab68c196e5cda9065e7ab7150efba84c4ec4ecfdde
+selection_state_hash: 8fe466c994b2094df220633d77a46e58a011d8ccaf6579cb3171a16ca3cece4b
+resolve_hash: c77e0b3aa530d452e126f24dc2bd2f470d07f736e75eecc034a9a3a91ab30982
 wrote: generated/config.hpp
 wrote: generated/config_artifact_manifest.json
 wrote: generated/config_build_flags.cmake

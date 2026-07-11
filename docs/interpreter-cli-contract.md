@@ -38,7 +38,7 @@ Determinism rules:
 - object/list ordering follows existing frozen loader/runtime contract behavior
 
 ### 3.1 Operator/Developer Command Examples (`configflux-interpreter`)
-Examples below use `schema_version = 1` and JSON envelopes from
+Examples below use `schema_version = 3` (the current `PRODUCT_SCHEMA_VERSION`; `2 → 3` per ADR-0047) and JSON envelopes from
 `docs/interface-contracts.md`.
 Use `docs/canonical-worked-example.md` for the canonical end-to-end operator
 flow, including the shipped helper for initial `selection_state` generation.
@@ -46,7 +46,7 @@ flow, including the shipped helper for initial `selection_state` generation.
 1. `open` (stdin/stdout mode):
 ```bash
 echo '{
-  "schema_version": 1,
+  "schema_version": 3,
   "cmp_manifest_ref": "out/cmp/cmp.manifest.json"
 }' | configflux-interpreter open > out/open.result.json
 ```
@@ -60,7 +60,7 @@ configflux-interpreter init-selection-state \
 `requests/init-selection-state.request.json`:
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 3,
   "model_handle": {
     "model_hash": "<model_hash>",
     "cmp_manifest_ref": "out/cmp/cmp.manifest.json",
@@ -83,7 +83,7 @@ configflux-interpreter options \
 `requests/options.request.json`:
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 3,
   "model_handle": {
     "model_hash": "<model_hash>",
     "cmp_manifest_ref": "out/cmp/cmp.manifest.json",
@@ -92,7 +92,7 @@ configflux-interpreter options \
   },
   "scope": "component:thermal_control",
   "selection_state": {
-    "schema_version": 1,
+    "schema_version": 3,
     "model_hash": "<model_hash>",
     "scope": "component:thermal_control",
     "context_tags": {
@@ -115,7 +115,7 @@ configflux-interpreter select \
 `requests/select.request.json`:
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 3,
   "model_handle": {
     "model_hash": "<model_hash>",
     "cmp_manifest_ref": "out/cmp/cmp.manifest.json",
@@ -124,7 +124,7 @@ configflux-interpreter select \
   },
   "scope": "component:thermal_control",
   "selection_state": {
-    "schema_version": 1,
+    "schema_version": 3,
     "model_hash": "<model_hash>",
     "scope": "component:thermal_control",
     "context_tags": {
@@ -149,7 +149,7 @@ configflux-interpreter explain \
 `requests/explain.request.json`:
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 3,
   "model_handle": {
     "model_hash": "<model_hash>",
     "cmp_manifest_ref": "out/cmp/cmp.manifest.json",
@@ -158,7 +158,7 @@ configflux-interpreter explain \
   },
   "scope": "component:thermal_control",
   "selection_state": {
-    "schema_version": 1,
+    "schema_version": 3,
     "model_hash": "<model_hash>",
     "scope": "component:thermal_control",
     "context_tags": {
@@ -185,7 +185,7 @@ configflux-interpreter resolve \
 `requests/resolve.request.json`:
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 3,
   "model_handle": {
     "model_hash": "<model_hash>",
     "cmp_manifest_ref": "out/cmp/cmp.manifest.json",
@@ -194,7 +194,7 @@ configflux-interpreter resolve \
   },
   "scope": "component:thermal_control",
   "selection_state": {
-    "schema_version": 1,
+    "schema_version": 3,
     "model_hash": "<model_hash>",
     "scope": "component:thermal_control",
     "context_tags": {
@@ -213,7 +213,7 @@ configflux-interpreter resolve \
 7. `export-resolved`:
 ```bash
 jq -n --slurpfile rr out/resolve.result.json '{
-  schema_version: 1,
+  schema_version: 3,
   resolve_result: $rr[0],
   profile: "cpp_early_binding_v1"
 }' > requests/export-resolved.request.json
@@ -226,7 +226,7 @@ configflux-interpreter export-resolved \
 8. `export-software-bom`:
 ```bash
 jq -n --slurpfile rr out/resolve.result.json '{
-  schema_version: 1,
+  schema_version: 3,
   resolve_result: $rr[0],
   profile: "full_audit"
 }' > requests/export-software-bom.request.json

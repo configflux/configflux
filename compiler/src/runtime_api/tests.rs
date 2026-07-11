@@ -392,6 +392,7 @@ fn driver_fixture_snapshot() -> RuntimeSnapshot {
         resolved_artifacts: Default::default(),
         context_tags: Default::default(),
         choices: Default::default(),
+        defaulted_choices: Default::default(),
         committed_overlay: Default::default(),
         dirty_overlay: Default::default(),
         dirty_generations: Default::default(),

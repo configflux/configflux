@@ -102,7 +102,7 @@ def interpreter_envelope_path(interpreter, manifest, scope, context_tags, work, 
     opened = interp_op(
         interpreter,
         "open",
-        {"schema_version": 2, "cmp_manifest_ref": manifest},
+        {"schema_version": 3, "cmp_manifest_ref": manifest},
         work,
     )
     if opened.get("status") != "ok":
@@ -113,7 +113,7 @@ def interpreter_envelope_path(interpreter, manifest, scope, context_tags, work, 
         interpreter,
         "init-selection-state",
         {
-            "schema_version": 2,
+            "schema_version": 3,
             "model_handle": handle,
             "scope": scope,
             "context_tags": context_tags,
@@ -128,7 +128,7 @@ def interpreter_envelope_path(interpreter, manifest, scope, context_tags, work, 
         interpreter,
         "resolve",
         {
-            "schema_version": 2,
+            "schema_version": 3,
             "model_handle": handle,
             "scope": scope,
             "selection_state": selection_state,
@@ -142,7 +142,7 @@ def interpreter_envelope_path(interpreter, manifest, scope, context_tags, work, 
         interpreter,
         "export-resolved",
         {
-            "schema_version": 2,
+            "schema_version": 3,
             "resolve_result": resolved,
             "profile": "cpp_early_binding_v1",
         },
@@ -169,7 +169,7 @@ def selection_file(path, scope, context_tags):
     with open(path, "w") as handle:
         json.dump(
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "model_hash": "",
                 "scope": scope,
                 "context_tags": context_tags,

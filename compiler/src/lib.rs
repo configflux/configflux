@@ -72,6 +72,8 @@ mod scenario_loop9_tests;
 mod scenario_resource_budget_tests;
 #[cfg(test)]
 mod scenario_byte_stability_tests;
+#[cfg(test)]
+mod scenario_diamond_tests;
 pub mod schema;
 
 pub use compiler_core::{verify_ir_dir, Compiler};

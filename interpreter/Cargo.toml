@@ -5,6 +5,18 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
+# configflux-9a29: mirrors //interpreter:explain_renderer (BUILD.bazel) so
+# `cargo build --package cfx` sees the same crate Bazel already exposes.
+# Bazel slices interpreter/src/explain_renderer.rs into its own rust_library
+# rather than compiling it into the `interpreter` binary crate (configflux-
+# 2awb.3); this [lib] target reproduces that slice for Cargo without adding a
+# top-level workspace member (the session_compose pattern would be overkill
+# for one self-contained file with a single consumer). cfx depends on it via
+# `package = "interpreter"` below.
+[lib]
+name = "explain_renderer"
+path = "src/explain_renderer.rs"
+
 # The interpreter no longer depends on `solver` directly: the selection
 # composition moved to the shared `session_compose` crate (configflux-kkhc /
 # ADR-0003 §2 amendment), which owns the sole `compiler` + `solver` edge.

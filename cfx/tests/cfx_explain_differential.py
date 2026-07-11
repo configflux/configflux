@@ -99,7 +99,7 @@ def interpreter_explain_envelope(interpreter, manifest, selects, work, tag):
     choice is explained against the state accumulated before it. Returns the raw
     explain response bytes (the byte-equality oracle)."""
     _, opened, _ = interp_op(
-        interpreter, "open", {"schema_version": 2, "cmp_manifest_ref": manifest}, work, tag
+        interpreter, "open", {"schema_version": 3, "cmp_manifest_ref": manifest}, work, tag
     )
     if opened.get("status") != "ok":
         fail(f"interpreter open failed: {json.dumps(opened)}")
@@ -108,7 +108,7 @@ def interpreter_explain_envelope(interpreter, manifest, selects, work, tag):
     _, init, _ = interp_op(
         interpreter,
         "init-selection-state",
-        {"schema_version": 2, "model_handle": handle, "scope": SCOPE, "context_tags": {}},
+        {"schema_version": 3, "model_handle": handle, "scope": SCOPE, "context_tags": {}},
         work,
         tag,
     )
@@ -122,7 +122,7 @@ def interpreter_explain_envelope(interpreter, manifest, selects, work, tag):
             interpreter,
             "select",
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "model_handle": handle,
                 "scope": SCOPE,
                 "selection_state": state,
@@ -139,7 +139,7 @@ def interpreter_explain_envelope(interpreter, manifest, selects, work, tag):
             interpreter,
             "explain",
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "model_handle": handle,
                 "scope": SCOPE,
                 "selection_state": state,
@@ -163,7 +163,7 @@ def write_selection_file(path):
     with open(path, "w") as handle:
         json.dump(
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "model_hash": "",
                 "scope": SCOPE,
                 "context_tags": {},

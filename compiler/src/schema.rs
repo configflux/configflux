@@ -134,6 +134,34 @@ pub struct Config {
     pub components: HashMap<String, Component>,
     #[serde(default)]
     pub artifacts: HashMap<String, Artifact>,
+    // Fourth top-level namespace: authored facet/domain declarations (ADR-0047).
+    // A facet is a named, ordered value domain with an optional default. Opt-in
+    // per facet — undeclared facets keep the legacy condition-inferred domain.
+    #[serde(default)]
+    pub facets: HashMap<String, Facet>,
+}
+
+// ============================================================================
+// 6a. Facets (ADR-0047)
+// ============================================================================
+
+/// An authored facet declaration: a named, ordered value domain with an
+/// optional default. Data shape only — the invariants CUE enforces (`values`
+/// non-empty and unique, `default` a member of `values`) are re-validated in
+/// Rust at ingest (ADR-0021 "CUE authors, Rust re-validates"); the closed-vs-
+/// open condition-value check lives in `link_verify`.
+#[derive(Debug, Deserialize, Serialize, PartialEq, Clone)]
+pub struct Facet {
+    /// Ordered, non-empty, unique value domain (declared order is significant
+    /// for symbol emission and BDD layout — ADR-0047 §4).
+    pub values: Vec<String>,
+    /// The default arm; when present it must be an element of `values`.
+    pub default: Option<String>,
+    /// `false` = closed (exhaustive) domain; `true` = extensible. Absent in the
+    /// authored JSON when false (CUE default), so `serde(default)` restores it.
+    #[serde(default)]
+    pub open: bool,
+    pub doc: Option<String>,
 }
 
 // ============================================================================

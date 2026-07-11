@@ -16,7 +16,7 @@ pub fn rollback_dirty(request: RollbackDirtyRequest) -> RollbackDirtyResult {
                 E_RUNTIME_UNSUPPORTED_SCHEMA_VERSION,
                 request.schema_version,
                 "request.schema_version",
-                "Set rollback_dirty.schema_version to 1",
+                &format!("Set rollback_dirty.schema_version to {}", PRODUCT_SCHEMA_VERSION),
             )],
         );
     }
@@ -295,7 +295,7 @@ pub fn commit_configuration(request: CommitConfigurationRequest) -> CommitConfig
                 E_RUNTIME_UNSUPPORTED_SCHEMA_VERSION,
                 request.schema_version,
                 "request.schema_version",
-                "Set commit_configuration.schema_version to 1",
+                &format!("Set commit_configuration.schema_version to {}", PRODUCT_SCHEMA_VERSION),
             )],
         );
     }
@@ -620,7 +620,7 @@ pub fn get_configuration_identity(
                 E_RUNTIME_UNSUPPORTED_SCHEMA_VERSION,
                 request.schema_version,
                 "request.schema_version",
-                "Set get_configuration_identity.schema_version to 1",
+                &format!("Set get_configuration_identity.schema_version to {}", PRODUCT_SCHEMA_VERSION),
             )],
         );
     }
@@ -679,7 +679,7 @@ pub fn subscribe_events(request: SubscribeEventsRequest) -> SubscribeEventsResul
                 E_RUNTIME_UNSUPPORTED_SCHEMA_VERSION,
                 request.schema_version,
                 "request.schema_version",
-                "Set subscribe_events.schema_version to 1",
+                &format!("Set subscribe_events.schema_version to {}", PRODUCT_SCHEMA_VERSION),
             )],
         );
     }

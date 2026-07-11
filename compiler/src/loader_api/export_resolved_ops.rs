@@ -19,7 +19,7 @@ pub fn export_resolved(request: ExportResolvedRequest) -> ExportResolvedResult {
                 ),
                 source_id: None,
                 entity_path: None,
-                hint: Some("Set request.schema_version to 1".to_string()),
+                hint: Some(format!("Set request.schema_version to {}", PRODUCT_SCHEMA_VERSION)),
             }],
         );
     }

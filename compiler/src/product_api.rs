@@ -22,10 +22,28 @@ use std::path::Path;
 // WITHOUT `override_intent` (so old reports still verify byte-identically), a
 // report at this version canonicalizes WITH it. One monotonic schema number is
 // kept across the contract surface rather than forking a report-local counter.
-pub const PRODUCT_SCHEMA_VERSION: u32 = 2;
+// Bumped 2 -> 3 (ADR-0047 §2): first-class facet declarations add `facet_index`
+// to the `model_hash` preimage (via `IR_FORMAT_VERSION` 1 -> 2) and the `facets`
+// namespace to the authored model, rotating `model_hash` globally this release.
+// The product-contract discriminator advances in lockstep so a consumer can tell
+// a facet-aware model package from a pre-facet one.
+pub const PRODUCT_SCHEMA_VERSION: u32 = 3;
 
 pub const E_UNKNOWN_COMPONENT_DEP: &str = "E_UNKNOWN_COMPONENT_DEP";
+// ADR-0047: a facet key declared by more than one chunk (the pack-global
+// at-most-one-declarer invariant), raised at ingest merge.
+pub const E_INGEST_DUPLICATE_FACET: &str = "E_INGEST_DUPLICATE_FACET";
+// ADR-0047 §3: a closed facet's declared domain is exhaustive, but a condition
+// equality predicate names a value outside it.
+pub const E_FACET_VALUE_UNDECLARED: &str = "E_FACET_VALUE_UNDECLARED";
 pub const E_COMPONENT_DEP_CYCLE: &str = "E_COMPONENT_DEP_CYCLE";
+// RETIRED by ADR-0048: diamond dependencies are permitted (the component graph
+// may be any DAG). This code is reserved and never reused — it is kept as a
+// visible, never-emitted marker so the frozen diagnostic registry
+// (docs/interface-contracts.md §3.4) stays a stable contract. No code path
+// emits it; the constant exists only to burn the identifier under its old
+// meaning.
+#[allow(dead_code)]
 pub const E_COMPONENT_DEP_DIAMOND: &str = "E_COMPONENT_DEP_DIAMOND";
 pub const E_COMPILE_INPUT_INVALID: &str = "E_COMPILE_INPUT_INVALID";
 pub const E_COMPILE_EMIT_FAILED: &str = "E_COMPILE_EMIT_FAILED";
@@ -383,7 +401,7 @@ pub fn verify_model(request: VerifyModelRequest) -> VerifyReport {
             ),
             source_id: None,
             entity_path: None,
-            hint: Some("Set request.schema_version to 1".to_string()),
+            hint: Some(format!("Set request.schema_version to {}", PRODUCT_SCHEMA_VERSION)),
         };
         return verify_report_with_failures(
             model_hash,
@@ -452,7 +470,7 @@ pub fn compile_model_with_progress(
             ),
             source_id: None,
             entity_path: None,
-            hint: Some("Set request.schema_version to 1".to_string()),
+            hint: Some(format!("Set request.schema_version to {}", PRODUCT_SCHEMA_VERSION)),
         };
         let verify_report = verify_report_with_failures(
             model_hash.clone(),
@@ -814,7 +832,7 @@ pub fn inspect_model(request: InspectModelRequest) -> InspectionResult {
             ),
             source_id: None,
             entity_path: None,
-            hint: Some("Set request.schema_version to 1".to_string()),
+            hint: Some(format!("Set request.schema_version to {}", PRODUCT_SCHEMA_VERSION)),
         };
         return inspect_result_with_failures(
             model_hash,
@@ -1594,7 +1612,8 @@ fn summary_for_diagnostic_code(code: &str) -> &'static str {
     match code {
         E_UNKNOWN_COMPONENT_DEP => "Unknown dependency target",
         E_COMPONENT_DEP_CYCLE => "Component dependency cycle detected",
-        E_COMPONENT_DEP_DIAMOND => "Diamond dependency detected",
+        E_INGEST_DUPLICATE_FACET => "Facet declared in more than one chunk",
+        E_FACET_VALUE_UNDECLARED => "Condition value outside a closed facet domain",
         E_INSPECT_UNKNOWN_COMPONENT => "Unknown component in inspect query",
         E_INSPECT_UNKNOWN_DEFINITION => "Unknown definition in inspect query",
         E_INSPECT_UNKNOWN_ARTIFACT => "Unknown artifact in inspect query",
@@ -1672,15 +1691,17 @@ fn map_graph_error(message: &str) -> Diagnostic {
             entity_path: None,
             hint: Some("Break the cycle so the dependency graph is acyclic".to_string()),
         }
-    } else if message.contains("Diamond dependency detected") {
+    } else if message.contains("closed facet") {
         Diagnostic {
-            code: E_COMPONENT_DEP_DIAMOND.to_string(),
+            code: E_FACET_VALUE_UNDECLARED.to_string(),
             severity: DiagnosticSeverity::Error,
             message: message.to_string(),
             source_id: None,
             entity_path: None,
             hint: Some(
-                "Refactor dependencies to avoid multiple paths to one component".to_string(),
+                "Add the value to the facet's `values`, mark the facet `open: true`, or fix the \
+                 condition to use a declared value"
+                    .to_string(),
             ),
         }
     } else {
@@ -1696,6 +1717,23 @@ fn map_graph_error(message: &str) -> Diagnostic {
 }
 
 fn map_compile_input_error(message: &str, source_id: Option<String>) -> Diagnostic {
+    // A duplicate facet declaration is a specific ingest-merge violation
+    // (ADR-0047 §2) that surfaces here because it is raised while merging
+    // chunks in `add_chunk_auto`. Give it its dedicated code and hint rather
+    // than the generic ingest bucket.
+    if message.contains("declared in more than one chunk") {
+        return Diagnostic {
+            code: E_INGEST_DUPLICATE_FACET.to_string(),
+            severity: DiagnosticSeverity::Error,
+            message: message.to_string(),
+            source_id,
+            entity_path: None,
+            hint: Some(
+                "A facet is a pack-global domain; declare each facet in exactly one chunk"
+                    .to_string(),
+            ),
+        };
+    }
     Diagnostic {
         code: E_COMPILE_INPUT_INVALID.to_string(),
         severity: DiagnosticSeverity::Error,
@@ -1786,6 +1824,70 @@ mod tests {
     }
 
     #[test]
+    fn product_schema_version_is_three() {
+        // ADR-0047 §2: the facet namespace + model_hash rotation advance the
+        // product-contract discriminator 2 -> 3.
+        assert_eq!(PRODUCT_SCHEMA_VERSION, 3);
+    }
+
+    #[test]
+    fn map_graph_error_tags_closed_facet_violation() {
+        let diag = map_graph_error(
+            "Condition value 'mars' is not in the closed facet 'region' domain [eu, us]",
+        );
+        assert_eq!(diag.code, E_FACET_VALUE_UNDECLARED);
+    }
+
+    #[test]
+    fn map_compile_input_error_tags_duplicate_facet() {
+        let diag =
+            map_compile_input_error("Facet 'region' is declared in more than one chunk", None);
+        assert_eq!(diag.code, E_INGEST_DUPLICATE_FACET);
+    }
+
+    #[test]
+    fn verify_closed_facet_undeclared_value_emits_expected_code() {
+        let chunk = r#"
+            package = "p1"
+            version = "1.0"
+
+            [facets.region]
+            values = ["eu", "us"]
+            default = "eu"
+
+            [components.motor]
+            type = "actuator"
+            condition = "region == 'mars'"
+        "#;
+
+        let report = verify_with_chunk(chunk);
+        assert_eq!(report.status, OperationStatus::Error);
+        assert_eq!(
+            report.checks[0].diagnostic_codes,
+            vec![E_FACET_VALUE_UNDECLARED.to_string()]
+        );
+    }
+
+    #[test]
+    fn verify_closed_facet_declared_value_passes() {
+        let chunk = r#"
+            package = "p1"
+            version = "1.0"
+
+            [facets.region]
+            values = ["eu", "us"]
+            default = "eu"
+
+            [components.motor]
+            type = "actuator"
+            condition = "region == 'us'"
+        "#;
+
+        let report = verify_with_chunk(chunk);
+        assert_eq!(report.status, OperationStatus::Ok);
+    }
+
+    #[test]
     fn verify_cycle_emits_expected_code() {
         let chunk = r#"
             package = "p1"
@@ -1809,7 +1911,9 @@ mod tests {
     }
 
     #[test]
-    fn verify_diamond_emits_expected_code() {
+    fn verify_diamond_is_accepted() {
+        // ADR-0048: a diamond (shared `shared` reached from `root` via both
+        // `left` and `right`) is a permitted DAG, not an error.
         let chunk = r#"
             package = "p1"
             version = "1.0"
@@ -1831,11 +1935,8 @@ mod tests {
         "#;
 
         let report = verify_with_chunk(chunk);
-        assert_eq!(report.status, OperationStatus::Error);
-        assert_eq!(
-            report.checks[0].diagnostic_codes,
-            vec![E_COMPONENT_DEP_DIAMOND.to_string()]
-        );
+        assert_eq!(report.status, OperationStatus::Ok);
+        assert_eq!(report.error_count, 0);
     }
 
     #[test]

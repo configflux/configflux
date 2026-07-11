@@ -54,8 +54,10 @@ that scale. Treat the benchmark as the boundary of what is measured.
 ## Do I need CUE expertise to use ConfigFlux?
 
 It depends on which side you are on. Authoring a *new* model does require CUE
-familiarity: CUE ([cuelang.org](https://cuelang.org)) is the sole authoring and
-ingestion format, and models are written as CUE chunks. Consuming a resolved
+familiarity: CUE ([cuelang.org](https://cuelang.org)) is the sole authoring
+format, and models are written as CUE chunks. The compiler ingests JSON exported
+from those chunks as an internal artifact of the export pipeline, not a format
+you hand-write. Consuming a resolved
 configuration does not: a service reads the resolved JSON snapshot with nothing
 more than a JSON library, and needs no ConfigFlux binary embedded in it. A team
 can therefore concentrate CUE knowledge in the people who author the model,
@@ -87,6 +89,20 @@ identifiers rather than raw solver indices. The result is a successful response
 whose payload is the reason the selection cannot be satisfied, and it is one
 minimal witness of the conflict. This lets a caller show precisely which choices
 collide. (For the scale at which this holds, see the scale answer above.)
+
+## What is the default value of a facet, and can I resolve without choosing?
+
+Yes, if the facet declares a default. A facet's domain can be declared
+first-class (a `#Facet` with `values`, an optional `default`, and open/closed —
+see [getting started](getting-started-new-domain.md) and the
+[glossary](glossary.md#facet)). When a declared facet is left unbound at resolve
+time it **auto-binds to its declared default** (precedence: an explicit choice
+wins over a context tag, which wins over the default), so a resolve with nothing
+selected still succeeds. The resolved output records which facets took their
+default under `defaulted_choices`, and `cfx options` surfaces the default arm.
+A facet that is declared with **no** default and that an active condition needs
+is reported precisely (`E_RESOLVE_FACET_UNBOUND`, naming the facet and its
+domain) rather than as a generic "unsatisfiable".
 
 ## How does ConfigFlux relate to feature flags?
 

@@ -43,9 +43,9 @@ including the `model_hash` and a verify report with zero errors:
 ```console
 $ configflux-compiler compile --source compiler/scenarios/s1_water_pump/smoke/cue/00_definitions.json --source compiler/scenarios/s1_water_pump/smoke/cue/10_components.json --out build
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "status": "ok",
-  "model_hash": "d617d8d6ebbc1f1b9c6be6cc791a1d590720d96a881e3f594dc9ca8f5bb39261",
+  "model_hash": "76153d964da312bf4f5951ab68c196e5cda9065e7ab7150efba84c4ec4ecfdde",
   "compiled_model_package_ref": "build/cmp.manifest.json",
   "stats": {
     "source_count": 2,
@@ -55,8 +55,8 @@ $ configflux-compiler compile --source compiler/scenarios/s1_water_pump/smoke/cu
     "artifact_count": 3
   },
   "verify_report": {
-    "schema_version": 2,
-    "model_hash": "d617d8d6ebbc1f1b9c6be6cc791a1d590720d96a881e3f594dc9ca8f5bb39261",
+    "schema_version": 3,
+    "model_hash": "76153d964da312bf4f5951ab68c196e5cda9065e7ab7150efba84c4ec4ecfdde",
     "status": "ok",
     "error_count": 0,
     "warning_count": 0,
@@ -69,13 +69,13 @@ $ configflux-compiler compile --source compiler/scenarios/s1_water_pump/smoke/cu
       }
     ],
     "diagnostics": {
-      "schema_version": 2,
+      "schema_version": 3,
       "diagnostics": [],
       "error_count": 0,
       "warning_count": 0
     }
   },
-  "tool_version": "0.1.0"
+  "tool_version": "0.2.0"
 }
 ```
 
@@ -133,9 +133,9 @@ relative path of each exported file, then writes the resolved snapshot under
 
 ```console
 $ cfx resolve --model build/cmp.manifest.json --select cooling_brand=hydra --select cooling_model=x200 --select pump_type=dual --select region=eu --out snapshot
-model_hash: d617d8d6ebbc1f1b9c6be6cc791a1d590720d96a881e3f594dc9ca8f5bb39261
-selection_state_hash: 07aec27325650f35fab59a7a558241e3b3ba4aa69c11a04e6b8cbd323f4df1a4
-resolve_hash: 2954bc133248f69a4fb2157d03bc70db91a322ded63886094a09483a32466ea0
+model_hash: 76153d964da312bf4f5951ab68c196e5cda9065e7ab7150efba84c4ec4ecfdde
+selection_state_hash: 8fe466c994b2094df220633d77a46e58a011d8ccaf6579cb3171a16ca3cece4b
+resolve_hash: c77e0b3aa530d452e126f24dc2bd2f470d07f736e75eecc034a9a3a91ab30982
 wrote: generated/config.hpp
 wrote: generated/config_artifact_manifest.json
 wrote: generated/config_build_flags.cmake
@@ -171,9 +171,9 @@ The lineage that ties this walkthrough together:
 
 | Stage | Field | Value (S1 reference) |
 |-------|-------|----------------------|
-| Compile | `model_hash` | `d617d8d6…39261` |
-| Selection | `selection_state_hash` | `07aec273…f1a4` |
-| Resolve / export | `resolve_hash` | `2954bc13…6ea0` |
+| Compile | `model_hash` | `76153d96…cfdde` |
+| Selection | `selection_state_hash` | `8fe466c9…ece4b` |
+| Resolve / export | `resolve_hash` | `c77e0b3a…30982` |
 
 Because each hash is derived deterministically from its inputs, any change to
 the source model, the selection, or the resolution logic changes the hash

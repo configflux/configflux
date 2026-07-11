@@ -138,7 +138,7 @@ resolve_cell() {
   local sel="${OUT_DIR}/.selection.${env_name}.${root}.json"
   python3 -c 'import json,sys
 m=json.load(open(sys.argv[1]));e=m["environments"][sys.argv[2]]
-json.dump({"schema_version":2,"model_hash":"","scope":sys.argv[3],
+json.dump({"schema_version":3,"model_hash":"","scope":sys.argv[3],
           "context_tags":e.get("context_tags",{}),"choices":e.get("choices",{}),
           "selection_state_hash":""},open(sys.argv[4],"w"))' \
     "${MANIFEST}" "${env_name}" "${scope}" "${sel}"

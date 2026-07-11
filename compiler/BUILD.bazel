@@ -79,6 +79,7 @@ COMPILER_LIB_SRCS = [
     "src/runtime_api/tests.rs",
     "src/runtime_api/write_reset_ops.rs",
     "src/scenario_byte_stability_tests.rs",
+    "src/scenario_diamond_tests.rs",
     "src/scenario_loop0_tests.rs",
     "src/scenario_loop10_tests.rs",
     "src/scenario_loop3_tests.rs",
@@ -273,6 +274,60 @@ rust_test(
     ],
 )
 
+# configflux-3j84 / ADR-0047 §4: first-class facet clause synthesis + loader
+# domain seeding. Compiles inline declaring fixtures through the real product
+# path and asserts a declared facet's default arm becomes a first-class symbol
+# (F2), the solver's valid_options offers it with zero solver-crate changes, the
+# loader lists the declaration-only facet, and synthesized-clause emission is
+# byte-stable across repeat compiles. Inlines its fixtures, so no compile_data.
+rust_test(
+    name = "facet_symbol_synthesis_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["tests/facet_symbol_synthesis.rs"],
+    edition = "2021",
+    deps = [
+        ":compiler_lib",
+        "//solver:solver",
+    ],
+)
+
+# configflux-5zqr / ADR-0047 §4/§6: mixed-arm regression. The T3 test above is
+# declaration-only; this one exercises the AtmosNet F2 shape — a declared closed
+# facet whose default arm is named by no condition while a sibling IS
+# condition-referenced — through the SAME solver-authoritative
+# `session_compose::options` seam `cfx options` uses, over a model built by the
+# real product pipeline. Asserts the default and referenced sibling are both
+# offered, and that a multi-guarded closed facet keeps a non-empty domain.
+# Inlines its fixtures, so no compile_data.
+rust_test(
+    name = "facet_mixed_arm_options_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["tests/facet_mixed_arm_options.rs"],
+    edition = "2021",
+    deps = [
+        ":compiler_lib",
+        "//session_compose",
+    ],
+)
+
+# ADR-0047 §5/§6 (configflux-3gk3): resolve-time auto-bind of declared-facet
+# defaults, `defaulted_choices` provenance + `resolve_hash` fold, the runtime_api
+# lockstep cross-validation, and the `E_RESOLVE_FACET_UNBOUND` usage error. Pure
+# loader/runtime path (solver-free) — depends on `compiler_lib` only.
+rust_test(
+    name = "facet_resolve_defaults_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["tests/facet_resolve_defaults.rs"],
+    edition = "2021",
+    deps = [
+        ":compiler_lib",
+        "@crates//:serde_json",
+    ],
+)
+
 # CUDD-side construction round-trip — configflux-wbzw (ADR-0011
 # acceptance bar 4). Emits a small `ConditionModel` via the
 # --construction=cudd path and asserts: produced .ccm decodes via
@@ -430,8 +485,8 @@ rust_binary(
     # ADR-0002 §5: feeds CARGO_PKG_VERSION so `#[command(version)]` in
     # src/main.rs resolves `--version` to the workspace release version.
     # rules_rust defaults CARGO_PKG_VERSION to "0.0.0" when this attr is
-    # absent, so it must mirror /VERSION and [workspace.package] version.
-    version = "0.3.0",
+    # absent, so it must mirror /VERSION (lint_repo.py enforces this).
+    version = "0.2.0",
     deps = [
         ":compiler_lib",
         "@crates//:anyhow",

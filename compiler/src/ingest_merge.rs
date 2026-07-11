@@ -37,9 +37,11 @@ pub(crate) fn build_ir_index(chunks: &[SourceChunk]) -> Result<ir::IrIndex> {
     let mut component_index = BTreeMap::new();
     let mut definition_index = BTreeMap::new();
     let mut artifact_index = BTreeMap::new();
+    let mut facet_index = BTreeMap::new();
     let mut component_sources: HashMap<String, String> = HashMap::new();
     let mut definition_sources: HashMap<String, String> = HashMap::new();
     let mut artifact_sources: HashMap<String, String> = HashMap::new();
+    let mut facet_sources: HashMap<String, String> = HashMap::new();
 
     for chunk in chunks {
         chunk_refs.push(ir::IrChunkRef {
@@ -88,6 +90,23 @@ pub(crate) fn build_ir_index(chunks: &[SourceChunk]) -> Result<ir::IrIndex> {
             }
             artifact_index.insert(artifact_id.clone(), chunk.chunk_hash.clone());
         }
+
+        // Facets are a pack-global namespace declared by at most one chunk
+        // (ADR-0047 §2). The cross-chunk uniqueness invariant is enforced at
+        // ingest merge (E_INGEST_DUPLICATE_FACET); this loop is the structural
+        // one-facet-one-chunk guarantee that feeds `facet_index` into the
+        // `model_hash` preimage, symmetric with the other entity indices.
+        for facet_id in chunk.config.facets.keys() {
+            if let Some(existing) = facet_sources.insert(facet_id.clone(), chunk.source_id.clone()) {
+                bail!(
+                    "Facet '{}' is declared in more than one chunk: '{}' and '{}'",
+                    facet_id,
+                    existing,
+                    chunk.source_id
+                );
+            }
+            facet_index.insert(facet_id.clone(), chunk.chunk_hash.clone());
+        }
     }
 
     chunk_refs.sort_by(|a, b| {
@@ -101,5 +120,6 @@ pub(crate) fn build_ir_index(chunks: &[SourceChunk]) -> Result<ir::IrIndex> {
         component_index,
         definition_index,
         artifact_index,
+        facet_index,
     )
 }

@@ -165,6 +165,18 @@ fn parse_selects(raw: &[String]) -> Result<Vec<SelectPair>, PipelineError> {
     raw.iter().map(|arg| parse_select_pair(arg)).collect()
 }
 
+/// Finish a render shared by every verb: on a stdout write failure report the
+/// canonical `cfx: failed to write output` (exit 2), otherwise return `ok_code`.
+fn finish<E: Write>(render_result: std::io::Result<()>, ok_code: u8, stderr: &mut E) -> u8 {
+    match render_result {
+        Ok(()) => ok_code,
+        Err(_) => {
+            let _ = writeln!(stderr, "cfx: failed to write output");
+            EXIT_USAGE
+        }
+    }
+}
+
 /// clap parse-error handling mapped onto the `cfx` exit contract: `--help` /
 /// `--version` are success (`0`) on stdout; every other parse failure is a
 /// usage error (`2`) on stderr.
@@ -201,11 +213,7 @@ fn run_resolve<W: Write, E: Write>(args: ResolveArgs, stdout: &mut W, stderr: &m
         Format::Text => render::render_text(&outcome, stdout),
         Format::Json => render::render_json(&outcome, stdout),
     };
-    if render_result.is_err() {
-        let _ = writeln!(stderr, "cfx: failed to write output");
-        return EXIT_USAGE;
-    }
-    EXIT_OK
+    finish(render_result, EXIT_OK, stderr)
 }
 
 fn run_options<W: Write, E: Write>(args: OptionsArgs, stdout: &mut W, stderr: &mut E) -> u8 {
@@ -223,11 +231,7 @@ fn run_options<W: Write, E: Write>(args: OptionsArgs, stdout: &mut W, stderr: &m
         Format::Text => render::render_options_text(&outcome, stdout),
         Format::Json => render::render_options_json(&outcome, stdout),
     };
-    if render_result.is_err() {
-        let _ = writeln!(stderr, "cfx: failed to write output");
-        return EXIT_USAGE;
-    }
-    EXIT_OK
+    finish(render_result, EXIT_OK, stderr)
 }
 
 fn run_explain<W: Write, E: Write>(args: ExplainArgs, stdout: &mut W, stderr: &mut E) -> u8 {
@@ -242,6 +246,14 @@ fn run_explain<W: Write, E: Write>(args: ExplainArgs, stdout: &mut W, stderr: &m
         Ok(ExplainOutcome::Satisfiable) => {
             let _ = writeln!(stdout, "selection is satisfiable; nothing to explain");
             return EXIT_UNSAT;
+        }
+        // Same "unsatisfiable" verdict `cfx resolve` reaches, but explained
+        // (exit 0, ADR-0042 §3): text names the unbound tag(s), JSON emits the
+        // existing ResolveResult failure envelope unmodified (configflux-sc69).
+        Ok(ExplainOutcome::ResolveContextUnsatisfied(conflict)) => {
+            let rendered =
+                render::render_resolve_context(&conflict, args.format == Format::Json, stdout);
+            return finish(rendered, EXIT_OK, stderr);
         }
         Ok(ExplainOutcome::Explained(result)) => result,
         Err(err) => return emit_error(err, &args.model, &args.select, stderr),
@@ -262,15 +274,7 @@ fn run_explain<W: Write, E: Write>(args: ExplainArgs, stdout: &mut W, stderr: &m
             Ok(())
         }
     };
-    if render_result.is_err() {
-        let _ = writeln!(stderr, "cfx: failed to write output");
-        return EXIT_USAGE;
-    }
-    if ok {
-        EXIT_OK
-    } else {
-        EXIT_USAGE
-    }
+    finish(render_result, if ok { EXIT_OK } else { EXIT_USAGE }, stderr)
 }
 
 /// Emit a pipeline error to stderr and return its exit code. On the

@@ -15,7 +15,7 @@ fn validate_selection_state(
             ),
             source_id: None,
             entity_path: None,
-            hint: Some("Set selection_state.schema_version to 1".to_string()),
+            hint: Some(format!("Set selection_state.schema_version to {}", PRODUCT_SCHEMA_VERSION)),
         });
     }
     if scope.trim().is_empty() {
@@ -127,6 +127,19 @@ fn load_selection_constraint_model(model_handle: &ModelHandle) -> Result<Selecti
         let chunk = ir::load_chunk(&chunk_path)
             .with_context(|| format!("Failed to load chunk '{}'", chunk_path.display()))?;
 
+        // ADR-0047 §4: seed each declared facet's domain from its declaration
+        // BEFORE the condition walk widens it. `facet_domains` is a set-union
+        // structure, so seeding the declared values and then applying the
+        // Eq-derived widening yields the correct effective domain for both
+        // kinds: a closed facet's domain is exactly its declared values (a
+        // condition value outside them is rejected upstream by
+        // `E_FACET_VALUE_UNDECLARED`, so the union adds nothing), and an open
+        // facet's domain is declared ∪ inferred. A declaration-only facet that
+        // no condition references still gets a `facet_domains` key here, so
+        // `list_selection_facets` lists it and the option-validity check
+        // accepts its values — including a default arm that no condition names.
+        seed_facet_domains_from_declarations(&chunk.facets, &mut model);
+
         for definition in chunk.definitions.values() {
             register_parameter_conditions(definition, &mut model);
         }
@@ -143,6 +156,43 @@ fn load_selection_constraint_model(model_handle: &ModelHandle) -> Result<Selecti
     Ok(model)
 }
 
+/// Seed `SelectionConstraintModel.facet_domains` from a chunk's declared
+/// facets (ADR-0047 §4). Every declared value is inserted into the facet's
+/// domain set; because `facet_domains` unions with the later Eq-derived
+/// condition widening (`register_facet_domains`), this composes to the correct
+/// effective domain without special-casing open vs closed here. Registering
+/// even a facet that has no declared values would be a no-op — but declared
+/// values are non-empty by ingest validation.
+fn seed_facet_domains_from_declarations(
+    facets: &std::collections::BTreeMap<String, crate::schema::Facet>,
+    model: &mut SelectionConstraintModel,
+) {
+    for (name, facet) in facets {
+        let domain = model.facet_domains.entry(name.clone()).or_default();
+        for value in &facet.values {
+            domain.insert(value.clone());
+        }
+        let declared = model.declared_values.entry(name.clone()).or_default();
+        for value in &facet.values {
+            declared.insert(value.clone());
+        }
+        // ADR-0047 §5/§6: record the declared default (ingest has already
+        // re-validated it is a member of `values`). `cfx options` annotates it
+        // and the resolve path auto-binds it. A facet with no default records
+        // nothing here.
+        if let Some(default) = &facet.default {
+            model
+                .facet_defaults
+                .insert(name.clone(), default.clone());
+        }
+        // ADR-0047 §6 (Amendment 1): record the declared domain-openness so
+        // `cfx options` can render the truthful `[closed]`/`[open]` schema-kind
+        // token. Every declared facet records a value; undeclared facets are
+        // absent, so the render label falls back to today's behavior.
+        model.facet_open.insert(name.clone(), facet.open);
+    }
+}
+
 fn load_resolve_model(model_handle: &ModelHandle) -> Result<crate::schema::Config> {
     let index = ir::load_index(&model_handle.index_ref)
         .with_context(|| format!("Failed to load index '{}'", model_handle.index_ref))?;
@@ -157,11 +207,23 @@ fn load_resolve_model(model_handle: &ModelHandle) -> Result<crate::schema::Confi
     let mut definitions = HashMap::new();
     let mut components = HashMap::new();
     let mut artifacts = HashMap::new();
+    let mut facets: HashMap<String, crate::schema::Facet> = HashMap::new();
 
     for chunk_ref in &index.chunks {
         let chunk_path = chunk_dir.join(format!("chunk-{}.cfir", chunk_ref.chunk_hash));
         let chunk = ir::load_chunk(&chunk_path)
             .with_context(|| format!("Failed to load chunk '{}'", chunk_path.display()))?;
+
+        // ADR-0047 §5: carry declared facets into the resolve-time `Config` so
+        // the auto-bind step can seed each declared default. The at-most-one-
+        // declarer invariant is enforced at ingest (`E_INGEST_DUPLICATE_FACET`),
+        // so a duplicate here is a corrupted package — fail closed symmetrically
+        // with the other namespaces below.
+        for (facet_id, facet) in chunk.facets {
+            if facets.insert(facet_id.clone(), facet).is_some() {
+                anyhow::bail!("Duplicate facet '{}' appears across chunks", facet_id);
+            }
+        }
 
         for (definition_id, definition) in chunk.definitions {
             if definitions
@@ -195,6 +257,7 @@ fn load_resolve_model(model_handle: &ModelHandle) -> Result<crate::schema::Confi
         definitions,
         components,
         artifacts,
+        facets,
     })
 }
 
@@ -284,6 +347,7 @@ fn compute_resolve_hash(
     scope: &str,
     selection_state: &SelectionState,
     resolved_output: &serde_json::Value,
+    defaulted_choices: &BTreeMap<String, String>,
 ) -> Result<String> {
     let canonical = ResolveHashCanonical {
         schema_version: PRODUCT_SCHEMA_VERSION,
@@ -297,6 +361,7 @@ fn compute_resolve_hash(
             choices: &selection_state.choices,
         },
         resolved_output,
+        defaulted_choices,
     };
 
     let bytes =
@@ -1475,6 +1540,23 @@ fn option_is_valid(
         }
     }
 
+    // ADR-0047 §4: a DECLARED value is a first-class domain member — valid even
+    // when no condition names it (the F2 default arm that appears in no
+    // `facet == value` atom), unless the current selection already binds this
+    // facet to a different value (one facet holds at most one value). Undeclared
+    // (condition-inferred) facets never populate `declared_values`, so the loop
+    // above is the sole authority for them and their behavior is byte-identical
+    // to the pre-ADR path.
+    if model
+        .declared_values
+        .get(facet)
+        .map_or(false, |values| values.contains(option))
+    {
+        return assignments
+            .get(facet)
+            .map_or(true, |bound| bound.as_str() == option);
+    }
+
     false
 }
 
@@ -1622,6 +1704,8 @@ fn selection_options_ok(
     scope: String,
     facet: String,
     valid_options: Vec<String>,
+    default: Option<String>,
+    declared_open: Option<bool>,
     pruned_options: Option<Vec<PrunedOptionReason>>,
     selection_state_hash: String,
 ) -> GetSelectionOptionsResult {
@@ -1638,6 +1722,8 @@ fn selection_options_ok(
         scope,
         facet,
         valid_options,
+        default,
+        declared_open,
         pruned_options,
         selection_state_hash,
         error_count: diagnostics.error_count,
@@ -1662,6 +1748,8 @@ fn selection_options_failed(
         scope,
         facet,
         valid_options: Vec::new(),
+        default: None,
+        declared_open: None,
         pruned_options: None,
         selection_state_hash,
         error_count: diagnostics.error_count,
@@ -1793,6 +1881,7 @@ fn resolve_ok(
     selection_state_hash: String,
     context_tags: BTreeMap<String, String>,
     choices: BTreeMap<String, String>,
+    defaulted_choices: BTreeMap<String, String>,
     resolved_component_dependencies: BTreeMap<String, BTreeMap<String, Vec<String>>>,
     resolved_artifacts: BTreeMap<String, crate::schema::Artifact>,
     resolve_hash: String,
@@ -1814,6 +1903,7 @@ fn resolve_ok(
         resolved_output: Some(resolved_output),
         context_tags,
         choices,
+        defaulted_choices,
         resolved_component_dependencies,
         resolved_artifacts,
         error_count: diagnostics.error_count,
@@ -1829,6 +1919,7 @@ fn resolve_failed(
     selection_state_hash: String,
     context_tags: BTreeMap<String, String>,
     choices: BTreeMap<String, String>,
+    defaulted_choices: BTreeMap<String, String>,
     resolved_component_dependencies: BTreeMap<String, BTreeMap<String, Vec<String>>>,
     resolved_artifacts: BTreeMap<String, crate::schema::Artifact>,
     diagnostics: Vec<Diagnostic>,
@@ -1844,6 +1935,7 @@ fn resolve_failed(
         resolved_output: None,
         context_tags,
         choices,
+        defaulted_choices,
         resolved_component_dependencies,
         resolved_artifacts,
         error_count: diagnostics.error_count,
@@ -1953,6 +2045,61 @@ fn export_software_bom_failed(
         diagnostics,
         tool_version: Some(crate::provenance_sidecar::tool_version().to_string()),
     }
+}
+
+/// Pull the tag name out of a condition-eval "Missing tag '<tag>' referenced in
+/// condition" cause (`compiler/src/conditions/eval.rs`). The message is wrapped
+/// by the resolver, so scan the whole `anyhow` chain and return the first tag
+/// found between the single quotes. `None` when no such cause exists.
+fn extract_missing_tag(err: &anyhow::Error) -> Option<String> {
+    const MARKER: &str = "Missing tag '";
+    for cause in err.chain() {
+        let text = cause.to_string();
+        if let Some(start) = text.find(MARKER) {
+            let rest = &text[start + MARKER.len()..];
+            if let Some(end) = rest.find('\'') {
+                return Some(rest[..end].to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Resolve-error mapper that is aware of declared facets (ADR-0047 §5). When the
+/// underlying failure is an unbound tag an active condition needs, AND that tag
+/// is a DECLARED facet with NO default, emit the precise `E_RESOLVE_FACET_UNBOUND`
+/// naming the facet and its declared domain — the model is satisfiable once the
+/// facet is bound, so this is a usage error, not the generic "unsatisfiable"
+/// (`E_RESOLVE_CONTEXT_UNSATISFIED`) fold. Every other failure — including an
+/// unbound *undeclared* facet, or a declared facet that DOES have a default
+/// (which the auto-bind seeds, so it never reaches here) — defers to the legacy
+/// `map_resolve_error`, keeping pre-ADR behavior byte-identical.
+fn map_resolve_error_with_facets(
+    err: anyhow::Error,
+    facets: &HashMap<String, crate::schema::Facet>,
+) -> Diagnostic {
+    if let Some(tag) = extract_missing_tag(&err) {
+        if let Some(facet) = facets.get(&tag) {
+            if facet.default.is_none() {
+                let domain = facet.values.join(", ");
+                return Diagnostic {
+                    code: E_RESOLVE_FACET_UNBOUND.to_string(),
+                    severity: DiagnosticSeverity::Error,
+                    message: format!(
+                        "Declared facet '{tag}' is unbound and has no default, but an active \
+                         condition requires it; declared domain: [{domain}]"
+                    ),
+                    source_id: None,
+                    entity_path: None,
+                    hint: Some(format!(
+                        "Select facet '{tag}' (or set it in context_tags), or add a default to \
+                         its declaration"
+                    )),
+                };
+            }
+        }
+    }
+    map_resolve_error(err)
 }
 
 fn map_resolve_error(err: anyhow::Error) -> Diagnostic {

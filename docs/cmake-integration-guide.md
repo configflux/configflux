@@ -244,7 +244,7 @@ set -euo pipefail
 STORE_ROOT="${CONFIGFLUX_STORE_ROOT:?Set CONFIGFLUX_STORE_ROOT}"
 PRODUCT_FAMILY="${CONFIGFLUX_PRODUCT_FAMILY:?Set CONFIGFLUX_PRODUCT_FAMILY}"
 SCOPE="${CONFIGFLUX_SCOPE:-component:thermal_control}"
-SOURCE_DIR="${CONFIGFLUX_SOURCE_DIR:?Set CONFIGFLUX_SOURCE_DIR to the directory containing .toml source chunks}"
+SOURCE_DIR="${CONFIGFLUX_SOURCE_DIR:?Set CONFIGFLUX_SOURCE_DIR to the directory containing CUE-exported .json source chunks}"
 
 # Path to ConfigFlux binaries (adjust to your installation)
 COMPILER="${CONFIGFLUX_COMPILER:-configflux-compiler}"
@@ -255,7 +255,7 @@ trap 'rm -rf "${WORK_DIR}"' EXIT
 
 # --- Step 1: Compile the source model ---
 SOURCES=()
-for f in "${SOURCE_DIR}"/*.toml; do
+for f in "${SOURCE_DIR}"/*.json; do
   SOURCES+=(--source "$f")
 done
 

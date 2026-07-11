@@ -77,7 +77,7 @@ flowchart LR
 
 ## Implementation Snapshot (Current)
 - Implemented:
-  - TOML chunk ingestion/merge.
+  - CUE-exported JSON chunk ingestion/merge.
   - Link/verify checks (including dependency and condition checks).
   - Scoped and full in-memory resolution APIs.
   - Artifact references in schema and artifact parameter validation.

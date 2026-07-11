@@ -145,7 +145,7 @@ pub fn drive_override_lifecycle(
                 E_RUNTIME_UNSUPPORTED_SCHEMA_VERSION,
                 request.schema_version,
                 "request.schema_version",
-                "Set drive_override_lifecycle.schema_version to 1",
+                &format!("Set drive_override_lifecycle.schema_version to {}", PRODUCT_SCHEMA_VERSION),
             )],
         );
     }

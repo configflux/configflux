@@ -14,7 +14,7 @@ pub fn runtime_open(request: RuntimeOpenRequest) -> RuntimeOpenResult {
                 E_RUNTIME_UNSUPPORTED_SCHEMA_VERSION,
                 request.schema_version,
                 "request.schema_version",
-                "Set runtime_open_request.schema_version to 1",
+                &format!("Set runtime_open_request.schema_version to {}", PRODUCT_SCHEMA_VERSION),
             )],
         );
     }
@@ -128,13 +128,22 @@ pub fn runtime_open(request: RuntimeOpenRequest) -> RuntimeOpenResult {
         return runtime_open_failed(model_hash, resolve_hash, scope, vec![diagnostic]);
     }
 
-    if !request.context_tags.is_empty() || !request.choices.is_empty() {
+    // ADR-0047 §5 lockstep: also cross-validate when only `defaulted_choices` is
+    // non-empty (an empty-selection resolve that auto-bound a declared default).
+    // Extending the guard fails closed on a tampered `defaulted_choices` even
+    // with empty context_tags/choices; a facet-free open (all three empty) keeps
+    // the pre-ADR fast path.
+    if !request.context_tags.is_empty()
+        || !request.choices.is_empty()
+        || !request.defaulted_choices.is_empty()
+    {
         match compute_resolve_hash(
             &request.model_hash,
             &request.scope,
             &request.context_tags,
             &request.choices,
             &request.resolved_output,
+            &request.defaulted_choices,
         ) {
             Ok(computed_hash) if computed_hash != request.resolve_hash => {
                 return runtime_open_failed(
@@ -277,7 +286,7 @@ pub fn get_scope_metadata(request: GetScopeMetadataRequest) -> GetScopeMetadataR
                 E_RUNTIME_UNSUPPORTED_SCHEMA_VERSION,
                 request.schema_version,
                 "request.schema_version",
-                "Set get_scope_metadata.schema_version to 1",
+                &format!("Set get_scope_metadata.schema_version to {}", PRODUCT_SCHEMA_VERSION),
             )],
         );
     }
@@ -397,7 +406,7 @@ pub fn list_parameters(request: ListParametersRequest) -> ListParametersResult {
                 E_RUNTIME_UNSUPPORTED_SCHEMA_VERSION,
                 request.schema_version,
                 "request.schema_version",
-                "Set list_parameters.schema_version to 1",
+                &format!("Set list_parameters.schema_version to {}", PRODUCT_SCHEMA_VERSION),
             )],
         );
     }
@@ -496,7 +505,7 @@ pub fn get_parameter(request: GetParameterRequest) -> GetParameterResult {
                 E_RUNTIME_UNSUPPORTED_SCHEMA_VERSION,
                 request.schema_version,
                 "request.schema_version",
-                "Set get_parameter.schema_version to 1",
+                &format!("Set get_parameter.schema_version to {}", PRODUCT_SCHEMA_VERSION),
             )],
         );
     }

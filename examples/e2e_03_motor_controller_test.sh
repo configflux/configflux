@@ -145,7 +145,7 @@ echo "  -> CMP + .ccm produced"
 # ---------------------------------------------------------------------------
 step "open"
 python3 -c 'import json,sys
-json.dump({"schema_version":2,"cmp_manifest_ref":sys.argv[1]},open(sys.argv[2],"w"))' \
+json.dump({"schema_version":3,"cmp_manifest_ref":sys.argv[1]},open(sys.argv[2],"w"))' \
   "${OUT}/cmp.manifest.json" "${OUT}/open.req.json"
 "${INTERPRETER}" open \
   --request-file "${OUT}/open.req.json" \
@@ -159,24 +159,38 @@ echo "  -> model handle obtained, ccm_ref present"
 # 3) interpreter options  (solver-sourced valid_options for motor_class)
 # ---------------------------------------------------------------------------
 step "options (motor_class)"
+# options validates the selection_state's canonical hash, so derive a canonical
+# empty state first (this probe carries no context and no prior choices).
 python3 -c 'import json,sys
 o=json.load(open(sys.argv[1]))
-json.dump({"schema_version":2,"model_handle":o["model_handle"],"scope":sys.argv[3],
-          "selection_state":{"schema_version":2,"model_hash":o["model_handle"]["model_hash"],
-                             "scope":sys.argv[3],"context_tags":{},"choices":{},
-                             "selection_state_hash":""},
-          "facet":"motor_class"},open(sys.argv[2],"w"))' \
-  "${OUT}/open.res.json" "${OUT}/options_probe.req.json" "${SCOPE}"
-# Note: options is a stateless facet query; an empty selection_state_hash is
-# accepted because options does not re-derive prior choices. We assert only
-# that the solver enumerates the one modeled option for the facet.
+json.dump({"schema_version":3,"model_handle":o["model_handle"],"scope":sys.argv[3],
+          "context_tags":{}},open(sys.argv[2],"w"))' \
+  "${OUT}/open.res.json" "${OUT}/options_init.req.json" "${SCOPE}"
+"${INTERPRETER}" init-selection-state \
+  --request-file "${OUT}/options_init.req.json" \
+  --response-file "${OUT}/options_init.res.json"
+assert_status_ok "${OUT}/options_init.res.json" "options init"
+python3 -c 'import json,sys
+o=json.load(open(sys.argv[1])); s=json.load(open(sys.argv[2]))
+json.dump({"schema_version":3,"model_handle":o["model_handle"],"scope":sys.argv[4],
+          "selection_state":s["selection_state"],
+          "facet":"motor_class"},open(sys.argv[3],"w"))' \
+  "${OUT}/open.res.json" "${OUT}/options_init.res.json" "${OUT}/options_probe.req.json" "${SCOPE}"
+# motor_class is a declared closed facet (ADR-0047, Amendment 1). Both declared
+# arms are enumerated in valid_options: brushed_dc is named by a condition, and
+# brushless_dc — the declared default arm no condition names — is now a
+# first-class selectable option too (symbol-introduction only, no BDD mutex, so
+# the forced condition arm no longer prunes the unforced default). The default
+# arm is additionally surfaced through the response's `default` annotation.
 "${INTERPRETER}" options \
   --request-file "${OUT}/options_probe.req.json" \
   --response-file "${OUT}/options_probe.res.json"
 assert_status_ok "${OUT}/options_probe.res.json" "options"
 OPTS="$(jget "${OUT}/options_probe.res.json" 'sorted(d["valid_options"])')"
-[[ "${OPTS}" == "['brushed_dc']" ]] || fail "options: expected ['brushed_dc'] for motor_class, got ${OPTS}"
-echo "  -> solver valid_options(motor_class) = ${OPTS}"
+[[ "${OPTS}" == "['brushed_dc', 'brushless_dc']" ]] || fail "options: expected ['brushed_dc', 'brushless_dc'] for motor_class, got ${OPTS}"
+DEF="$(jget "${OUT}/options_probe.res.json" 'd.get("default")')"
+[[ "${DEF}" == "brushless_dc" ]] || fail "options: expected declared default brushless_dc for motor_class, got ${DEF}"
+echo "  -> solver valid_options(motor_class) = ${OPTS}; declared default = ${DEF}"
 
 # ---------------------------------------------------------------------------
 # 4) interpreter init-selection-state  (encoder_type pinned as context tag)
@@ -186,7 +200,7 @@ echo "  -> solver valid_options(motor_class) = ${OPTS}"
 step "init-selection-state"
 python3 -c 'import json,sys
 o=json.load(open(sys.argv[1]))
-json.dump({"schema_version":2,"model_handle":o["model_handle"],"scope":sys.argv[3],
+json.dump({"schema_version":3,"model_handle":o["model_handle"],"scope":sys.argv[3],
           "context_tags":{"encoder_type":"absolute"}},open(sys.argv[2],"w"))' \
   "${OUT}/open.res.json" "${OUT}/init.req.json" "${SCOPE}"
 "${INTERPRETER}" init-selection-state \
@@ -201,7 +215,7 @@ echo "  -> initial selection state (encoder_type=absolute pinned)"
 step "select #1 motor_class=brushed_dc"
 python3 -c 'import json,sys
 o=json.load(open(sys.argv[1])); s=json.load(open(sys.argv[2]))
-json.dump({"schema_version":2,"model_handle":o["model_handle"],"scope":sys.argv[4],
+json.dump({"schema_version":3,"model_handle":o["model_handle"],"scope":sys.argv[4],
           "selection_state":s["selection_state"],
           "selection_delta":{"facet":"motor_class","option":"brushed_dc"}},
           open(sys.argv[3],"w"))' \
@@ -218,7 +232,7 @@ echo "  -> applied motor_class=brushed_dc"
 step "select #2 power_rating=high"
 python3 -c 'import json,sys
 o=json.load(open(sys.argv[1])); s=json.load(open(sys.argv[2]))
-json.dump({"schema_version":2,"model_handle":o["model_handle"],"scope":sys.argv[4],
+json.dump({"schema_version":3,"model_handle":o["model_handle"],"scope":sys.argv[4],
           "selection_state":s["selection_state"],
           "selection_delta":{"facet":"power_rating","option":"high"}},
           open(sys.argv[3],"w"))' \
@@ -238,7 +252,7 @@ echo "  -> applied power_rating=high; choices=${CHOICES}"
 step "resolve"
 python3 -c 'import json,sys
 o=json.load(open(sys.argv[1])); s=json.load(open(sys.argv[2]))
-json.dump({"schema_version":2,"model_handle":o["model_handle"],"scope":sys.argv[4],
+json.dump({"schema_version":3,"model_handle":o["model_handle"],"scope":sys.argv[4],
           "selection_state":s["selection_state"]},open(sys.argv[3],"w"))' \
   "${OUT}/open.res.json" "${OUT}/sel2.res.json" "${OUT}/resolve.req.json" "${SCOPE}"
 "${INTERPRETER}" resolve \
@@ -271,7 +285,7 @@ echo "  -> overrides verified: control_mode=${CM}, current_limit=${CL}"
 step "runtime-open"
 python3 -c 'import json,sys
 d=json.load(open(sys.argv[1])); o=json.load(open(sys.argv[2]))
-req={"schema_version":2,"model_hash":d["model_hash"],
+req={"schema_version":3,"model_hash":d["model_hash"],
      "ccm_ref":o["model_handle"]["ccm_ref"],"resolve_hash":d["resolve_hash"],
      "scope":d["scope"],"resolved_output":d["resolved_output"],
      "resolved_component_dependencies":d.get("resolved_component_dependencies",{}),
@@ -293,7 +307,7 @@ PARAM_PATH="component.motion_controller.param.pid_gain_trim"
 step "get-parameter (initial)"
 python3 -c 'import json,sys
 ro=json.load(open(sys.argv[1]))
-json.dump({"schema_version":2,"runtime_snapshot":ro["runtime_snapshot"],
+json.dump({"schema_version":3,"runtime_snapshot":ro["runtime_snapshot"],
           "path":sys.argv[3]},open(sys.argv[2],"w"))' \
   "${OUT}/ropen.res.json" "${OUT}/get1.req.json" "${PARAM_PATH}"
 "${RUNTIME}" get-parameter \
@@ -310,7 +324,7 @@ echo "  -> initial pid_gain_trim = ${INIT_VAL}"
 step "set-parameter (pid_gain_trim=0.42)"
 python3 -c 'import json,sys
 ro=json.load(open(sys.argv[1]))
-json.dump({"schema_version":2,"runtime_snapshot":ro["runtime_snapshot"],
+json.dump({"schema_version":3,"runtime_snapshot":ro["runtime_snapshot"],
           "path":sys.argv[3],"value":0.42},open(sys.argv[2],"w"))' \
   "${OUT}/ropen.res.json" "${OUT}/set.req.json" "${PARAM_PATH}"
 "${RUNTIME}" set-parameter \
@@ -324,7 +338,7 @@ step "get-parameter (after set)"
 # Read back from the snapshot returned by set-parameter (carries the dirty write).
 python3 -c 'import json,sys
 sp=json.load(open(sys.argv[1]))
-json.dump({"schema_version":2,"runtime_snapshot":sp["runtime_snapshot"],
+json.dump({"schema_version":3,"runtime_snapshot":sp["runtime_snapshot"],
           "path":sys.argv[3]},open(sys.argv[2],"w"))' \
   "${OUT}/set.res.json" "${OUT}/get2.req.json" "${PARAM_PATH}"
 "${RUNTIME}" get-parameter \
@@ -348,7 +362,7 @@ step "set-parameter (constraint violation, expect rejection)"
 BAD_PATH="component.motor_drive.param.power_rating"
 python3 -c 'import json,sys
 ro=json.load(open(sys.argv[1]))
-json.dump({"schema_version":2,"runtime_snapshot":ro["runtime_snapshot"],
+json.dump({"schema_version":3,"runtime_snapshot":ro["runtime_snapshot"],
           "path":sys.argv[3],"value":"nonexistent_option"},open(sys.argv[2],"w"))' \
   "${OUT}/ropen.res.json" "${OUT}/badset.req.json" "${BAD_PATH}"
 set +e

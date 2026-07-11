@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 use crate::conditions;
-use crate::schema::{Component, Parameter};
+use crate::schema::{Component, Facet, Parameter};
 use anyhow::{bail, Context, Result};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 #[derive(Copy, Clone, PartialEq)]
 enum VisitState {
@@ -132,14 +132,162 @@ pub(crate) fn validate_component_dependencies(
         detect_cycle(name, &edges, &mut states, &mut stack)?;
     }
 
-    for root in &roots {
-        let mut seen = HashSet::new();
-        detect_diamond(root, root, &edges, &mut seen, 0)?;
+    // Diamond dependencies (a component reached via multiple paths from one
+    // root) are permitted: the component graph may be any DAG. The former
+    // per-root diamond check was retired by ADR-0048 — it was conservative
+    // policy, not a correctness requirement. Acyclicity is still enforced by
+    // `detect_cycle` above, and the genuine hazard (a component enabled where a
+    // shared dependency is disabled) is caught by the per-edge
+    // condition-implication check earlier in this function.
+
+    Ok(())
+}
+
+
+/// Validate the pack's facet declarations over the fully merged model
+/// (ADR-0047 §§1,3). Two layers:
+///
+///   1. Per-facet shape invariants, re-validated in Rust even though CUE also
+///      checks the shape (ADR-0021 "CUE authors, Rust re-validates" — the Rust
+///      pass is defense-in-depth, not a second authoring path): `values` is
+///      non-empty, `values` has no duplicates, and `default` (when present) is
+///      one of `values`.
+///   2. The closed-domain condition check: a *closed* facet's declared
+///      `values` are its exhaustive domain, so an equality predicate on that
+///      facet that names a value outside the domain is an authoring error
+///      (`E_FACET_VALUE_UNDECLARED`). An *open* facet extends its effective
+///      domain with condition-referenced values (no error), and a facet with
+///      no declaration at all is not consulted here — its domain stays the
+///      condition-inferred set, exactly as before this feature (incremental
+///      adoption, §3).
+///
+/// Only `==` predicates are checked, matching the domain-inference contract:
+/// `register_facet_domains` widens a facet's domain on `Eq` atoms only
+/// (`selection_eval::for_each_eq_predicate`), so an `Eq` literal is precisely
+/// what "the facet's domain must contain this value" means. Conditions that do
+/// not parse widen no domain today (mirroring `collect_ccm_clauses`), so they
+/// cannot violate a closed domain and are skipped.
+pub(crate) fn validate_facets(
+    facets: &HashMap<String, Facet>,
+    components: &HashMap<String, Component>,
+    definitions: &HashMap<String, Parameter>,
+) -> Result<()> {
+    // Sorted ids: the first surfaced diagnostic is deterministic across runs
+    // (HashMap iteration order is not), matching the other validators.
+    let mut facet_ids: Vec<&String> = facets.keys().collect();
+    facet_ids.sort();
+
+    for id in &facet_ids {
+        let facet = &facets[*id];
+        if facet.values.is_empty() {
+            bail!("Facet '{}' declares an empty value domain", id);
+        }
+        let mut seen: HashSet<&str> = HashSet::new();
+        for value in &facet.values {
+            if !seen.insert(value.as_str()) {
+                bail!("Facet '{}' declares duplicate value '{}'", id, value);
+            }
+        }
+        if let Some(default) = &facet.default {
+            if !facet.values.iter().any(|v| v == default) {
+                bail!(
+                    "Facet '{}' default '{}' is not one of its declared values [{}]",
+                    id,
+                    default,
+                    facet.values.join(", ")
+                );
+            }
+        }
+    }
+
+    // Index the closed facets by id. Open and undeclared facets never gate a
+    // condition value here.
+    let mut closed: BTreeMap<&str, &Facet> = BTreeMap::new();
+    for id in &facet_ids {
+        let facet = &facets[*id];
+        if !facet.open {
+            closed.insert(id.as_str(), facet);
+        }
+    }
+    if closed.is_empty() {
+        return Ok(());
+    }
+
+    let mut conditions: Vec<String> = Vec::new();
+    collect_model_conditions(components, definitions, &mut conditions);
+    for condition in &conditions {
+        let trimmed = condition.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(expr) = conditions::parse_condition_expr(trimmed) else {
+            continue;
+        };
+        let mut violation: Option<(String, String)> = None;
+        conditions::for_each_eq_predicate(&expr, |tag, value| {
+            if violation.is_some() {
+                return;
+            }
+            if let Some(facet) = closed.get(tag) {
+                if !facet.values.iter().any(|v| v == value) {
+                    violation = Some((tag.to_string(), value.to_string()));
+                }
+            }
+        });
+        if let Some((tag, value)) = violation {
+            let facet = closed[tag.as_str()];
+            bail!(
+                "Condition value '{}' is not in the closed facet '{}' domain [{}]",
+                value,
+                tag,
+                facet.values.join(", ")
+            );
+        }
     }
 
     Ok(())
 }
 
+/// Collect every authored `condition` string from the merged model in a stable,
+/// id-sorted order: definition override chains first, then each component's own
+/// activation condition and its params' override chains. Mirrors
+/// `compiler_core::collect_ccm_clauses`'s harvest (that method walks the raw
+/// chunks; this one walks the merged repository) so the closed-domain check
+/// sees exactly the conditions the selection model will.
+fn collect_model_conditions(
+    components: &HashMap<String, Component>,
+    definitions: &HashMap<String, Parameter>,
+    out: &mut Vec<String>,
+) {
+    let mut definition_ids: Vec<&String> = definitions.keys().collect();
+    definition_ids.sort();
+    for id in definition_ids {
+        collect_parameter_conditions(&definitions[id], out);
+    }
+
+    let mut component_ids: Vec<&String> = components.keys().collect();
+    component_ids.sort();
+    for id in component_ids {
+        let component = &components[id];
+        if let Some(condition) = &component.condition {
+            out.push(condition.clone());
+        }
+        let mut param_ids: Vec<&String> = component.params.keys().collect();
+        param_ids.sort();
+        for pid in param_ids {
+            collect_parameter_conditions(&component.params[pid], out);
+        }
+    }
+}
+
+/// Recursively collect the `condition` strings from a parameter's override
+/// chain, in override order then nested-override order.
+fn collect_parameter_conditions(parameter: &Parameter, out: &mut Vec<String>) {
+    for override_block in &parameter.overrides {
+        out.push(override_block.condition.clone());
+        collect_parameter_conditions(override_block.payload.as_ref(), out);
+    }
+}
 
 // DFS over the definition `inherits` string-pointer graph. Permanent per the
 // ADR-0027 Decision 6 carve-out (OUTCOME B): CUE does not reject an inheritance
@@ -236,36 +384,151 @@ fn detect_cycle(
     Ok(())
 }
 
-fn detect_diamond(
-    root: &str,
-    node: &str,
-    edges: &HashMap<String, Vec<String>>,
-    seen: &mut HashSet<String>,
-    depth: usize,
-) -> Result<()> {
-    // Explicit depth (not `seen.len()`): `seen` counts every reachable node,
-    // which on a wide-but-legitimate tree far exceeds the path depth this
-    // ceiling is bounding (configflux-xowl.5).
-    if depth > MAX_CHAIN_DEPTH {
-        bail!(
-            "Component dependency chain exceeds the maximum supported depth {} at '{}'",
-            MAX_CHAIN_DEPTH,
-            node
-        );
-    }
-    if !seen.insert(node.to_string()) {
-        bail!(
-            "Diamond dependency detected from '{}' reaching '{}' via multiple paths",
-            root,
-            node
-        );
-    }
+#[cfg(test)]
+mod facet_tests {
+    use super::*;
+    use crate::schema::{Component, Facet, Parameter};
 
-    if let Some(deps) = edges.get(node) {
-        for dep in deps {
-            detect_diamond(root, dep, edges, seen, depth + 1)?;
+    fn facet(values: &[&str], default: Option<&str>, open: bool) -> Facet {
+        Facet {
+            values: values.iter().map(|s| s.to_string()).collect(),
+            default: default.map(|s| s.to_string()),
+            open,
+            doc: None,
         }
     }
 
-    Ok(())
+    fn facets(pairs: Vec<(&str, Facet)>) -> HashMap<String, Facet> {
+        pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect()
+    }
+
+    fn component_with_condition(cond: &str) -> HashMap<String, Component> {
+        let mut map = HashMap::new();
+        map.insert(
+            "c".to_string(),
+            Component {
+                r#type: None,
+                condition: Some(cond.to_string()),
+                depends_on: Vec::new(),
+                params: HashMap::new(),
+            },
+        );
+        map
+    }
+
+    fn param_with_override_condition(cond: &str) -> HashMap<String, Parameter> {
+        let mut inner = empty_param();
+        let base = empty_param();
+        inner.overrides = vec![crate::schema::ConditionalBlock {
+            condition: cond.to_string(),
+            payload: Box::new(base),
+        }];
+        let mut map = HashMap::new();
+        map.insert("d".to_string(), inner);
+        map
+    }
+
+    fn empty_param() -> Parameter {
+        Parameter {
+            inherits: None,
+            r#type: None,
+            unit: None,
+            doc: None,
+            value: None,
+            lifecycle: None,
+            safety: None,
+            access: None,
+            limits: None,
+            req_id: None,
+            overrides: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn empty_values_is_rejected() {
+        let f = facets(vec![("region", facet(&[], None, false))]);
+        let err = validate_facets(&f, &HashMap::new(), &HashMap::new()).unwrap_err();
+        assert!(format!("{err}").contains("empty value domain"), "err: {err}");
+    }
+
+    #[test]
+    fn duplicate_values_is_rejected() {
+        let f = facets(vec![("region", facet(&["eu", "eu"], None, false))]);
+        let err = validate_facets(&f, &HashMap::new(), &HashMap::new()).unwrap_err();
+        assert!(format!("{err}").contains("duplicate value 'eu'"), "err: {err}");
+    }
+
+    #[test]
+    fn default_not_in_values_is_rejected() {
+        let f = facets(vec![("region", facet(&["eu", "us"], Some("mars"), false))]);
+        let err = validate_facets(&f, &HashMap::new(), &HashMap::new()).unwrap_err();
+        assert!(
+            format!("{err}").contains("default 'mars' is not one of"),
+            "err: {err}"
+        );
+    }
+
+    #[test]
+    fn valid_facet_with_default_is_accepted() {
+        let f = facets(vec![("region", facet(&["eu", "us"], Some("eu"), false))]);
+        assert!(validate_facets(&f, &HashMap::new(), &HashMap::new()).is_ok());
+    }
+
+    #[test]
+    fn closed_facet_undeclared_condition_value_is_rejected() {
+        let f = facets(vec![("region", facet(&["eu", "us"], Some("eu"), false))]);
+        let comps = component_with_condition("region == 'mars'");
+        let err = validate_facets(&f, &comps, &HashMap::new()).unwrap_err();
+        // The message names the facet, the value, and the declared domain, and
+        // carries the phrase product_api maps to E_FACET_VALUE_UNDECLARED.
+        let msg = format!("{err}");
+        assert!(msg.contains("closed facet 'region'"), "err: {msg}");
+        assert!(msg.contains("'mars'"), "err: {msg}");
+        assert!(msg.contains("eu, us"), "err: {msg}");
+    }
+
+    #[test]
+    fn closed_facet_declared_condition_value_is_accepted() {
+        let f = facets(vec![("region", facet(&["eu", "us"], Some("eu"), false))]);
+        let comps = component_with_condition("region == 'us'");
+        assert!(validate_facets(&f, &comps, &HashMap::new()).is_ok());
+    }
+
+    #[test]
+    fn open_facet_extends_with_undeclared_condition_value() {
+        // `open: true` means the declared domain is extensible, so a condition
+        // value outside it is NOT an error (ADR-0047 §3).
+        let f = facets(vec![("region", facet(&["eu"], Some("eu"), true))]);
+        let comps = component_with_condition("region == 'mars'");
+        assert!(validate_facets(&f, &comps, &HashMap::new()).is_ok());
+    }
+
+    #[test]
+    fn undeclared_facet_keeps_legacy_inferred_behavior() {
+        // A condition referencing a facet with no declaration at all is never
+        // gated — its domain stays the inferred set, exactly as before.
+        let comps = component_with_condition("variant == 'heavy'");
+        assert!(validate_facets(&HashMap::new(), &comps, &HashMap::new()).is_ok());
+    }
+
+    #[test]
+    fn closed_facet_check_also_scans_param_override_conditions() {
+        let f = facets(vec![("region", facet(&["eu", "us"], Some("eu"), false))]);
+        let defs = param_with_override_condition("region == 'mars'");
+        let err = validate_facets(&f, &HashMap::new(), &defs).unwrap_err();
+        assert!(
+            format!("{err}").contains("closed facet 'region'"),
+            "err: {err}"
+        );
+    }
+
+    #[test]
+    fn unparseable_condition_cannot_violate_a_closed_domain() {
+        // A condition the BDD grammar cannot represent widens no domain today,
+        // so it must not trip the closed-domain check either.
+        let f = facets(vec![("region", facet(&["eu", "us"], Some("eu"), false))]);
+        let comps = component_with_condition("this is not <> a condition");
+        assert!(validate_facets(&f, &comps, &HashMap::new()).is_ok());
+    }
 }
+

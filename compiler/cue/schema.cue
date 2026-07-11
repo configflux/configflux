@@ -102,6 +102,21 @@ _paramFields: {
 	doc?:     string
 })
 
+// A first-class facet/domain declaration (ADR-0047). A facet is a named,
+// ordered value domain with an optional default — the authored construct that
+// lets a default arm no condition mentions become visible and resolvable.
+// `values` is non-empty here (`[string, ...string]`); its uniqueness and the
+// `default ∈ values` membership are re-validated in Rust at link time (CUE
+// can't express list-element uniqueness without the `list` package, so those
+// two invariants live in `link_verify::validate_facets`, per ADR-0021's
+// "CUE authors, Rust re-validates"). `open` defaults to false (closed domain).
+#Facet: close({
+	values!: [string, ...string]
+	default?: string
+	open?:   bool | *false
+	doc?:    string
+})
+
 // A single authored chunk. definitions/components/artifacts are all optional
 // (serde(default)); package + version are required and shared across a pack's
 // chunks. Authored top-level IDs (definition/component/artifact keys) carry the
@@ -114,6 +129,10 @@ _paramFields: {
 	definitions?: close({[#snakeId]: #Definition})
 	components?: close({[#snakeId]:  #Component})
 	artifacts?: close({[#snakeId]:   #Artifact})
+	// Fourth top-level namespace (ADR-0047). Facet keys carry the #snakeId
+	// constraint, like the other three namespaces. Facets pass through the
+	// #ResolvePack / export layer verbatim — no inheritance or gap-fill.
+	facets?: close({[#snakeId]: #Facet})
 })
 
 // A resolution profile (scenario selection domains + default context). Mirrors
@@ -218,8 +237,13 @@ _paramFields: {
 #ResolvePack: {
 	_definitions: {[#snakeId]: #Definition}
 	_components: {[#snakeId]:  #Component}
+	// Facets are pack-global and pass through the resolution layer verbatim —
+	// no inheritance, gap-fill, or merge (ADR-0047 §1). Optional: a pack that
+	// declares no facet omits this input entirely.
+	_facets?: {[#snakeId]: #Facet}
 
 	definitions: _definitions
+	if _facets != _|_ {facets: _facets}
 	components: {
 		for _cid, _c in _components {
 			(_cid): _c & {

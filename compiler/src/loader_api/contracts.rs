@@ -27,6 +27,13 @@ pub const E_SELECTION_ENGINE_DIVERGENCE: &str = "E_SELECTION_ENGINE_DIVERGENCE";
 pub const E_RESOLVE_SCOPE_INVALID: &str = "E_RESOLVE_SCOPE_INVALID";
 pub const E_RESOLVE_MODEL_INVALID: &str = "E_RESOLVE_MODEL_INVALID";
 pub const E_RESOLVE_CONTEXT_UNSATISFIED: &str = "E_RESOLVE_CONTEXT_UNSATISFIED";
+// ADR-0047 §5: a DECLARED facet that has NO default is unbound after merging
+// context_tags ∪ choices, yet an active condition needs it. Distinct from the
+// generic `E_RESOLVE_CONTEXT_UNSATISFIED` fold: the model is satisfiable once
+// the facet is bound, so this is a valid-input-but-underspecified USAGE error
+// (cfx exit 2 per ADR-0042), and its message names the facet and its declared
+// domain instead of the generic "unsatisfiable" hint.
+pub const E_RESOLVE_FACET_UNBOUND: &str = "E_RESOLVE_FACET_UNBOUND";
 pub const E_RESOLVE_FAILED: &str = "E_RESOLVE_FAILED";
 // Emitted when `resolve` cannot reach a usable solver model to gate
 // satisfiability (absence, or a sat-gate fault). ADR-0030 D1/D4.
@@ -101,6 +108,22 @@ pub struct GetSelectionOptionsResult {
     pub scope: String,
     pub facet: String,
     pub valid_options: Vec<String>,
+    // ADR-0047 §6: the facet's declared default arm, when the facet is a
+    // first-class declaration that carries one. Skip-if-none so undeclared /
+    // default-less facets — and every pre-ADR-0047 model — emit no key and stay
+    // byte-identical. `cfx options` renders it as `[default: <value>]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
+    // ADR-0047 §6 (Amendment 1): the facet's declared domain-openness —
+    // `Some(false)` closed, `Some(true)` open — for a first-class declared
+    // facet; `None` for an undeclared facet (no schema kind to report). Additive
+    // and skip-if-none, so undeclared-facet output and every pre-ADR-0047 model
+    // stay byte-identical. `cfx options` renders it as the `[closed]`/`[open]`
+    // schema-kind token, distinct from the selection-state marker, so a declared
+    // closed facet no longer mislabels as `[open]` merely because it is
+    // unselected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared_open: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pruned_options: Option<Vec<PrunedOptionReason>>,
     pub selection_state_hash: String,
@@ -254,6 +277,14 @@ pub struct ResolveResult {
     pub context_tags: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub choices: BTreeMap<String, String>,
+    // ADR-0047 §5: provenance for auto-bound declared-facet defaults. Records
+    // exactly the declared facets whose resolved value came from the declared
+    // default seed (i.e. were NOT overridden by a context tag or explicit
+    // choice). Skip-if-empty (mirroring `context_tags`/`choices`) so a model
+    // with no declared facets — or none that defaulted — emits no key and its
+    // `resolve_hash` pre-image is byte-unchanged by this feature.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub defaulted_choices: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub resolved_component_dependencies: BTreeMap<String, BTreeMap<String, Vec<String>>>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -450,6 +481,22 @@ struct ResolveHashCanonical<'a> {
     scope: &'a str,
     selection_state: SelectionStateCanonical<'a>,
     resolved_output: &'a serde_json::Value,
+    // ADR-0047 §5: fold the auto-bound-default provenance into the resolve-hash
+    // pre-image with the SAME skip-if-empty rule the field carries on
+    // `ResolveResult`. Appended LAST and omitted when empty, so a facet-free
+    // model's pre-image bytes are unchanged by this feature. `SelectionState`
+    // (pure user input) is deliberately untouched — the default is a
+    // resolve-time act, recorded here, not a mutation of the user's selection.
+    #[serde(skip_serializing_if = "ref_btreemap_is_empty")]
+    defaulted_choices: &'a BTreeMap<String, String>,
+}
+
+/// `skip_serializing_if` predicate for a borrowed `&BTreeMap` field: serde hands
+/// the closure `&(&BTreeMap)`, so the double reference auto-derefs to the map's
+/// own `is_empty`. Used to keep the resolve-hash pre-image byte-identical for
+/// facet-free models (ADR-0047 §5 skip-if-empty invariant).
+fn ref_btreemap_is_empty(map: &&BTreeMap<String, String>) -> bool {
+    map.is_empty()
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -518,6 +565,25 @@ pub(crate) struct SoftwareBomGenerationError {
 struct SelectionConstraintModel {
     facet_domains: BTreeMap<String, BTreeSet<String>>,
     conditions: Vec<ConditionExpr>,
+    // ADR-0047 §4: the authored (declared) values of first-class facets, keyed
+    // by facet. Distinct from `facet_domains` (which unions declared values
+    // with condition-inferred ones): only DECLARED values live here, so the
+    // option-validity check can accept a declared value — including a default
+    // arm that no condition names — while leaving the legacy
+    // condition-inferred rule byte-for-byte unchanged for undeclared facets
+    // (this map is empty for any model that declares no facet).
+    declared_values: BTreeMap<String, BTreeSet<String>>,
+    // ADR-0047 §5/§6: a declared facet's declared default (when it has one),
+    // keyed by facet. Seeded from the declarations alongside `declared_values`.
+    // `cfx options` reads it to annotate the facet's default arm; resolve reads
+    // it to auto-bind. Empty for any model that declares no defaulted facet.
+    facet_defaults: BTreeMap<String, String>,
+    // ADR-0047 §6 (Amendment 1): a declared facet's domain-openness (`false`
+    // closed, `true` open), keyed by facet. Seeded from the declarations
+    // alongside `declared_values`. `cfx options` reads it to render the truthful
+    // `[closed]`/`[open]` schema-kind token. Empty (⇒ `declared_open: None`) for
+    // any undeclared facet and every model that declares no facet.
+    facet_open: BTreeMap<String, bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -19,7 +19,7 @@ pub fn initialize_selection_state(
                 ),
                 source_id: None,
                 entity_path: None,
-                hint: Some("Set request.schema_version to 1 for selection APIs".to_string()),
+                hint: Some(format!("Set request.schema_version to {} for selection APIs", PRODUCT_SCHEMA_VERSION)),
             }],
         );
     }
@@ -147,7 +147,7 @@ pub fn get_selection_options(request: GetSelectionOptionsRequest) -> GetSelectio
                 ),
                 source_id: None,
                 entity_path: None,
-                hint: Some("Set request.schema_version to 1".to_string()),
+                hint: Some(format!("Set request.schema_version to {}", PRODUCT_SCHEMA_VERSION)),
             }],
         );
     }
@@ -250,11 +250,21 @@ pub fn get_selection_options(request: GetSelectionOptionsRequest) -> GetSelectio
         None
     };
 
+    // ADR-0047 §6: annotate the facet's declared default arm, when it has one.
+    // `facet_defaults` is empty for undeclared / default-less facets, so this is
+    // `None` for every pre-ADR-0047 model (skip-if-none keeps them byte-stable).
+    let default = model.facet_defaults.get(&request.facet).cloned();
+    // ADR-0047 §6 (Amendment 1): the declared domain-openness, `None` for an
+    // undeclared facet so its render label and JSON stay byte-identical.
+    let declared_open = model.facet_open.get(&request.facet).copied();
+
     selection_options_ok(
         request.model_handle.model_hash,
         request.scope,
         request.facet,
         valid_options,
+        default,
+        declared_open,
         pruned_options,
         request.selection_state.selection_state_hash,
     )
@@ -277,7 +287,7 @@ pub fn apply_selection(request: ApplySelectionRequest) -> ApplySelectionResult {
                 ),
                 source_id: None,
                 entity_path: None,
-                hint: Some("Set request.schema_version to 1".to_string()),
+                hint: Some(format!("Set request.schema_version to {}", PRODUCT_SCHEMA_VERSION)),
             }],
         );
     }
@@ -517,7 +527,7 @@ pub fn explain_rejection(request: ExplainRejectionRequest) -> ExplainRejectionRe
                     request.schema_version, PRODUCT_SCHEMA_VERSION
                 ),
                 blocking_choices: BTreeMap::new(),
-                hint: Some("Set request.schema_version to 1".to_string()),
+                hint: Some(format!("Set request.schema_version to {}", PRODUCT_SCHEMA_VERSION)),
                 unsat_core: None,
             },
         );

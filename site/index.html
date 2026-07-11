@@ -250,7 +250,7 @@ html{scroll-behavior:smooth;}
         <div style="border:1px solid var(--border); border-radius:14px; background:var(--surface); padding:24px;" style-hover="border-color:var(--border2)">
           <svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true" style="margin-bottom:14px; stroke:var(--accent); fill:none" stroke-width="1.6"><circle cx="5" cy="12" r="2.4"/><circle cx="12" cy="12" r="2.4"/><circle cx="19" cy="12" r="2.4"/><line x1="7.4" y1="12" x2="9.6" y2="12"/><line x1="14.4" y1="12" x2="16.6" y2="12"/></svg>
           <h3 style="margin:0 0 7px; font-size:16.5px; font-weight:600;">Staged pipeline</h3>
-          <p style="margin:0; color:var(--muted); font-size:14.5px;">Compiler → interpreter → runtime, with a first-party C++ SDK and ROS 2 adapters for embedding in real systems.</p>
+          <p style="margin:0; color:var(--muted); font-size:14.5px;">Compiler → interpreter → runtime, driven by the one-shot <code style="font-family:'IBM Plex Mono', monospace; font-size:13px;">cfx</code> CLI, with a first-party C++ SDK and ROS 2 adapters for embedding in real systems.</p>
         </div>
 
         <div style="border:1px solid var(--border); border-radius:14px; background:var(--surface); padding:24px;" style-hover="border-color:var(--border2)">
@@ -309,8 +309,8 @@ html{scroll-behavior:smooth;}
             <button data-action="copy-binary" style="position:absolute; top:14px; right:14px; font-family:'IBM Plex Mono', monospace; font-size:12px; padding:6px 11px; border:1px solid var(--border2); border-radius:7px; background:var(--surface2); color:var(--muted); cursor:pointer;" style-hover="color:var(--fg); border-color:var(--accent)">Copy</button>
             <pre style="margin:0; padding:22px 18px; font-family:'IBM Plex Mono', monospace; font-size:13.5px; line-height:1.85; color:var(--fg); overflow-x:auto; white-space:pre;"><span style="color:var(--dim)"># Download the tarball for your platform from the latest release:</span>
 <span style="color:var(--dim)">#   github.com/configflux/configflux/releases/latest</span>
-<span style="color:var(--accent)">$</span> tar -xzf configflux-v0.1.0-x86_64-linux.tar.gz
-<span style="color:var(--accent)">$</span> ./compiler --version        <span style="color:var(--dim)"># also: interpreter, runtime</span>
+<span style="color:var(--accent)">$</span> tar -xzf configflux-v0.2.0-x86_64-linux.tar.gz
+<span style="color:var(--accent)">$</span> ./cfx --version             <span style="color:var(--dim)"># also: compiler, interpreter, runtime</span>
 
 <span style="color:var(--dim)"># Verify the signed checksums (keyless cosign):</span>
 <span style="color:var(--accent)">$</span> cosign verify-blob \

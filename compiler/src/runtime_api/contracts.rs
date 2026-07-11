@@ -379,6 +379,13 @@ pub struct RuntimeOpenRequest {
     pub context_tags: BTreeMap<String, String>,
     #[serde(default)]
     pub choices: BTreeMap<String, String>,
+    // ADR-0047 §5 lockstep: carry the resolve's auto-bound-default provenance so
+    // `runtime_open` reproduces the SAME `resolve_hash` the loader emitted. A
+    // caller bridging a `ResolveResult` into a runtime open MUST copy
+    // `resolve_result.defaulted_choices` here. `#[serde(default)]` so every
+    // pre-ADR-0047 open payload (empty map) stays valid and byte-identical.
+    #[serde(default)]
+    pub defaulted_choices: BTreeMap<String, String>,
     #[serde(default)]
     pub committed_overlay: BTreeMap<String, BTreeMap<String, crate::schema::Value>>,
     #[serde(default)]
@@ -1289,6 +1296,23 @@ struct ResolveHashCanonical<'a> {
     scope: &'a str,
     selection_state: SelectionStateCanonical<'a>,
     resolved_output: &'a serde_json::Value,
+    // ADR-0047 §5 lockstep: this runtime-side recipe is a SEPARATE, independent
+    // duplicate of the loader_api one, cross-validated at `runtime_open`. It
+    // MUST fold `defaulted_choices` with byte-identical skip-if-empty
+    // serialization, or a model with an auto-bound default AND a non-empty
+    // context_tags/choices would produce a `resolve_hash` the runtime cannot
+    // reproduce → spurious `E_RUNTIME_HASH_MISMATCH`. Appended LAST + skipped
+    // when empty keeps facet-free models byte-identical across both recipes.
+    #[serde(skip_serializing_if = "ref_btreemap_is_empty")]
+    defaulted_choices: &'a BTreeMap<String, String>,
+}
+
+/// `skip_serializing_if` predicate for a borrowed `&BTreeMap` field (serde hands
+/// the closure `&(&BTreeMap)`; the double reference auto-derefs to the map's own
+/// `is_empty`). Keeps the runtime resolve-hash pre-image byte-identical to the
+/// loader recipe for facet-free models (ADR-0047 §5 lockstep).
+fn ref_btreemap_is_empty(map: &&BTreeMap<String, String>) -> bool {
+    map.is_empty()
 }
 
 fn default_persistence_format_version() -> u32 {

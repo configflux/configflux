@@ -222,6 +222,7 @@ pub fn resolve_scoped(
             definitions: raw.definitions.clone(),
             components: scoped_components,
             artifacts: raw.artifacts.clone(),
+            facets: Default::default(),
         };
         let resolved = resolve(scoped, context)?;
         outputs.insert(root, resolved);
@@ -631,6 +632,7 @@ mod tests {
             definitions: HashMap::new(),
             components,
             artifacts: HashMap::new(),
+            facets: Default::default(),
         }
     }
 
@@ -824,6 +826,7 @@ mod tests {
             definitions,
             components,
             artifacts: HashMap::new(),
+            facets: Default::default(),
         };
 
         let err = resolve(
@@ -913,6 +916,7 @@ mod tests {
             definitions: defs,
             components,
             artifacts: HashMap::new(),
+            facets: Default::default(),
         };
 
         let ctx = ResolutionContext {
@@ -963,6 +967,7 @@ mod tests {
             definitions: HashMap::new(),
             components,
             artifacts: HashMap::new(),
+            facets: Default::default(),
         };
 
         let ctx = ResolutionContext {
@@ -1012,6 +1017,7 @@ mod tests {
                 map
             },
             artifacts,
+            facets: Default::default(),
         };
 
         let resolved = resolve(
@@ -1049,6 +1055,7 @@ mod tests {
                 map
             },
             artifacts: HashMap::new(),
+            facets: Default::default(),
         };
 
         let err = resolve(
@@ -1090,6 +1097,7 @@ mod tests {
                 map
             },
             artifacts: HashMap::new(),
+            facets: Default::default(),
         };
 
         let err = resolve(

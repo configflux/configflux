@@ -16,6 +16,7 @@ pub fn resolve_from_selection(request: ResolveFromSelectionRequest) -> ResolveRe
             choices,
             BTreeMap::new(),
             BTreeMap::new(),
+            BTreeMap::new(),
             vec![Diagnostic {
                 code: E_LOADER_UNSUPPORTED_SCHEMA_VERSION.to_string(),
                 severity: DiagnosticSeverity::Error,
@@ -25,7 +26,7 @@ pub fn resolve_from_selection(request: ResolveFromSelectionRequest) -> ResolveRe
                 ),
                 source_id: None,
                 entity_path: None,
-                hint: Some("Set request.schema_version to 1".to_string()),
+                hint: Some(format!("Set request.schema_version to {}", PRODUCT_SCHEMA_VERSION)),
             }],
         );
     }
@@ -45,6 +46,7 @@ pub fn resolve_from_selection(request: ResolveFromSelectionRequest) -> ResolveRe
                 choices,
                 BTreeMap::new(),
                 BTreeMap::new(),
+                BTreeMap::new(),
                 vec![diagnostic],
             );
         }
@@ -61,6 +63,7 @@ pub fn resolve_from_selection(request: ResolveFromSelectionRequest) -> ResolveRe
                 choices,
                 BTreeMap::new(),
                 BTreeMap::new(),
+                BTreeMap::new(),
                 vec![Diagnostic {
                     code: E_RESOLVE_MODEL_INVALID.to_string(),
                     severity: DiagnosticSeverity::Error,
@@ -73,9 +76,30 @@ pub fn resolve_from_selection(request: ResolveFromSelectionRequest) -> ResolveRe
         }
     };
 
-    let context = ResolutionContext {
-        tags: assignments.into_iter().collect::<HashMap<String, String>>(),
-    };
+    // ADR-0047 §5: auto-bind every declared facet that has a declared default,
+    // UNCONDITIONALLY (even one no active condition reads). Precedence, highest
+    // wins: explicit choice > context tag > declared default. `assignments` is
+    // already context_tags overlaid with choices (`merge_assignments`), so we
+    // seed the declared defaults FIRST and let `assignments` overlay them — the
+    // "Missing tag" failure no longer fires for a defaulted facet. A declared
+    // default that survives (its facet is absent from `assignments`) is recorded
+    // in `defaulted_choices` as first-class provenance; `SelectionState` is left
+    // untouched (its hash stays pure user input).
+    let mut tags: HashMap<String, String> = HashMap::new();
+    let mut defaulted_choices: BTreeMap<String, String> = BTreeMap::new();
+    for (name, facet) in &model.facets {
+        if let Some(default) = &facet.default {
+            tags.insert(name.clone(), default.clone());
+            if !assignments.contains_key(name) {
+                defaulted_choices.insert(name.clone(), default.clone());
+            }
+        }
+    }
+    for (facet, option) in &assignments {
+        tags.insert(facet.clone(), option.clone());
+    }
+
+    let context = ResolutionContext { tags };
     let resolved_scoped = match resolver::resolve_scoped(&model, &context, &request.scope) {
         Ok(resolved) => resolved,
         Err(err) => {
@@ -87,7 +111,8 @@ pub fn resolve_from_selection(request: ResolveFromSelectionRequest) -> ResolveRe
                 choices,
                 BTreeMap::new(),
                 BTreeMap::new(),
-                vec![map_resolve_error(err)],
+                BTreeMap::new(),
+                vec![map_resolve_error_with_facets(err, &model.facets)],
             );
         }
     };
@@ -101,6 +126,7 @@ pub fn resolve_from_selection(request: ResolveFromSelectionRequest) -> ResolveRe
                 selection_state_hash,
                 context_tags,
                 choices,
+                BTreeMap::new(),
                 BTreeMap::new(),
                 BTreeMap::new(),
                 vec![Diagnostic {
@@ -122,6 +148,7 @@ pub fn resolve_from_selection(request: ResolveFromSelectionRequest) -> ResolveRe
         &request.scope,
         &request.selection_state,
         &resolved_output,
+        &defaulted_choices,
     ) {
         Ok(hash) => hash,
         Err(err) => {
@@ -131,6 +158,7 @@ pub fn resolve_from_selection(request: ResolveFromSelectionRequest) -> ResolveRe
                 selection_state_hash,
                 context_tags,
                 choices,
+                BTreeMap::new(),
                 BTreeMap::new(),
                 BTreeMap::new(),
                 vec![Diagnostic {
@@ -155,6 +183,7 @@ pub fn resolve_from_selection(request: ResolveFromSelectionRequest) -> ResolveRe
         request.selection_state.selection_state_hash,
         request.selection_state.context_tags,
         request.selection_state.choices,
+        defaulted_choices,
         resolved_component_dependencies,
         resolved_artifacts,
         resolve_hash,

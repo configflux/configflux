@@ -45,7 +45,7 @@ Interpreter program out-of-scope (explicit):
 
 ## 2) Shared Contract Rules
 
-- Product/loader API `schema_version` is frozen at `1`.
+- Product/loader API `schema_version` is frozen at `3` (`1 → 2` ADR-0038, `2 → 3` ADR-0047).
 - Operation status values are `ok` and `error`.
 - All result envelopes include:
   - `schema_version`
@@ -175,7 +175,7 @@ Result (`inspection_result`):
 
 - `E_UNKNOWN_COMPONENT_DEP`
 - `E_COMPONENT_DEP_CYCLE`
-- `E_COMPONENT_DEP_DIAMOND`
+- `E_COMPONENT_DEP_DIAMOND` — retired (ADR-0048), reserved, never reused
 - `E_COMPILE_INPUT_INVALID`
 - `E_COMPILE_EMIT_FAILED`
 - `E_UNSUPPORTED_SCHEMA_VERSION`
@@ -428,7 +428,7 @@ Selection diagnostic codes (frozen):
 
 `resolve_hash` canonicalization:
 - sha256 over canonical JSON payload:
-  - `schema_version` (= 1)
+  - `schema_version` (= 3)
   - `model_hash`
   - `scope`
   - canonical `selection_state` tuple

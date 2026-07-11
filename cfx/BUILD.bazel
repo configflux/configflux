@@ -48,9 +48,9 @@ rust_binary(
     crate_root = "src/main.rs",
     edition = "2021",
     # ADR-0002 §5: feeds CARGO_PKG_VERSION so `#[command(version)]` resolves
-    # `--version` to the workspace release version. Mirror /VERSION and
-    # [workspace.package].
-    version = "0.4.0",
+    # `--version` to the workspace release version. Mirror /VERSION
+    # (lint_repo.py enforces this).
+    version = "0.2.0",
     deps = CFX_DEPS,
 )
 
@@ -138,6 +138,41 @@ sh_test(
         "S1_DEFS_RLOCATION": "$(rootpath //compiler:scenarios/s1_water_pump/smoke/cue/00_definitions.json)",
         "S1_COMPONENTS_RLOCATION": "$(rootpath //compiler:scenarios/s1_water_pump/smoke/cue/10_components.json)",
         "GOLDEN_EMPTY_RLOCATION": "$(rootpath tests/golden/options_s1_empty.stdout)",
+    },
+    tags = [
+        "cfx",
+        "owner:cfx",
+        "system",
+    ],
+)
+
+# `cfx resolve` / `cfx explain` satisfiability-agreement (configflux-sc69):
+# for the S1 scope=all resolve-context repro (cooling_brand+cooling_model+
+# pump_type selected, `region` omitted so the `eu_label` `region == 'eu'`
+# condition is unevaluable), the two verbs must never contradict each other —
+# resolve reports unsatisfiable and explain must EXPLAIN it (name the unbound
+# tag, exit 0), not claim the selection is satisfiable. A control selection that
+# binds `region` must have both verbs agree it is satisfiable. Also pins the
+# `--format json` resolve-context envelope (existing ResolveResult schema) and
+# double-run determinism. Drives the REAL compiler / cfx binaries. E2E impact:
+# smoke.
+sh_test(
+    name = "cfx_resolve_explain_consistency_test",
+    size = "medium",
+    timeout = "moderate",
+    srcs = ["tests/cfx_resolve_explain_consistency_test.sh"],
+    data = [
+        "tests/cfx_resolve_explain_consistency.py",
+        ":cfx",
+        "//compiler:compiler",
+        "//compiler:scenarios/s1_water_pump/smoke/cue/00_definitions.json",
+        "//compiler:scenarios/s1_water_pump/smoke/cue/10_components.json",
+    ],
+    env = {
+        "COMPILER_RLOCATION": "$(rootpath //compiler:compiler)",
+        "CFX_RLOCATION": "$(rootpath :cfx)",
+        "S1_DEFS_RLOCATION": "$(rootpath //compiler:scenarios/s1_water_pump/smoke/cue/00_definitions.json)",
+        "S1_COMPONENTS_RLOCATION": "$(rootpath //compiler:scenarios/s1_water_pump/smoke/cue/10_components.json)",
     },
     tags = [
         "cfx",

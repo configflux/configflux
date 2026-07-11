@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-11
+
+### Added
+
+- `cfx`, a new one-shot resolution CLI, now ships as a ready-to-run binary in
+  the release tarballs alongside the compiler, interpreter, and runtime. It
+  drives the full resolution pipeline from a single command — `cfx options`
+  lists the still-selectable options for a model, `cfx resolve` produces a
+  resolved configuration, and `cfx explain` reports why an unsatisfiable
+  request was rejected — so you can explore and resolve a compiled model
+  without wiring up the individual binaries.
+- First-class declared facets. A scenario may now declare a facet's full value
+  domain together with a default value directly in its source, and that
+  declared domain is honored consistently across `options`, `resolve`, and
+  `explain`: the default is offered, and every declared value appears in the
+  selectable option set even when it is not otherwise referenced by a
+  constraint.
+- Component dependency graphs may now be any directed acyclic graph, including
+  diamond shapes where a single component is reached through more than one
+  dependency path. Such a component is included exactly once in the resolved
+  result.
+
+### Changed
+
+- Product schema version is now 3 (`PRODUCT_SCHEMA_VERSION` 3), reflecting the
+  declared-facet additions above. Inputs authored against an older product
+  schema are rejected with a message naming the required version.
+
+### Fixed
+
+- `options`/`resolve` and `explain` now agree on satisfiability: a request
+  that resolves is never reported as rejected by `explain`, and a request that
+  `explain` reports as unsatisfiable never resolves, so the two views can no
+  longer disagree on the same model and selection.
+- The `--version` flag now reports the actual release version on all binaries.
+- Documentation corrections across the getting-started and reference material.
+
 ## [0.1.0] - 2026-07-07
 
 First public release of ConfigFlux — a configuration compiler, solver, and

@@ -126,6 +126,16 @@ accept_inline "trailing single underscore id" '{"package":"p","version":"1","def
 accept_inline "cyclic inherits a->b->a is structurally valid (cue accepts; cycle caught in Rust)" \
   '{"package":"p","version":"1","definitions":{"a":{"inherits":"b"},"b":{"inherits":"a"}}}' '#Config'
 
+# ADR-0047: first-class facet declarations. CUE checks the shape (non-empty
+# `values`, `default`/`open`/`doc` types, closed struct, #snakeId keys). The
+# `default ∈ values` membership and value-uniqueness invariants are NOT
+# CUE-expressible without the `list` package and are re-validated in Rust
+# (link_verify::validate_facets) — so a facet whose default is not in `values`
+# still PASSES cue here (accepted below) and is rejected by the compiler.
+accept_inline "closed facet with default"  '{"package":"p","version":"1","facets":{"region":{"values":["eu","us","apac"],"default":"eu","doc":"deployment region"}}}' '#Config'
+accept_inline "open facet, no default"      '{"package":"p","version":"1","facets":{"tls_mode":{"values":["strict"],"open":true}}}' '#Config'
+accept_inline "facet default∉values passes cue (Rust rejects)" '{"package":"p","version":"1","facets":{"region":{"values":["eu","us"],"default":"mars"}}}' '#Config'
+
 echo "  positives: $pos ok, $pos_fail failed"
 
 echo "== negative: malformed input must be rejected =="
@@ -164,6 +174,16 @@ check_reject "component param key with __"  '{"package":"p","version":"1","compo
 check_reject "component dep with __"        '{"package":"p","version":"1","components":{"c":{"depends_on":["foo__bar"]}}}' '#Config'
 check_reject "definition id leading upper"  '{"package":"p","version":"1","definitions":{"Foo":{"type":"string"}}}' '#Config'
 check_reject "definition id leading digit"  '{"package":"p","version":"1","definitions":{"1foo":{"type":"string"}}}' '#Config'
+
+# ADR-0047: facet-shape violations CUE catches structurally. (Semantic
+# invariants — default∉values, duplicate values — are Rust's job, see the
+# positive block above.)
+check_reject "facet empty values"          '{"package":"p","version":"1","facets":{"region":{"values":[]}}}' '#Config'
+check_reject "facet missing values"        '{"package":"p","version":"1","facets":{"region":{"default":"eu"}}}' '#Config'
+check_reject "facet values non-string"     '{"package":"p","version":"1","facets":{"region":{"values":[1]}}}' '#Config'
+check_reject "facet open non-bool"         '{"package":"p","version":"1","facets":{"region":{"values":["eu"],"open":"yes"}}}' '#Config'
+check_reject "facet unknown field"         '{"package":"p","version":"1","facets":{"region":{"values":["eu"],"bogus":1}}}' '#Config'
+check_reject "facet id with __"            '{"package":"p","version":"1","facets":{"foo__bar":{"values":["x"]}}}' '#Config'
 
 echo "== summary =="
 if [ "$pos_fail" -eq 0 ] && [ "$neg_fail" -eq 0 ]; then

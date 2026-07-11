@@ -615,6 +615,9 @@ fn runtime_open_request_from_resolve(
         resolved_artifacts: result.resolved_artifacts.clone(),
         context_tags: result.context_tags.clone(),
         choices: result.choices.clone(),
+        // ADR-0047 §5 lockstep: copy the resolve's auto-bound-default provenance
+        // so runtime_open reproduces the same resolve_hash the loader emitted.
+        defaulted_choices: result.defaulted_choices.clone(),
         committed_overlay: std::collections::BTreeMap::new(),
         dirty_overlay: std::collections::BTreeMap::new(),
         dirty_generations: std::collections::BTreeMap::new(),
@@ -3461,7 +3464,7 @@ fn run_042_ffi_open_execute_snapshot_and_close_round_trip() {
     );
     assert!(!handle.is_null());
 
-    let execute_request = CString::new(r#"{"schema_version":2}"#).expect("cstring");
+    let execute_request = CString::new(r#"{"schema_version":3}"#).expect("cstring");
     let mut execute_response_json: *mut c_char = ptr::null_mut();
     let execute_status = unsafe {
         configflux_runtime_session_execute_json(
@@ -3506,7 +3509,7 @@ fn run_043_ffi_execute_rejects_unknown_operation() {
         configflux_runtime_string_free(response_json);
     }
 
-    let execute_request = CString::new(r#"{"schema_version":2}"#).expect("cstring");
+    let execute_request = CString::new(r#"{"schema_version":3}"#).expect("cstring");
     let mut execute_response_json: *mut c_char = ptr::null_mut();
     let execute_status = unsafe {
         configflux_runtime_session_execute_json(

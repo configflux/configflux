@@ -1,6 +1,6 @@
 {
   "scope": "component:thermal_control",
-  "resolve_hash": "5045bab39e585bfce4af5de73f1a3a19ab8e18c72ff768b3d1807043f2b4bb1e",
+  "resolve_hash": "36df111ac6c328796142ae0f075813a40c18b9953a37856be64f172b48c457cb",
   "resolved_output": {
     "thermal_control": {
       "package": "merged_root",

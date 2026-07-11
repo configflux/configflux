@@ -350,26 +350,23 @@ impl SolverBackend for OxiddBackend {
         nodes: &[BddNode],
         root: u32,
     ) -> Result<FormulaHandle, BackendError> {
-        // Fast path for trivial-terminal roots. An empty CCM
-        // (var_count == 0) hits this branch; so does any model whose
-        // constraints reduce to ⊥ or ⊤.
-        if root == TERMINAL_TRUE {
-            return Ok(self.mk_const(true));
-        }
-        if root == TERMINAL_FALSE {
-            return Ok(self.mk_const(false));
-        }
-
-        // Non-trivial root. We must materialize every node in the table
-        // into an oxidd function, then pick the index named by `root`.
-
         // Step 1: allocate `var_count` fresh variables under a single
-        // exclusive manager borrow. The returned range is the VarNo
-        // block we index with the on-disk `var_index`. The resulting
-        // vector is also cached on `self.var_functions` so that
-        // per-variable cofactor queries in `valid_options`
-        // (configflux-8dm.3) can look up the literal function without
-        // re-entering the manager.
+        // exclusive manager borrow. The returned range is the VarNo block we
+        // index with the on-disk `var_index`. The vector is cached on
+        // `self.var_functions` so per-variable cofactor queries in
+        // `valid_options` (configflux-8dm.3) can look up the literal function
+        // without re-entering the manager.
+        //
+        // This runs BEFORE the trivial-terminal fast path below. A root that
+        // reduces to ⊤ or ⊥ still declares `var_count` variables in the symbol
+        // table, and `is_var_sat_under` / `apply_and` index `self.var_functions`
+        // by that symbol-table var index. ADR-0047 Amendment 1 makes this
+        // reachable: a declaration-only model's synthesized clauses are all
+        // symbol-introduction tautologies, so the root is ⊤ while `var_count`
+        // (the declared symbols) is non-zero. Registering the variables here
+        // keeps per-arm `valid_options` queries in range — every declared arm is
+        // satisfiable under ⊤. An empty CCM (`var_count == 0`) allocates
+        // nothing, exactly as before.
         let var_functions: Vec<BDDFunction> = if var_count == 0 {
             Vec::new()
         } else {
@@ -386,13 +383,22 @@ impl SolverBackend for OxiddBackend {
                 },
             )?
         };
-        // Persist the var literals on `self` so `SolverBackend::is_var_sat_under`
-        // (used by `Session::valid_options`) is a pure O(1) lookup. We
-        // move the `var_functions` onto `self` directly and index back
-        // through `self.var_functions` during the node walk — oxidd
-        // `BDDFunction` is an `Arc`-backed handle so indexed borrows
-        // into `self.var_functions` are cheap.
         self.var_functions = var_functions;
+
+        // Fast path for trivial-terminal roots. An empty CCM (var_count == 0)
+        // hits this branch; so does any model whose constraints reduce to ⊥ or
+        // ⊤ (including a declaration-only facet model under ADR-0047 Amendment
+        // 1). The variables are already registered above, so a subsequent
+        // `valid_options` cofactor query stays in range.
+        if root == TERMINAL_TRUE {
+            return Ok(self.mk_const(true));
+        }
+        if root == TERMINAL_FALSE {
+            return Ok(self.mk_const(false));
+        }
+
+        // Non-trivial root. We must materialize every node in the table into an
+        // oxidd function, then pick the index named by `root`.
 
         // Step 2: snapshot ⊥ / ⊤ for sentinel resolution.
         let (false_fn, true_fn) = self
@@ -617,6 +623,58 @@ mod tests {
                 .expect("cofactor query on the multi-worker manager"),
             "x0 ∧ x0 must be satisfiable"
         );
+    }
+
+    #[test]
+    fn deserialize_trivial_true_root_still_registers_declared_variables() {
+        // configflux-5zqr (ADR-0047 Amendment 1): a declaration-only declared
+        // facet's synthesized clauses are all symbol-introduction tautologies, so
+        // the emitted BDD root reduces to ⊤ while the symbol table still names
+        // `var_count` variables. `deserialize_bdd` must register those variables
+        // BEFORE its trivial-terminal fast path, or a per-arm `valid_options`
+        // cofactor query (`is_var_sat_under`) indexes out of range — the exact
+        // pre-fix Invariant("is_var_sat_under(): var_idx out of range") this
+        // asserts against. Mirrors CuddBackend, which already allocates before
+        // its terminal fast path (see cudd_translate::canonical_to_cudd).
+        let mut backend = OxiddBackend::new_session(
+            VariableOrder::empty(),
+            CapacityHints::default(),
+        )
+        .expect("new_session must succeed");
+
+        // A ⊤ root over a two-variable symbol table. The nodes table carries the
+        // two terminal sentinels (index 0 = ⊥, index 1 = ⊤) the serializer always
+        // emits; the root names the ⊤ terminal directly, so the fast path is
+        // taken and no interior node references either variable.
+        let nodes = vec![
+            BddNode {
+                var_index: TERMINAL_VAR_INDEX,
+                low_id: TERMINAL_FALSE,
+                high_id: TERMINAL_FALSE,
+                flags: 0,
+            },
+            BddNode {
+                var_index: TERMINAL_VAR_INDEX,
+                low_id: TERMINAL_TRUE,
+                high_id: TERMINAL_TRUE,
+                flags: 0,
+            },
+        ];
+        let root = backend
+            .deserialize_bdd(2, &nodes, TERMINAL_TRUE)
+            .expect("deserialize a ⊤ root over a 2-variable table");
+        assert!(backend.is_true(root), "a TERMINAL_TRUE root loads as ⊤");
+        // Both declared variables must be in range and satisfiable under ⊤
+        // (⊤ ∧ x_i reduces to x_i, which is sat), so `valid_options` would
+        // enumerate every declared arm rather than faulting.
+        for var_idx in 0u32..2 {
+            assert!(
+                backend
+                    .is_var_sat_under(root, var_idx)
+                    .expect("cofactor query must stay in range for a declared var"),
+                "x{var_idx} must be satisfiable under a ⊤ root"
+            );
+        }
     }
 
     #[test]

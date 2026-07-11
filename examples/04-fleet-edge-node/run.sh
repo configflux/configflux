@@ -93,7 +93,7 @@ banner "Step 3: Produce the resolved config with cfx resolve"
 # byte-for-byte — which the runtime handoff below consumes. `--out` also
 # exports the C++ early-binding snapshot (a side artifact this example does
 # not otherwise use).
-printf '{"schema_version":2,"model_hash":"","scope":"%s","context_tags":{},"choices":{},"selection_state_hash":""}\n' \
+printf '{"schema_version":3,"model_hash":"","scope":"%s","context_tags":{},"choices":{},"selection_state_hash":""}\n' \
   "${SCOPE}" > "${OUT_DIR}/selection.json"
 "${CFX}" resolve \
   --model "${OUT_DIR}/cmp.manifest.json" \
@@ -126,7 +126,7 @@ banner "Step 4: Runtime — runtime-open (handoff from the resolve snapshot)"
 jq -n \
   --slurpfile r "${OUT_DIR}/resolve.result.json" \
   --arg ccm_ref "${OUT_DIR}/ccm" \
-  '{schema_version: 2,
+  '{schema_version: 3,
      model_hash: $r[0].model_hash,
      ccm_ref: $ccm_ref,
      resolve_hash: $r[0].resolve_hash,
@@ -146,7 +146,7 @@ banner "Step 5: Runtime — get-scope-metadata"
 jq -n \
   --slurpfile ro "${OUT_DIR}/runtime_open.result.json" \
   --arg scope_root "${SCOPE_ROOT}" \
-  '{schema_version: 2, runtime_snapshot: $ro[0].runtime_snapshot, scope_root: $scope_root}' \
+  '{schema_version: 3, runtime_snapshot: $ro[0].runtime_snapshot, scope_root: $scope_root}' \
   > "${OUT_DIR}/get_scope_metadata.request.json"
 "${RUNTIME}" get-scope-metadata \
   --request-file "${OUT_DIR}/get_scope_metadata.request.json" \
@@ -160,7 +160,7 @@ banner "Step 6: Runtime — list-parameters"
 jq -n \
   --slurpfile ro "${OUT_DIR}/runtime_open.result.json" \
   --arg scope_root "${SCOPE_ROOT}" \
-  '{schema_version: 2, runtime_snapshot: $ro[0].runtime_snapshot, scope_root: $scope_root}' \
+  '{schema_version: 3, runtime_snapshot: $ro[0].runtime_snapshot, scope_root: $scope_root}' \
   > "${OUT_DIR}/list_parameters.request.json"
 "${RUNTIME}" list-parameters \
   --request-file "${OUT_DIR}/list_parameters.request.json" \

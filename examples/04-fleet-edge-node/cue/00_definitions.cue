@@ -46,4 +46,9 @@ chunk: #Config & {
 			doc:       "Runtime log verbosity (info, debug, trace)"
 		}
 	}
+	facets: {
+		device_class: {values: ["edge", "gateway"], default: "edge", doc: "Node role; gateway swaps firmware and lengthens the watchdog timeout."}
+		update_channel: {values: ["stable", "canary"], default: "stable", doc: "OTA channel; canary points at the canary endpoint and a faster poll."}
+		region: {values: ["us", "eu"], default: "us", doc: "Data-residency region; eu adds the regional_compliance component."}
+	}
 }

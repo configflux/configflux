@@ -72,6 +72,7 @@ fn single_param_config(
         definitions,
         components,
         artifacts,
+        facets: Default::default(),
     }
 }
 

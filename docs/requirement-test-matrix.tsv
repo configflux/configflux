@@ -113,7 +113,7 @@ REQ-AGENT-004	system	na	//agent:agent_test	socket_file_is_owner_only	agent/src/t
 REQ-AGENT-005	system	na	//agent:agent_report_signing_gate_test	report_signing_gate	agent/src/report_tests.rs
 REQ-AGENT-006	system	na	//agent:agent_test	hmac_sha256_matches_rfc4231_vector	agent/src/report_tests.rs
 REQ-AGENT-007	system	na	//agent:agent_test	emit_signed_report_without_key_fails_closed_over_socket	agent/src/report_tests.rs
-REQ-AGENT-008	system	na	//agent:agent_test	report_schema_version_coincides_with_product_schema_but_is_independent	agent/src/report_tests.rs
+REQ-AGENT-008	system	na	//agent:agent_test	report_schema_version_is_independent_of_product_schema	agent/src/report_tests.rs
 REQ-AGENT-009	system	na	//agent:agent_test	mixed_intents_aggregate_to_compensating_sticky	agent/src/report_intent_tests.rs
 REQ-AGENT-010	system	na	//agent:agent_test	compensating_write_assembles_compensating_signed_report	agent/src/report_intent_tests.rs
 REQ-AGENT-011	system	na	//agent:agent_lifecycle_driver_gate_test	lease_expiry_and_compensating_escalation_gate	agent/src/driver_tests.rs

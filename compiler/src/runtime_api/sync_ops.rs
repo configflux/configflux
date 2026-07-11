@@ -16,7 +16,7 @@ pub fn check_for_updates(request: CheckForUpdatesRequest) -> CheckForUpdatesResu
                 E_RUNTIME_UNSUPPORTED_SCHEMA_VERSION,
                 request.schema_version,
                 "request.schema_version",
-                "Set check_for_updates.schema_version to 1",
+                &format!("Set check_for_updates.schema_version to {}", PRODUCT_SCHEMA_VERSION),
             )],
         );
     }
@@ -101,7 +101,7 @@ pub fn pull_updates(request: PullUpdatesRequest) -> PullUpdatesResult {
                 E_RUNTIME_UNSUPPORTED_SCHEMA_VERSION,
                 request.schema_version,
                 "request.schema_version",
-                "Set pull_updates.schema_version to 1",
+                &format!("Set pull_updates.schema_version to {}", PRODUCT_SCHEMA_VERSION),
             )],
         );
     }
@@ -749,7 +749,7 @@ pub fn get_sync_status(request: GetSyncStatusRequest) -> GetSyncStatusResult {
                 E_RUNTIME_UNSUPPORTED_SCHEMA_VERSION,
                 request.schema_version,
                 "request.schema_version",
-                "Set get_sync_status.schema_version to 1",
+                &format!("Set get_sync_status.schema_version to {}", PRODUCT_SCHEMA_VERSION),
             )],
         );
     }
@@ -793,7 +793,7 @@ pub fn push_audit_events(request: PushAuditEventsRequest) -> PushAuditEventsResu
                 E_RUNTIME_UNSUPPORTED_SCHEMA_VERSION,
                 request.schema_version,
                 "request.schema_version",
-                "Set push_audit_events.schema_version to 1",
+                &format!("Set push_audit_events.schema_version to {}", PRODUCT_SCHEMA_VERSION),
             )],
         );
     }
@@ -892,7 +892,7 @@ pub fn export_pending_sync_bundle(
                 E_RUNTIME_UNSUPPORTED_SCHEMA_VERSION,
                 request.schema_version,
                 "request.schema_version",
-                "Set export_pending_sync_bundle.schema_version to 1",
+                &format!("Set export_pending_sync_bundle.schema_version to {}", PRODUCT_SCHEMA_VERSION),
             )],
         );
     }

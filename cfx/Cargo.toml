@@ -15,6 +15,13 @@ publish = false
 [dependencies]
 clap = { version = "4.5.53", features = ["derive"] }
 compiler = { path = "../compiler" }
+# configflux-9a29 / configflux-2awb.3: the shared unsat-core text renderer.
+# Mirrors //interpreter:explain_renderer (BUILD.bazel) — the `interpreter`
+# package exposes it as a `[lib]` target named `explain_renderer` (see
+# interpreter/Cargo.toml) rather than its default `interpreter`-named lib, so
+# `package = "interpreter"` selects that package while the dependency key
+# gives cfx code the same `explain_renderer::` path Bazel already resolves.
+explain_renderer = { path = "../interpreter", package = "interpreter" }
 session_compose = { path = "../session_compose" }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.140"

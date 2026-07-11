@@ -41,5 +41,31 @@
       "access": "technician",
       "doc": "Runtime PID gain trim for field tuning"
     }
-  }
+  },
+  "facets": {
+      "motor_class": {
+        "values": [
+          "brushless_dc",
+          "brushed_dc"
+        ],
+        "default": "brushless_dc",
+        "doc": "Motor topology; brushed_dc switches to trapezoidal control and its driver."
+      },
+      "power_rating": {
+        "values": [
+          "standard",
+          "high"
+        ],
+        "default": "standard",
+        "doc": "Power class; high raises the current limit and enables the safety monitor."
+      },
+      "encoder_type": {
+        "values": [
+          "incremental",
+          "absolute"
+        ],
+        "default": "incremental",
+        "doc": "Encoder feedback; absolute selects the absolute encoder driver."
+      }
+    }
 }

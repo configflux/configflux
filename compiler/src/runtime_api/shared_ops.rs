@@ -1937,6 +1937,7 @@ fn compute_resolve_hash(
     context_tags: &BTreeMap<String, String>,
     choices: &BTreeMap<String, String>,
     resolved_output: &serde_json::Value,
+    defaulted_choices: &BTreeMap<String, String>,
 ) -> Result<String> {
     let canonical_output = canonicalize_json_value(resolved_output.clone());
     let canonical = ResolveHashCanonical {
@@ -1951,6 +1952,7 @@ fn compute_resolve_hash(
             choices,
         },
         resolved_output: &canonical_output,
+        defaulted_choices,
     };
     let bytes = serde_json::to_vec(&canonical)
         .context("Failed to canonicalize runtime resolve hash payload")?;

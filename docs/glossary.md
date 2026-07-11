@@ -71,8 +71,30 @@ also: [facet](#facet), [option](#option),
 A facet is a named dimension of variation — a selection axis with a set of
 allowed options. Wherever a product family varies, each independent choice is
 modeled as a facet (for example, a cooling brand, a region, or a pump type). A
-selection assigns at most one option to each facet it constrains. See also:
-[option](#option), [selection](#selection).
+selection assigns at most one option to each facet it constrains.
+
+A facet's domain can be **declared** as a first-class construct (ADR-0047): an
+authored `#Facet` names the facet's ordered `values`, an optional `default`
+arm, and whether the domain is `open` (extensible) or closed (exhaustive; the
+default). A declared closed facet's values are its complete vocabulary — every
+value is emitted into the option universe, including a default arm that no
+condition happens to name. Where a facet is **not** declared, its domain is
+still inferred from the values conditions compare it against, exactly as
+before, so declaration is opt-in per facet. See also:
+[option](#option), [selection](#selection), [defaulted_choices](#defaulted_choices).
+
+## defaulted_choices
+
+`defaulted_choices` is resolve-time provenance on a resolved output: the map of
+declared facets whose resolved value came from the facet's declared `default`
+arm rather than from an explicit choice or a context tag (precedence: explicit
+choice > context tag > declared default). It is how a declared default behaves
+like a default — an unbound declared facet auto-binds to its default at resolve
+time, and `defaulted_choices` records exactly which facets that happened to.
+It folds into the `resolve_hash` (skip-if-empty, so a facet-free or
+nothing-defaulted resolve is byte-unchanged) and is deliberately absent from
+`selection_state_hash`, which stays pure user input. See also:
+[facet](#facet), [selection](#selection).
 
 ## option
 

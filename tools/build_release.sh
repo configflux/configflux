@@ -22,7 +22,7 @@
 #   tools/build_release.sh aarch64-linux
 #
 # Output:
-#   dist/configflux-v<version>-<platform>/{compiler,interpreter,runtime,LICENSE,NOTICE}
+#   dist/configflux-v<version>-<platform>/{compiler,interpreter,runtime,cfx,LICENSE,NOTICE}
 #   dist/configflux-v<version>-<platform>.tar.gz
 #
 # Exit codes:
@@ -130,14 +130,15 @@ for platform in "${PLATFORMS[@]}"; do
     --target "${target}" \
     --package compiler \
     --package interpreter \
-    --package runtime
+    --package runtime \
+    --package cfx
 
   stage_dir="configflux-v${VERSION}-${platform}"
   stage_path="dist/${stage_dir}"
   rm -rf "${stage_path}"
   mkdir -p "${stage_path}"
 
-  for bin in compiler interpreter runtime; do
+  for bin in compiler interpreter runtime cfx; do
     cp "target/${target}/release/${bin}" "${stage_path}/${bin}"
     chmod +x "${stage_path}/${bin}"
   done

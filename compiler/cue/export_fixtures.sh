@@ -88,6 +88,9 @@ definitionsOut: {
 	if defsIn.definitions != _|_ {definitions: defsIn.definitions}
 	if defsIn.components != _|_ {components: defsIn.components}
 	if defsIn.artifacts != _|_ {artifacts: defsIn.artifacts}
+	// Facets pass through verbatim (ADR-0047). Convention places them in the
+	// 00_definitions chunk, but carry them from whichever chunk authored them.
+	if defsIn.facets != _|_ {facets: defsIn.facets}
 }
 
 // Components-file slice: resolved components (inheritance gap-filled) plus this
@@ -97,6 +100,7 @@ componentsOut: {
 	version: compsIn.version
 	if compsIn.artifacts != _|_ {artifacts: compsIn.artifacts}
 	if compsIn.components != _|_ {components: _resolved.components}
+	if compsIn.facets != _|_ {facets: compsIn.facets}
 }
 DRIVER
 
@@ -119,6 +123,7 @@ configOut: {
 	if srcIn.definitions != _|_ {definitions: srcIn.definitions}
 	if srcIn.artifacts != _|_ {artifacts: srcIn.artifacts}
 	if srcIn.components != _|_ {components: _resolved.components}
+	if srcIn.facets != _|_ {facets: srcIn.facets}
 }
 DRIVER
 

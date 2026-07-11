@@ -28,4 +28,8 @@ chunk: #Config & {
 			doc:       "Number of readings held in the ring buffer"
 		}
 	}
+	facets: {
+		bus_type: {values: ["serial", "ethernet"], default: "serial", doc: "Field-bus transport; ethernet enables the network_monitor and modbus_tcp."}
+		environment: {values: ["standard", "high_speed"], default: "standard", doc: "Deployment tempo; high_speed tightens poll_interval and buffer_depth."}
+	}
 }

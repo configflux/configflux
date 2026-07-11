@@ -37,6 +37,7 @@ For commercial licensing, contact:
 | Version | First public distribution | Change Date (converts to Apache-2.0) |
 |---------|---------------------------|--------------------------------------|
 | 0.1.0 | 2026-07-07 | 2030-07-07 |
+| 0.2.0 | 2026-07-11 | 2030-07-11 |
 
 This table is updated as part of each release.
 

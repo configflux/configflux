@@ -174,6 +174,8 @@ fn selection_options_unavailable(
         scope: request.scope,
         facet: request.facet,
         valid_options: Vec::new(),
+        default: None,
+        declared_open: None,
         pruned_options: None,
         selection_state_hash: request.selection_state.selection_state_hash,
         error_count: diagnostics.error_count,
@@ -251,19 +253,18 @@ pub fn options(request: GetSelectionOptionsRequest) -> GetSelectionOptionsResult
         };
     }
 
+    // Take the legacy envelope and override ONLY the valid_options decision with
+    // the solver's (byte-identical for every existing field by construction —
+    // the comment above documents why). Merging the legacy result — rather than
+    // re-building the struct field-by-field — also carries the ADR-0047 §6
+    // `default` annotation (a pure function of the facet declaration, which only
+    // the loader reads), so `cfx options` sees a declared facet's default arm on
+    // the solver-served path too. `default` is skip-if-none, so an undeclared
+    // facet's envelope stays byte-identical to the pre-ADR-0047 bytes.
+    let legacy = get_selection_options(request);
     GetSelectionOptionsResult {
-        schema_version: PRODUCT_SCHEMA_VERSION,
-        status: OperationStatus::Ok,
-        model_hash: request.model_handle.model_hash,
-        scope: request.scope,
-        facet: request.facet,
         valid_options,
-        pruned_options: None,
-        selection_state_hash: request.selection_state.selection_state_hash,
-        error_count: 0,
-        warning_count: 0,
-        diagnostics_ref: None,
-        diagnostics: empty_diagnostics(),
+        ..legacy
     }
 }
 
@@ -442,6 +443,7 @@ fn resolve_unavailable(
         resolved_output: None,
         context_tags: request.selection_state.context_tags,
         choices: request.selection_state.choices,
+        defaulted_choices: BTreeMap::new(),
         resolved_component_dependencies: BTreeMap::new(),
         resolved_artifacts: BTreeMap::new(),
         error_count: diagnostics.error_count,

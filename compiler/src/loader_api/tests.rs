@@ -433,3 +433,32 @@ fn rejection_reason_unchanged_fields_survive_the_additive_field() {
     assert_eq!(reason.hint, None);
     assert_eq!(reason.unsat_core, None);
 }
+
+#[test]
+fn unsupported_schema_version_hint_names_the_required_version() {
+    // configflux-8u92: the rejection hint must name the version the binary
+    // requires (PRODUCT_SCHEMA_VERSION), never a stale literal echoing the
+    // value just rejected. The schema gate fires before any manifest I/O, so
+    // the request ref is never read.
+    let result = open_model(OpenModelRequest {
+        schema_version: 1,
+        cmp_manifest_ref: "unused-schema-gate-fires-first".to_string(),
+    });
+
+    assert_eq!(result.status, OperationStatus::Error);
+    let diagnostic = result
+        .diagnostics
+        .diagnostics
+        .iter()
+        .find(|d| d.code == E_LOADER_UNSUPPORTED_SCHEMA_VERSION)
+        .expect("schema version rejection diagnostic");
+    let hint = diagnostic.hint.as_deref().expect("rejection carries a hint");
+    assert!(
+        hint.contains(&PRODUCT_SCHEMA_VERSION.to_string()),
+        "hint must name required schema_version {PRODUCT_SCHEMA_VERSION}, got: {hint}"
+    );
+    assert!(
+        !hint.contains("to 1"),
+        "hint must not echo the rejected value: {hint}"
+    );
+}

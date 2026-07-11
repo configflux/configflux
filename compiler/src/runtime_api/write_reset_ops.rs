@@ -120,7 +120,7 @@ pub fn set_parameter(request: SetParameterRequest) -> SetParameterResult {
                 E_RUNTIME_UNSUPPORTED_SCHEMA_VERSION,
                 request.schema_version,
                 "request.schema_version",
-                "Set set_parameter.schema_version to 1",
+                &format!("Set set_parameter.schema_version to {}", PRODUCT_SCHEMA_VERSION),
             )],
         );
     }
@@ -288,7 +288,7 @@ pub fn set_parameters_atomically(
                 E_RUNTIME_UNSUPPORTED_SCHEMA_VERSION,
                 request.schema_version,
                 "request.schema_version",
-                "Set set_parameters_atomically.schema_version to 1",
+                &format!("Set set_parameters_atomically.schema_version to {}", PRODUCT_SCHEMA_VERSION),
             )],
         );
     }
@@ -552,7 +552,7 @@ pub fn list_dirty_parameters(request: ListDirtyParametersRequest) -> ListDirtyPa
                 E_RUNTIME_UNSUPPORTED_SCHEMA_VERSION,
                 request.schema_version,
                 "request.schema_version",
-                "Set list_dirty_parameters.schema_version to 1",
+                &format!("Set list_dirty_parameters.schema_version to {}", PRODUCT_SCHEMA_VERSION),
             )],
         );
     }
@@ -674,7 +674,7 @@ pub fn get_dirty_metadata(request: GetDirtyMetadataRequest) -> GetDirtyMetadataR
                 E_RUNTIME_UNSUPPORTED_SCHEMA_VERSION,
                 request.schema_version,
                 "request.schema_version",
-                "Set get_dirty_metadata.schema_version to 1",
+                &format!("Set get_dirty_metadata.schema_version to {}", PRODUCT_SCHEMA_VERSION),
             )],
         );
     }
@@ -741,7 +741,7 @@ pub fn set_auto_reset_policy(request: SetAutoResetPolicyRequest) -> SetAutoReset
                 E_RUNTIME_UNSUPPORTED_SCHEMA_VERSION,
                 request.schema_version,
                 "request.schema_version",
-                "Set set_auto_reset_policy.schema_version to 1",
+                &format!("Set set_auto_reset_policy.schema_version to {}", PRODUCT_SCHEMA_VERSION),
             )],
         );
     }
@@ -817,7 +817,7 @@ pub fn get_auto_reset_policy(request: GetAutoResetPolicyRequest) -> GetAutoReset
                 E_RUNTIME_UNSUPPORTED_SCHEMA_VERSION,
                 request.schema_version,
                 "request.schema_version",
-                "Set get_auto_reset_policy.schema_version to 1",
+                &format!("Set get_auto_reset_policy.schema_version to {}", PRODUCT_SCHEMA_VERSION),
             )],
         );
     }

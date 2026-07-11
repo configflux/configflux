@@ -449,6 +449,35 @@ mod tests {
     }
 
     #[test]
+    fn classify_facet_unbound_is_usage_exit_2_not_unsat() {
+        // ADR-0047 §6: E_RESOLVE_FACET_UNBOUND is a valid-input-but-
+        // underspecified USAGE error (exit 2), deliberately NOT in the
+        // unsatisfiable family — the model IS satisfiable once the facet is
+        // bound. This also governs `cfx explain`, which routes through the same
+        // resolve path + `classify`: a facet-unbound resolve surfaces the
+        // precise message via the usage/exit-2 branch, never "unsatisfiable".
+        let report = DiagnosticsReport {
+            schema_version: PRODUCT_SCHEMA_VERSION,
+            diagnostics: vec![compiler::product_api::Diagnostic {
+                code: "E_RESOLVE_FACET_UNBOUND".to_string(),
+                severity: compiler::product_api::DiagnosticSeverity::Error,
+                message: "Declared facet 'region' is unbound and has no default, but an active \
+                          condition requires it; declared domain: [eu, us]"
+                    .to_string(),
+                source_id: None,
+                entity_path: None,
+                hint: None,
+            }],
+            error_count: 1,
+            warning_count: 0,
+        };
+        let err = classify(&report);
+        assert_eq!(err.exit_code, crate::EXIT_USAGE);
+        assert!(!err.unsatisfiable, "facet-unbound must not be the unsat family");
+        assert!(err.message.contains("region"), "message names the facet: {}", err.message);
+    }
+
+    #[test]
     fn classify_unknown_facet_is_usage_exit_2() {
         let report = DiagnosticsReport {
             schema_version: PRODUCT_SCHEMA_VERSION,

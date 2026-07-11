@@ -11,7 +11,7 @@ including incremental compilation, scoped resolution, output generation, and run
 - Wrappers: optional integration layers (for example C++/ROS2), not the product core.
 
 ## Goals
-- Ingest & Infer: Ingest many decentralized chunks (TOML today, .cf planned) to infer the global "150% model". The configuration model is not an input, but an aggregate graph derived from these chunks.
+- Ingest & Infer: Ingest many decentralized chunks (authored in CUE, exported to JSON) to infer the global "150% model". The configuration model is not an input, but an aggregate graph derived from these chunks.
 - Incremental Compilation: Compile source chunks into a hashed Incremental IR (Chunks + Global Index) to support sub-second incremental builds and delta updates.
 - Scoped Resolution: Support resolving the 100% model for a specific Target Scope (e.g., a single component or subsystem) rather than forcing a monolithic platform resolution. This enables component-level builds, unit testing, and parallel processing.
 - Artifact as Config: Treat "Artifacts" (binaries, drivers, blobs) as first-class configuration parameters. The system validates the logic of artifact selection, leaving physical retrieval to the runtime loader.
@@ -59,7 +59,7 @@ Solid edges are current shipped flows. Dashed edges point to deferred surfaces.
 ```mermaid
 flowchart LR
     subgraph authoring["Authoring and compile stage (shipped)"]
-        chunks["Source chunks<br/>.toml today"] --> compiler["configflux-compiler<br/>ingest + link/verify + compile"] --> cmp["Compiled model package<br/>cmp.manifest.json<br/>index.cfir.json + chunk-*.cfir"]
+        chunks["Source chunks<br/>CUE-exported JSON"] --> compiler["configflux-compiler<br/>ingest + link/verify + compile"] --> cmp["Compiled model package<br/>cmp.manifest.json<br/>index.cfir.json + chunk-*.cfir"]
     end
 
     subgraph late_binding["Late-binding and export stage (shipped)"]
@@ -206,7 +206,7 @@ Loop 11 verification coverage:
 
 ## Compiler Output: The Incremental IR
 The Compiler emits an Incremental Object Graph, consisting of:
-- IR Chunks: one binary artifact per source file (TOML today, .cf planned), identified by content hash (SHA256). Contains the localized schema and logic for that component.
+- IR Chunks: one binary artifact per source file (CUE authored, exported to JSON for ingestion), identified by content hash (SHA256). Contains the localized schema and logic for that component.
 - Global Object Index: a manifest mapping logical components to their specific Chunk Hashes.
 
 Benefit: This structure allows for delta processing. When a single source file changes, only its corresponding Chunk is regenerated, and the Global Index is updated. This enables fast incremental builds and delta-based deployment packages.
@@ -274,7 +274,7 @@ Dependency graph:
 - Dependency edges are extracted from explicit fields and validated during Link and Verify.
 - Implicit dependencies are inferred from references in content (e.g., a parameter that `inherits`
   a definition implies a dependency on that definition).
-- Cycle and diamond checks run at compile time, before resolution.
+- Cycle checks run at compile time, before resolution (diamonds are permitted; ADR-0048).
 
 ## Resolution (Stateless and Scoped)
 The Resolver accepts three inputs:
@@ -368,8 +368,9 @@ Rules:
 - If variants are needed, define multiple artifact IDs and select via overrides on the parameter.
 
 ## Dependency Constraints
-- The object graph must be directed and acyclic.
-- Diamond dependencies are rejected during Link and Verify.
+- The object graph must be directed and acyclic. It may be any DAG — a component
+  reachable from a single root via multiple paths (a diamond) is permitted
+  (ADR-0048). Only cycles are rejected.
 - Dependency edges are explicit and validated during compilation, before resolution.
 - Inheritance edges (definitions/parameters) are directed and acyclic; cycles such as A -> B -> A are rejected.
 - Conditional compatibility is required: if component A depends on component B, A's enablement
@@ -386,8 +387,8 @@ Rules:
 - Missing target: any dependency or inheritance reference to an unknown ID is an error.
 - Component cycles: any cycle in the component dependency graph is an error.
 - Inheritance cycles: any cycle in the inheritance graph is an error.
-- Diamond dependencies: for any component root A, if there exist two distinct paths from A to the
-  same component D (e.g., A -> B -> D and A -> C -> D), it is an error.
+- Diamond dependencies: for any component root A, two distinct paths from A to the same component D
+  (e.g., A -> B -> D and A -> C -> D) are permitted — the component graph may be any DAG (ADR-0048).
 - Conditional compatibility: for any component edge A -> B, the condition of A must imply the
   condition of B (treat no condition as `true`). If implication cannot be proven, fail.
 
@@ -415,8 +416,12 @@ Strategy:
    - Any unsupported operator (`||`, `<`, `>`, functions) or mixed types exits this path.
 
 2) Eval-driven proof matrix (fallback)
-   - Build a finite tag domain from all literal values referenced in conditions.
-   - For each tag, include every referenced literal plus a sentinel "other".
+   - Build a finite tag domain from all literal values referenced in conditions,
+     unioned with the declared domain of any first-class facet whose name
+     matches the tag (ADR-0047: a declared facet's `values` are its full domain,
+     including default arms no condition references; an open facet's domain is
+     declared ∪ referenced literals).
+   - For each tag, include every value in that domain plus a sentinel "other".
    - Evaluate A and B for every Cartesian product assignment of the domain.
    - If any assignment yields A == true and B == false, implication fails.
    - If evaluation cannot be performed (unknown tag, type mismatch), fail closed.
@@ -452,7 +457,7 @@ Notes:
 - Unit or inherit target conflicts in parameters: error.
 - Missing required fields at resolution (component type, parameter type/value): error.
 - Condition eval failures: error with the original condition string for debuggability.
-- Cyclic or diamond dependencies in the object graph: error during Link and Verify.
+- Cyclic dependencies in the object graph: error during Link and Verify (diamonds are permitted; ADR-0048).
 
 ## Extension Points
 - Additional merge conflict rules (e.g., lifecycle/safety conflicts) can be enforced in `merge_params`.
