@@ -183,7 +183,7 @@ choices):
 ```bash
 cat > production.selection.json <<'JSON'
 {
-  "schema_version": 2,
+  "schema_version": 4,
   "model_hash": "",
   "scope": "component:runtime_tuner",
   "context_tags": { "site": "prod" },
@@ -424,7 +424,7 @@ runtime-lifecycle parameters** with full domain validation, it drives the
   are otherwise occupied.
 - **Request size** is bounded to **8 MiB**. A larger request is a transport
   failure.
-- Every request and response carries `schema_version`, set to `1`.
+- Every request and response carries `schema_version`, set to `4`.
 
 **Exit codes** (the same for every command):
 
@@ -465,7 +465,7 @@ The open request projects the resolved snapshot and adds the `ccm_ref`:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 4,
   "model_hash": "<from snapshot>",
   "resolve_hash": "<from snapshot>",
   "ccm_ref": "<path to the bundle's ccm/ directory>",
@@ -482,7 +482,7 @@ A successful open returns (abbreviated):
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 4,
   "status": "ok",
   "scope": "component:runtime_tuner",
   "model_hash": "efab1360380efc62...",
@@ -538,7 +538,7 @@ def call(command: str, request: dict) -> dict:
 
 # 1. Open the session from the bundle.
 open_request = {
-    "schema_version": 1,
+    "schema_version": 4,
     "model_hash": snapshot["model_hash"],
     "resolve_hash": snapshot["resolve_hash"],
     "ccm_ref": "/opt/configflux/bundle/ccm",
@@ -557,13 +557,13 @@ session = opened["runtime_snapshot"]  # thread this into every later call
 
 # 2. Read parameter paths.
 listed = call("list-parameters", {
-    "schema_version": 1, "runtime_snapshot": session, "scope_root": "runtime_tuner",
+    "schema_version": 4, "runtime_snapshot": session, "scope_root": "runtime_tuner",
 })
 print("parameters:", listed["parameter_paths"])
 
 # 3. Mutate a runtime-lifecycle parameter -> pending dirty change.
 result = call("set-parameter", {
-    "schema_version": 1, "runtime_snapshot": session,
+    "schema_version": 4, "runtime_snapshot": session,
     "path": "component.runtime_tuner.param.log_level", "value": "debug",
 })
 if result["status"] != "ok":
@@ -573,7 +573,7 @@ session = result["runtime_snapshot"]  # carries the pending change
 
 # 4. Commit within the auto-reset window, or the change is reverted.
 committed = call("commit-configuration", {
-    "schema_version": 1, "runtime_snapshot": session,
+    "schema_version": 4, "runtime_snapshot": session,
     "actor": "inventory-service", "reason": "persist log level",
 })
 print("commit_id:", committed["commit_id"])
@@ -624,7 +624,7 @@ string session = opened.GetProperty("runtime_snapshot").GetRawText();  // thread
 // 2. Mutate a runtime-lifecycle parameter -> pending dirty change.
 string setReq = $$"""
 {
-  "schema_version": 1,
+  "schema_version": 4,
   "runtime_snapshot": {{session}},
   "path": "component.runtime_tuner.param.log_level",
   "value": "debug"
@@ -637,7 +637,7 @@ session = setResult.GetProperty("runtime_snapshot").GetRawText();
 
 // 3. Commit within the auto-reset window.
 string commitReq = $$"""
-{ "schema_version": 1, "runtime_snapshot": {{session}},
+{ "schema_version": 4, "runtime_snapshot": {{session}},
   "actor": "inventory-service", "reason": "persist log level" }
 """;
 JsonElement committed = Call("commit-configuration", commitReq);
@@ -801,7 +801,7 @@ session snapshot, not a duplicated or accidentally nested payload.
 
 Diagnostic code `E_RUNTIME_CLI_REQUEST_INVALID`, exit code `1`. The bytes on
 stdin (or in `--request-file`) were not a valid request envelope. Verify you
-serialized a single JSON object, that `schema_version` is `1`, and that field
+serialized a single JSON object, that `schema_version` is `4`, and that field
 names match the command (for example the list/metadata commands
 take `scope_root`, not `scope`).
 

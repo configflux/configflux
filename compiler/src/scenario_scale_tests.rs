@@ -96,38 +96,38 @@ const S4_SELECTION_STEPS: &[(&str, &str)] = &[
     ("payload_module", "heavy_lift"),
 ];
 
-const CYCLE_MUTATION_SOURCE: &str = "scenarios/loop7/mutations/dependency_cycle.toml";
+const CYCLE_MUTATION_SOURCE: &str = "scenarios/scale/mutations/dependency_cycle.toml";
 const CYCLE_MUTATION_CHUNK: &str = r#"
-package = "loop7_cycle_mutation"
+package = "scale_cycle_mutation"
 version = "1.0.0"
 
-[components.loop7_cycle_a]
+[components.scale_cycle_a]
 type = "module"
-depends_on = ["loop7_cycle_b"]
+depends_on = ["scale_cycle_b"]
 
-[components.loop7_cycle_b]
+[components.scale_cycle_b]
 type = "module"
-depends_on = ["loop7_cycle_a"]
+depends_on = ["scale_cycle_a"]
 "#;
 
-const DIAMOND_MUTATION_SOURCE: &str = "scenarios/loop7/mutations/dependency_diamond.toml";
+const DIAMOND_MUTATION_SOURCE: &str = "scenarios/scale/mutations/dependency_diamond.toml";
 const DIAMOND_MUTATION_CHUNK: &str = r#"
-package = "loop7_diamond_mutation"
+package = "scale_diamond_mutation"
 version = "1.0.0"
 
-[components.loop7_diamond_root]
+[components.scale_diamond_root]
 type = "module"
-depends_on = ["loop7_diamond_left", "loop7_diamond_right"]
+depends_on = ["scale_diamond_left", "scale_diamond_right"]
 
-[components.loop7_diamond_left]
+[components.scale_diamond_left]
 type = "module"
-depends_on = ["loop7_diamond_shared"]
+depends_on = ["scale_diamond_shared"]
 
-[components.loop7_diamond_right]
+[components.scale_diamond_right]
 type = "module"
-depends_on = ["loop7_diamond_shared"]
+depends_on = ["scale_diamond_shared"]
 
-[components.loop7_diamond_shared]
+[components.scale_diamond_shared]
 type = "module"
 "#;
 
@@ -276,7 +276,7 @@ fn manifest_for_spec(
 }
 
 fn temp_output_dir(label: &str) -> Result<TempDirGuard> {
-    unique_temp_dir("configflux-loop7-scale", label)
+    unique_temp_dir("cfx-scale", label)
 }
 
 fn open_handle(cmp_manifest: &Path) -> Result<ModelHandle> {
@@ -501,7 +501,7 @@ fn perf_asserts_enabled() -> bool {
 
 fn assert_within_threshold(name: &str, value: u128, threshold: u128) {
     if value > threshold {
-        eprintln!("[loop7-perf] {name} exceeded threshold: {value} > {threshold}");
+        eprintln!("[scale-perf] {name} exceeded threshold: {value} > {threshold}");
     }
     if perf_asserts_enabled() {
         assert!(
@@ -581,7 +581,7 @@ fn assert_large_thresholds(label: &str, metrics: &StageMetrics) {
 }
 
 #[test]
-fn loop7_medium_closed_loop_s1_s4_are_stable_across_repeated_runs() -> Result<()> {
+fn scale_medium_closed_loop_s1_s4_are_stable_across_repeated_runs() -> Result<()> {
     let medium_specs = [
         S1_MEDIUM_SPEC,
         S2_MEDIUM_SPEC,
@@ -597,7 +597,7 @@ fn loop7_medium_closed_loop_s1_s4_are_stable_across_repeated_runs() -> Result<()
 }
 
 #[test]
-fn loop7_large_closed_loop_s3_s4_are_stable_across_repeated_runs() -> Result<()> {
+fn scale_large_closed_loop_s3_s4_are_stable_across_repeated_runs() -> Result<()> {
     let large_specs = [S3_LARGE_SPEC, S4_LARGE_SPEC];
     for spec in large_specs {
         let first = run_closed_loop(&spec, &format!("{}-run-a", spec.name))?;
@@ -608,7 +608,7 @@ fn loop7_large_closed_loop_s3_s4_are_stable_across_repeated_runs() -> Result<()>
 }
 
 #[test]
-fn loop7_hash_determinism_representative_selection_across_smoke_medium_large() -> Result<()> {
+fn scale_hash_determinism_representative_selection_across_smoke_medium_large() -> Result<()> {
     let representative = [S4_SMOKE_SPEC, S4_MEDIUM_SPEC, S4_LARGE_SPEC];
     for spec in representative {
         let first = run_closed_loop(&spec, &format!("{}-representative-a", spec.name))?;
@@ -619,7 +619,7 @@ fn loop7_hash_determinism_representative_selection_across_smoke_medium_large() -
 }
 
 #[test]
-fn loop7_medium_mutations_cycle_and_unsatisfied_emit_stable_codes() -> Result<()> {
+fn scale_medium_mutations_cycle_and_unsatisfied_emit_stable_codes() -> Result<()> {
     let cycle_manifest = manifest_for_spec(
         &S2_MEDIUM_SPEC,
         &[(CYCLE_MUTATION_SOURCE, CYCLE_MUTATION_CHUNK)],
@@ -705,8 +705,8 @@ fn loop7_medium_mutations_cycle_and_unsatisfied_emit_stable_codes() -> Result<()
 }
 
 #[test]
-fn loop7_large_diamond_accepted_and_unsatisfied_emits_stable_code() -> Result<()> {
-    // ADR-0048: a diamond mutation (`loop7_diamond_shared` reached via both
+fn scale_large_diamond_accepted_and_unsatisfied_emits_stable_code() -> Result<()> {
+    // ADR-0048: a diamond mutation (`scale_diamond_shared` reached via both
     // `left` and `right`) is a permitted DAG and verifies cleanly on a large
     // scenario. Only cycle/unsatisfied paths still carry stable codes.
     let diamond_manifest = manifest_for_spec(
@@ -761,7 +761,7 @@ fn loop7_large_diamond_accepted_and_unsatisfied_emits_stable_code() -> Result<()
 }
 
 #[test]
-fn loop7_medium_performance_thresholds_and_metrics_snapshot() -> Result<()> {
+fn scale_medium_performance_thresholds_and_metrics_snapshot() -> Result<()> {
     let medium_s2 = run_closed_loop(&S2_MEDIUM_SPEC, "metrics-s2-medium")?;
     let medium_s4 = run_closed_loop(&S4_MEDIUM_SPEC, "metrics-s4-medium")?;
 
@@ -773,7 +773,7 @@ fn loop7_medium_performance_thresholds_and_metrics_snapshot() -> Result<()> {
         .max()
         .unwrap_or(0);
     if rss_kib > RSS_THRESHOLD_KIB {
-        eprintln!("[loop7-perf] rss_kib exceeded threshold: {rss_kib} > {RSS_THRESHOLD_KIB}");
+        eprintln!("[scale-perf] rss_kib exceeded threshold: {rss_kib} > {RSS_THRESHOLD_KIB}");
     }
     if perf_asserts_enabled() {
         assert!(
@@ -785,7 +785,7 @@ fn loop7_medium_performance_thresholds_and_metrics_snapshot() -> Result<()> {
     }
 
     eprintln!(
-        "loop7_scale_metrics_medium medium_s2_verify_us={} medium_s2_compile_us={} medium_s2_selection_us={} medium_s2_resolve_us={} medium_s2_export_us={} medium_s2_bom_us={} medium_s4_verify_us={} medium_s4_compile_us={} medium_s4_selection_us={} medium_s4_resolve_us={} medium_s4_export_us={} medium_s4_bom_us={} rss_kib={}",
+        "scale_metrics_medium medium_s2_verify_us={} medium_s2_compile_us={} medium_s2_selection_us={} medium_s2_resolve_us={} medium_s2_export_us={} medium_s2_bom_us={} medium_s4_verify_us={} medium_s4_compile_us={} medium_s4_selection_us={} medium_s4_resolve_us={} medium_s4_export_us={} medium_s4_bom_us={} rss_kib={}",
         medium_s2.metrics.verify_us,
         medium_s2.metrics.compile_us,
         medium_s2.metrics.selection_us,
@@ -805,7 +805,7 @@ fn loop7_medium_performance_thresholds_and_metrics_snapshot() -> Result<()> {
 }
 
 #[test]
-fn loop7_large_performance_thresholds_and_metrics_snapshot() -> Result<()> {
+fn scale_large_performance_thresholds_and_metrics_snapshot() -> Result<()> {
     let large_s3 = run_closed_loop(&S3_LARGE_SPEC, "metrics-s3-large")?;
     let large_s4 = run_closed_loop(&S4_LARGE_SPEC, "metrics-s4-large")?;
 
@@ -817,7 +817,7 @@ fn loop7_large_performance_thresholds_and_metrics_snapshot() -> Result<()> {
         .max()
         .unwrap_or(0);
     if rss_kib > RSS_THRESHOLD_KIB {
-        eprintln!("[loop7-perf] rss_kib exceeded threshold: {rss_kib} > {RSS_THRESHOLD_KIB}");
+        eprintln!("[scale-perf] rss_kib exceeded threshold: {rss_kib} > {RSS_THRESHOLD_KIB}");
     }
     if perf_asserts_enabled() {
         assert!(
@@ -829,7 +829,7 @@ fn loop7_large_performance_thresholds_and_metrics_snapshot() -> Result<()> {
     }
 
     eprintln!(
-        "loop7_scale_metrics_large large_s3_verify_us={} large_s3_compile_us={} large_s3_selection_us={} large_s3_resolve_us={} large_s3_export_us={} large_s3_bom_us={} large_s4_verify_us={} large_s4_compile_us={} large_s4_selection_us={} large_s4_resolve_us={} large_s4_export_us={} large_s4_bom_us={} rss_kib={}",
+        "scale_metrics_large large_s3_verify_us={} large_s3_compile_us={} large_s3_selection_us={} large_s3_resolve_us={} large_s3_export_us={} large_s3_bom_us={} large_s4_verify_us={} large_s4_compile_us={} large_s4_selection_us={} large_s4_resolve_us={} large_s4_export_us={} large_s4_bom_us={} rss_kib={}",
         large_s3.metrics.verify_us,
         large_s3.metrics.compile_us,
         large_s3.metrics.selection_us,

@@ -1,4 +1,4 @@
 cannot select cpu.highperf:
   blocked by your earlier choice: cooling.air
-  blocked by model rule: blocked by model rule relating: cooling.air, cooling.liquid, cpu.highperf
+  blocked by constraint highperf_requires_liquid: cpu != 'highperf' || cooling != 'air'
 (one minimal explanation; other minimal cores may exist)

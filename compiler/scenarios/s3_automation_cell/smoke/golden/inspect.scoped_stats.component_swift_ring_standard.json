@@ -1,7 +1,7 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "status": "ok",
-  "model_hash": "__DYNAMIC_MODEL_HASH__",
+  "source_digest": "__DYNAMIC_SOURCE_DIGEST__",
   "query": {
     "query_type": "scoped_stats",
     "scope": "component:swift_ring_standard"
@@ -49,7 +49,7 @@
   "error_count": 0,
   "warning_count": 0,
   "diagnostics": {
-    "schema_version": 3,
+    "schema_version": 4,
     "diagnostics": [],
     "error_count": 0,
     "warning_count": 0

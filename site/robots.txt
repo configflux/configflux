@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://configflux.dev/sitemap.xml

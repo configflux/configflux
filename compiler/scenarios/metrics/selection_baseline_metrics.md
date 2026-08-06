@@ -1,6 +1,6 @@
-# Loop 3 Selection Baseline Metrics (S1/S3 Smoke)
+# Selection Baseline Metrics (S1/S3 Smoke)
 
-These baseline numbers are recorded from the Loop 3 guided-selection smoke path.
+These baseline numbers are recorded from the guided-selection smoke path.
 
 ## Commands
 - `bazel test //compiler:scenario_smoke_test`
@@ -14,11 +14,11 @@ These baseline numbers are recorded from the Loop 3 guided-selection smoke path.
 
 ## Metrics
 - Bazel elapsed wall-clock: `0.395s` (Invocation `eef2ed49-f407-4d3d-be3a-1341a6243878`).
-- Selection operation timings (from `loop3_selection_metrics_snapshot`):
+- Selection operation timings (from `selection_metrics_snapshot`):
   - `get_options_us=437`
   - `apply_selection_us=453`
   - `explain_rejection_us=441`
 - Process memory snapshot:
   - `rss_kib=7296`
 
-These are the Loop 3 baseline values for future smoke-regression tracking.
+These are the selection baseline values for future smoke-regression tracking.

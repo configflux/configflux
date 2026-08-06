@@ -136,6 +136,17 @@ accept_inline "closed facet with default"  '{"package":"p","version":"1","facets
 accept_inline "open facet, no default"      '{"package":"p","version":"1","facets":{"tls_mode":{"values":["strict"],"open":true}}}' '#Config'
 accept_inline "facet default∉values passes cue (Rust rejects)" '{"package":"p","version":"1","facets":{"region":{"values":["eu","us"],"default":"mars"}}}' '#Config'
 
+# ADR-0054: first-class `constraints` declarations. CUE checks the shape only
+# (required `condition`, optional `doc`, closed struct, #snakeId keys). The
+# expression itself is opaque here, exactly as a component/override `condition`
+# is — CUE never interprets the condition grammar. Every semantic rule
+# (the expression parses, the facets it names exist, its values are in a closed
+# facet's domain) is Rust's, in link_verify::validate_constraints, so a
+# constraint carrying gibberish still PASSES cue and is rejected by the compiler.
+accept_inline "constraint with doc"          '{"package":"p","version":"1","constraints":{"prod_forbids_debug":{"condition":"environment != '"'"'prod'"'"' || log_level != '"'"'debug'"'"'","doc":"Debug logging is not permitted in production."}}}' '#Config'
+accept_inline "constraint without doc"       '{"package":"p","version":"1","constraints":{"eu_needs_tls":{"condition":"region != '"'"'eu'"'"' || tls_mode == '"'"'strict'"'"'"}}}' '#Config'
+accept_inline "unparseable constraint passes cue (Rust rejects)" '{"package":"p","version":"1","constraints":{"bogus":{"condition":"this is not <> a condition"}}}' '#Config'
+
 echo "  positives: $pos ok, $pos_fail failed"
 
 echo "== negative: malformed input must be rejected =="
@@ -184,6 +195,15 @@ check_reject "facet values non-string"     '{"package":"p","version":"1","facets
 check_reject "facet open non-bool"         '{"package":"p","version":"1","facets":{"region":{"values":["eu"],"open":"yes"}}}' '#Config'
 check_reject "facet unknown field"         '{"package":"p","version":"1","facets":{"region":{"values":["eu"],"bogus":1}}}' '#Config'
 check_reject "facet id with __"            '{"package":"p","version":"1","facets":{"foo__bar":{"values":["x"]}}}' '#Config'
+
+# ADR-0054: constraint-shape violations CUE catches structurally. (Semantic
+# invariants — the expression parses, its facets/values exist — are Rust's, see
+# the positive block above.)
+check_reject "constraint missing condition" '{"package":"p","version":"1","constraints":{"c":{"doc":"no condition"}}}' '#Config'
+check_reject "constraint condition non-string" '{"package":"p","version":"1","constraints":{"c":{"condition":1}}}' '#Config'
+check_reject "constraint doc non-string"    '{"package":"p","version":"1","constraints":{"c":{"condition":"a == '"'"'b'"'"'","doc":1}}}' '#Config'
+check_reject "constraint unknown field"     '{"package":"p","version":"1","constraints":{"c":{"condition":"a == '"'"'b'"'"'","bogus":1}}}' '#Config'
+check_reject "constraint id with __"        '{"package":"p","version":"1","constraints":{"foo__bar":{"condition":"a == '"'"'b'"'"'"}}}' '#Config'
 
 echo "== summary =="
 if [ "$pos_fail" -eq 0 ] && [ "$neg_fail" -eq 0 ]; then

@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "environments": {
+    "dev": {
+      "scope": "component:webapp",
+      "context_tags": {},
+      "choices": {
+        "environment": "dev",
+        "log_level": "debug",
+        "replica_class": "single",
+        "beta_dashboard": "on"
+      }
+    },
+    "staging": {
+      "scope": "component:webapp",
+      "context_tags": {},
+      "choices": {
+        "environment": "staging",
+        "log_level": "info",
+        "replica_class": "scaled",
+        "beta_dashboard": "on"
+      }
+    },
+    "prod": {
+      "scope": "component:webapp",
+      "context_tags": {},
+      "choices": {
+        "environment": "prod",
+        "log_level": "info",
+        "replica_class": "scaled",
+        "beta_dashboard": "off"
+      }
+    }
+  }
+}

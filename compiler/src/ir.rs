@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-use crate::schema::{Artifact, Component, Config, Facet, Parameter};
+use crate::schema::{Artifact, Component, Config, Constraint, Facet, Parameter};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -10,10 +10,35 @@ use std::path::Path;
 // Bumped 1 -> 2 (ADR-0047): `IrIndex.facet_index` joins the `model_hash`
 // preimage (it is a field of `IrIndexContent`), so every model's `model_hash`
 // rotates once this release — whether or not it declares a facet.
-pub const IR_FORMAT_VERSION: u32 = 2;
+//
+// Bumped 2 -> 3 (ADR-0054 §4/§7): `IrChunk` gains the `constraints` namespace,
+// so an emitted chunk's SHAPE changed. `verify_index_integrity` compares each
+// chunk's `format_version` against this constant, and that comparison is the
+// ONLY barrier standing between a v4 toolchain and a pre-constraints CMP
+// package: `chunk_hash` is read from the index rather than recomputed from
+// chunk bytes, so a stale package is otherwise self-consistent and would load.
+// Without this bump a v3 package would be silently read as constraint-free —
+// precisely the `constraints`-absent fallback ADR-0054 §7 forbids, and it would
+// falsify §7's guarantee that "there is no window in which the same bytes mean
+// two different things". `PRODUCT_SCHEMA_VERSION` guards the REQUEST; this
+// guards the PACKAGE. Both must move together.
+pub const IR_FORMAT_VERSION: u32 = 3;
 pub const CMP_MANIFEST_SCHEMA_VERSION: u32 = 1;
 pub const CMP_HASH_ALGO: &str = "sha256";
-pub const CMP_CANONICALIZATION_VERSION: u32 = 1;
+// Bumped 1 -> 2 (ADR-0056 §4): this constant is precisely the counter for "the
+// rule that produced `model_hash`", and that rule changed — `source_id` left
+// the preimage and the chunk vector is now ordered by `chunk_hash`. Without the
+// bump a package canonicalized under rule v1 falls through to the index
+// recompute in `open_model` and is rejected as E_LOADER_INDEX_INVALID hinting
+// "Do not mutate emitted index files; recompile instead" — a tampering
+// accusation against a package that is internally consistent and was simply
+// built by the previous toolchain. `validate_manifest` checks this fail-closed
+// before anything else is read, so the bump makes the rejection state the true
+// reason at the correct gate.
+//
+// IR_FORMAT_VERSION deliberately does NOT move with it: neither `IrChunk` nor
+// `IrIndex` changed SHAPE, which is what that counter guards.
+pub const CMP_CANONICALIZATION_VERSION: u32 = 2;
 pub const CMP_DEFAULT_MANIFEST_FILENAME: &str = "cmp.manifest.json";
 pub const CMP_DEFAULT_INDEX_REF: &str = "index.cfir.json";
 pub const CMP_DEFAULT_CHUNK_SET_REF: &str = ".";
@@ -32,6 +57,13 @@ pub struct IrChunk {
     // `build_ir_index` (E_INGEST_DUPLICATE_FACET).
     #[serde(default)]
     pub facets: BTreeMap<String, Facet>,
+    // Policy assertions authored in this chunk (ADR-0054 §4). Carried so
+    // `load_selection_constraint_model` can read constraints on the same walk
+    // that already reads `facets` / `components` / `definitions`. A `BTreeMap`
+    // keeps the per-chunk walk id-ascending, which is the order
+    // `SelectionConstraintModel.constraints` commits to.
+    #[serde(default)]
+    pub constraints: BTreeMap<String, Constraint>,
     pub metadata: Option<serde_json::Value>,
 }
 
@@ -80,14 +112,33 @@ pub struct CmpManifest {
     pub stats: Option<CmpManifestStats>,
 }
 
+/// The `model_hash` preimage (ADR-0056 §1). Serialized with
+/// `serde_json::to_vec` and hashed by [`hash_index_content`].
+///
+/// `chunks` is a `Vec<String>` of bare `chunk_hash` values, NOT the
+/// [`IrChunkRef`] the index carries on disk: `IrChunkRef.source_id` is the
+/// literal `--source` argument, and it was the single route by which the
+/// command line reached model identity. Two checkouts of one commit disagreed
+/// about the identity of one model, and moving an unedited file rotated it.
+/// The standing invariant that replaces it: **no path string may enter any
+/// hash preimage.**
+///
+/// The vector arrives sorted ascending by `chunk_hash` (§2) — sorted once in
+/// `build_ir_index` and never re-sorted here, so a reordered on-disk index
+/// still fails `open_model`'s recompute instead of being silently accepted.
 #[derive(Serialize)]
 struct IrIndexContent {
     format_version: u32,
-    chunks: Vec<IrChunkRef>,
+    chunks: Vec<String>,
     component_index: BTreeMap<String, String>,
     definition_index: BTreeMap<String, String>,
     artifact_index: BTreeMap<String, String>,
     facet_index: BTreeMap<String, String>,
+}
+
+/// Project chunk refs onto the preimage's bare-hash vector, preserving order.
+fn preimage_chunks(chunks: &[IrChunkRef]) -> Vec<String> {
+    chunks.iter().map(|c| c.chunk_hash.clone()).collect()
 }
 
 impl IrChunk {
@@ -112,6 +163,11 @@ impl IrChunk {
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
+        let constraints = config
+            .constraints
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
 
         Self {
             format_version: IR_FORMAT_VERSION,
@@ -121,6 +177,7 @@ impl IrChunk {
             components,
             artifacts,
             facets,
+            constraints,
             metadata: None,
         }
     }
@@ -136,7 +193,7 @@ impl IrIndex {
     ) -> Result<Self> {
         let content = IrIndexContent {
             format_version: IR_FORMAT_VERSION,
-            chunks,
+            chunks: preimage_chunks(&chunks),
             component_index,
             definition_index,
             artifact_index,
@@ -145,7 +202,10 @@ impl IrIndex {
         let config_hash = hash_index_content(&content)?;
         Ok(Self {
             format_version: content.format_version,
-            chunks: content.chunks,
+            // The refs as given — `source_id` is kept on disk as provenance
+            // (ADR-0056 §5) and is what ADR-0054 §6 reads to name the chunk
+            // that declared a rejected constraint.
+            chunks,
             component_index: content.component_index,
             definition_index: content.definition_index,
             artifact_index: content.artifact_index,
@@ -157,7 +217,7 @@ impl IrIndex {
     pub fn compute_config_hash(&self) -> Result<String> {
         let content = IrIndexContent {
             format_version: self.format_version,
-            chunks: self.chunks.clone(),
+            chunks: preimage_chunks(&self.chunks),
             component_index: self.component_index.clone(),
             definition_index: self.definition_index.clone(),
             artifact_index: self.artifact_index.clone(),
@@ -507,9 +567,9 @@ fn hex_char(nibble: u8) -> char {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scenario_test_support::unique_temp_path;
     use crate::schema::{Artifact, Component, Config, Parameter, Value};
     use std::collections::{BTreeMap, HashMap};
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn empty_param() -> Parameter {
         Parameter {
@@ -622,6 +682,7 @@ mod tests {
             components,
             artifacts,
             facets: HashMap::new(),
+            constraints: HashMap::new(),
         };
 
         let chunk = IrChunk::from_config("src/config.toml", "abc", &config);
@@ -694,20 +755,13 @@ mod tests {
             components,
             artifacts,
             facets: HashMap::new(),
+            constraints: HashMap::new(),
         };
 
         let chunk_hash = "hash_ok";
         let chunk = IrChunk::from_config("source.toml", chunk_hash, &config);
 
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time")
-            .as_nanos();
-        let temp_dir = std::env::temp_dir().join(format!(
-            "configflux-ir-verify-{}-{}",
-            std::process::id(),
-            unique
-        ));
+        let temp_dir = unique_temp_path("configflux-ir", "verify");
         std::fs::create_dir_all(&temp_dir).unwrap();
         let chunk_path = temp_dir.join(format!("chunk-{}.cfir", chunk_hash));
         std::fs::write(&chunk_path, serde_json::to_vec(&chunk).unwrap()).unwrap();
@@ -750,8 +804,7 @@ mod tests {
         )
         .unwrap();
 
-        let temp_dir =
-            std::env::temp_dir().join(format!("configflux-ir-missing-{}", std::process::id()));
+        let temp_dir = unique_temp_path("configflux-ir", "missing");
         std::fs::create_dir_all(&temp_dir).unwrap();
         let err = verify_index_integrity(&index, &temp_dir).unwrap_err();
         assert!(format!("{err}").contains("Missing IR chunk"), "err: {err}");
@@ -759,10 +812,136 @@ mod tests {
     }
 
     #[test]
-    fn ir_format_version_is_two_for_facet_indexed_model() {
-        // ADR-0047: the facet_index preimage change ships as the one train
-        // version bump (1 -> 2). model_hash rotates globally as a result.
-        assert_eq!(IR_FORMAT_VERSION, 2);
+    fn ir_format_version_is_three_for_constraint_bearing_chunks() {
+        // ADR-0047 took this 1 -> 2 (the facet_index preimage change).
+        // ADR-0054 §4/§7 takes it 2 -> 3: `IrChunk` gained `constraints`, and
+        // this constant is the ONLY barrier against a v4 toolchain silently
+        // reading a pre-constraints package as constraint-free. model_hash
+        // rotates globally as a result, exactly as it did for ADR-0047.
+        assert_eq!(IR_FORMAT_VERSION, 3);
+    }
+
+    #[test]
+    fn a_pre_constraints_chunk_is_rejected_by_format_version() {
+        // THE test for ADR-0054 §7's package-side guarantee. The IR bump's
+        // whole justification is that this comparison is the only barrier
+        // between a v4 toolchain and a pre-constraints CMP — `chunk_hash` is
+        // read from the index, never recomputed from chunk bytes, so a stale
+        // package is otherwise self-consistent and would load and be read as
+        // constraint-free. Assert the barrier actually bites.
+        let temp_dir = unique_temp_path("configflux-ir", "stale-format");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let config = Config {
+            package: "p".to_string(),
+            version: "1.0".to_string(),
+            definitions: HashMap::new(),
+            components: HashMap::new(),
+            artifacts: HashMap::new(),
+            facets: HashMap::new(),
+            constraints: HashMap::new(),
+        };
+        let chunk_hash = chunk_hash_from_config(&config).unwrap();
+        let mut chunk = IrChunk::from_config("s.json", &chunk_hash, &config);
+        // Stamp the PREVIOUS format version: a chunk emitted before the
+        // `constraints` namespace existed.
+        chunk.format_version = IR_FORMAT_VERSION - 1;
+        let chunk_path = temp_dir.join(format!("chunk-{chunk_hash}.cfir"));
+        std::fs::write(&chunk_path, serde_json::to_vec(&chunk).unwrap()).unwrap();
+
+        let index = IrIndex::from_parts(
+            vec![IrChunkRef {
+                chunk_hash: chunk_hash.clone(),
+                source_id: "s.json".to_string(),
+            }],
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+        )
+        .unwrap();
+
+        let err = verify_index_integrity(&index, &temp_dir).unwrap_err();
+        assert!(
+            format!("{err}").contains("unsupported format version"),
+            "a pre-constraints chunk must be rejected, got: {err}"
+        );
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn from_config_carries_constraints() {
+        let mut constraints = HashMap::new();
+        constraints.insert(
+            "prod_forbids_debug".to_string(),
+            Constraint {
+                condition: "environment != 'prod' || log_level != 'debug'".to_string(),
+                doc: Some("Debug logging is not permitted in production.".to_string()),
+            },
+        );
+        let config = Config {
+            package: "p".to_string(),
+            version: "1.0".to_string(),
+            definitions: HashMap::new(),
+            components: HashMap::new(),
+            artifacts: HashMap::new(),
+            facets: HashMap::new(),
+            constraints,
+        };
+
+        let chunk = IrChunk::from_config("s.json", "abc", &config);
+        assert_eq!(chunk.constraints.len(), 1);
+        let declared = chunk
+            .constraints
+            .get("prod_forbids_debug")
+            .expect("constraint carried into the chunk IR");
+        assert_eq!(
+            declared.condition,
+            "environment != 'prod' || log_level != 'debug'"
+        );
+        assert_eq!(
+            declared.doc.as_deref(),
+            Some("Debug logging is not permitted in production.")
+        );
+    }
+
+    #[test]
+    fn chunk_hash_changes_when_a_constraint_is_declared() {
+        // A constraint is authored policy and part of the model's content
+        // address — declaring one must move `chunk_hash`, or two models with
+        // different policies would share a `model_hash`.
+        let bare = Config {
+            package: "p".to_string(),
+            version: "1.0".to_string(),
+            definitions: HashMap::new(),
+            components: HashMap::new(),
+            artifacts: HashMap::new(),
+            facets: HashMap::new(),
+            constraints: HashMap::new(),
+        };
+        let mut constraints = HashMap::new();
+        constraints.insert(
+            "eu_needs_tls".to_string(),
+            Constraint {
+                condition: "region != 'eu' || tls_mode == 'strict'".to_string(),
+                doc: None,
+            },
+        );
+        let with_policy = Config {
+            package: "p".to_string(),
+            version: "1.0".to_string(),
+            definitions: HashMap::new(),
+            components: HashMap::new(),
+            artifacts: HashMap::new(),
+            facets: HashMap::new(),
+            constraints,
+        };
+
+        assert_ne!(
+            chunk_hash_from_config(&bare).unwrap(),
+            chunk_hash_from_config(&with_policy).unwrap()
+        );
     }
 
     #[test]
@@ -784,6 +963,7 @@ mod tests {
             components: HashMap::new(),
             artifacts: HashMap::new(),
             facets,
+            constraints: HashMap::new(),
         };
         let chunk = IrChunk::from_config("src", "h", &config);
         assert_eq!(chunk.facets.len(), 1);
@@ -834,19 +1014,12 @@ mod tests {
             components: HashMap::new(),
             artifacts: HashMap::new(),
             facets: HashMap::new(),
+            constraints: HashMap::new(),
         };
         let chunk_hash = "hf";
         let chunk = IrChunk::from_config("source.toml", chunk_hash, &config);
 
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time")
-            .as_nanos();
-        let temp_dir = std::env::temp_dir().join(format!(
-            "configflux-ir-facet-{}-{}",
-            std::process::id(),
-            unique
-        ));
+        let temp_dir = unique_temp_path("configflux-ir", "facet");
         std::fs::create_dir_all(&temp_dir).unwrap();
         let chunk_path = temp_dir.join(format!("chunk-{}.cfir", chunk_hash));
         std::fs::write(&chunk_path, serde_json::to_vec(&chunk).unwrap()).unwrap();

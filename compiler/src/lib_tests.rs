@@ -4,9 +4,9 @@
     use crate::compiler_core::SourceChunk;
     use crate::ingest_merge::build_ir_index;
     use crate::resolver::{resolve, ResolutionContext};
+    use crate::scenario_test_support::unique_temp_path;
     use crate::schema::{Component, Config, Parameter};
     use std::collections::HashMap;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     // --- Helper to create a context from a list of strings ---
     fn make_ctx(pairs: &[(&str, &str)]) -> ResolutionContext {
@@ -52,6 +52,7 @@
             components,
             artifacts: HashMap::new(),
             facets: Default::default(),
+            constraints: Default::default(),
         }
     }
 
@@ -68,6 +69,7 @@
             components: HashMap::new(),
             artifacts: HashMap::new(),
             facets: Default::default(),
+            constraints: Default::default(),
         }
     }
 
@@ -621,15 +623,7 @@
             .add_chunk_json_with_source("configs/motor.json", chunk)
             .unwrap();
 
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time")
-            .as_nanos();
-        let temp_dir = std::env::temp_dir().join(format!(
-            "configflux-ir-test-{}-{}",
-            std::process::id(),
-            unique
-        ));
+        let temp_dir = unique_temp_path("configflux-ir", "test");
         std::fs::create_dir_all(&temp_dir).unwrap();
 
         let index = compiler.emit_ir(&temp_dir).unwrap();

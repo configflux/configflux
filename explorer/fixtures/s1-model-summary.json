@@ -1,0 +1,37 @@
+{
+  "schema_version": 4,
+  "status": "ok",
+  "source_digest": "4ca067bd1c1690e617aa5f194efc562bea0a6dddab1ce4ca940929268eb063bc",
+  "query": {
+    "query_type": "summary"
+  },
+  "summary": {
+    "source_count": 2,
+    "definition_count": 3,
+    "component_count": 3,
+    "artifact_count": 3,
+    "definition_ids": [
+      "driver_slot",
+      "safe_flow",
+      "trim_gain"
+    ],
+    "component_ids": [
+      "eu_label",
+      "power_bus",
+      "thermal_control"
+    ],
+    "artifact_ids": [
+      "aeroflux_a9_driver",
+      "hydra_x200_dual_driver",
+      "hydra_x200_single_driver"
+    ]
+  },
+  "error_count": 0,
+  "warning_count": 0,
+  "diagnostics": {
+    "schema_version": 4,
+    "diagnostics": [],
+    "error_count": 0,
+    "warning_count": 0
+  }
+}

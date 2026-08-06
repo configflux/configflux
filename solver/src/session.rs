@@ -99,6 +99,29 @@ pub enum CoreConstraintKind {
     ModelRule,
 }
 
+/// One labeled literal of the partial assignment a MUS clause forbids.
+///
+/// A model clause is the negation of a forbidden partial assignment, so the
+/// clause `(¬environment.prod ∨ ¬log_level.debug)` forbids
+/// `environment.prod = true ∧ log_level = debug = true`. [`Self::asserted`]
+/// records that polarity, which [`LabeledConstraint::atoms`] deliberately
+/// drops (it is the flat, sorted atom set the ADR-0031 D3 `facets` field
+/// carries).
+///
+/// The polarity is what makes constraint attribution possible downstream
+/// (ADR-0054 §5.4): a consumer reconstructs the forbidden facet assignment
+/// and asks which *declared* constraint that assignment violates. Without
+/// the sign, `environment.prod` alone cannot say whether `prod` was chosen
+/// or ruled out.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct LabeledLiteral {
+    /// The labeled `{facet}.{value}` this literal is about.
+    pub atom: LabeledAtom,
+    /// `true` when the forbidden assignment sets the symbol true (the option
+    /// was taken), `false` when it sets it false (the option was ruled out).
+    pub asserted: bool,
+}
+
 /// One entry in the labeled minimal unsatisfiable subset: a single
 /// constraint (a disjunction of labeled atoms) that, together with the
 /// rejected candidate, contributes to the unsatisfiability. The solver's
@@ -112,6 +135,11 @@ pub struct LabeledConstraint {
     /// the BDD falsifying path that produced the clause; for a selection
     /// it is the single pinned atom.
     pub atoms: Vec<LabeledAtom>,
+    /// The signed partial assignment this clause forbids, sorted by atom then
+    /// polarity so the shape is stable for a given MUS witness. Same literal
+    /// set as [`Self::atoms`], but carrying the sign each atom had on the BDD
+    /// falsifying path — see [`LabeledLiteral`].
+    pub forbidden: Vec<LabeledLiteral>,
 }
 
 /// The labeled minimal unsatisfiable subset (MUS) attached to a genuine

@@ -104,6 +104,26 @@ made, because only options that remain consistent with every constraint are
 selectable. Options that a prior choice has ruled out are reported as pruned,
 not offered as valid. See also: [facet](#facet), [selection](#selection).
 
+## constraint
+
+A constraint is a named policy rule over facet values — "debug logging is not
+permitted in production" — declared in a model's `constraints` namespace with an
+id, a Boolean expression in the condition grammar, and an optional doc string
+(ADR-0054). Its rule is one sentence: every declared constraint must hold in
+every resolved configuration. A constraint is deliberately distinct from
+a `condition` on a component, parameter, or override: a condition is an
+*inclusion selector* that decides what a resolved configuration contains, while
+a constraint decides what a user is allowed to pick. Constraints are validated
+at compile time — the expression must parse, every facet it names must be
+declared under `facets`, and every value it names must be in a closed facet's
+domain — and are compiled
+into the CCM as the model's only authored root conjuncts, so a declared
+constraint changes which options are offered and which selections can be
+explained.
+Elsewhere in this glossary "constraint" also appears in the general sense of any
+rule the compiled model screens against. See also: [facet](#facet),
+[option](#option), [unsat core / explain](#unsat-core--explain).
+
 ## selection
 
 A selection is the set of choices a user has made over facets. It is

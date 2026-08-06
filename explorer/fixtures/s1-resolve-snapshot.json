@@ -1,0 +1,87 @@
+{
+  "schema_version": 4,
+  "status": "ok",
+  "model_hash": "d3375b15c2ca3413d65905270d8a93ab80813225c3300bf49d4e1ae0321c0e90",
+  "scope": "all",
+  "selection_state_hash": "b7626d976db80299a34771c1ddb0a4f630c8c484cc7306a62f541cbcf96678e7",
+  "resolve_hash": "1f93f5664474edcc692a894ad5f3b625a69cf7153935168c882781be9f6da038",
+  "resolved_output": {
+    "all": {
+      "package": "merged_root",
+      "version": "0.0.0",
+      "components": {
+        "power_bus": {
+          "type": "power_module",
+          "params": {}
+        },
+        "thermal_control": {
+          "type": "controller",
+          "params": {
+            "control_driver": {
+              "value": "hydra_x200_dual_driver",
+              "type": "artifact",
+              "unit": null,
+              "safety": "q_m",
+              "lifecycle": "construction",
+              "access": "developer",
+              "req_id": "req_s1_002",
+              "doc": "Control driver artifact reference",
+              "limits": null
+            },
+            "max_flow_at_commissioning": {
+              "value": 42.5,
+              "type": "float",
+              "unit": "lpm",
+              "safety": "sil2",
+              "lifecycle": "startup",
+              "access": "integrator",
+              "req_id": "req_s1_001",
+              "doc": "Safe commissioning flow limit",
+              "limits": null
+            },
+            "runtime_trim_gain": {
+              "value": 0.15,
+              "type": "float",
+              "unit": "ratio",
+              "safety": "q_m",
+              "lifecycle": "runtime",
+              "access": "technician",
+              "req_id": "req_s1_003",
+              "doc": "Runtime trim gain",
+              "limits": null
+            }
+          }
+        }
+      }
+    }
+  },
+  "choices": {
+    "cooling_brand": "hydra",
+    "cooling_model": "x200",
+    "pump_type": "dual"
+  },
+  "resolved_component_dependencies": {
+    "all": {
+      "power_bus": [],
+      "thermal_control": ["power_bus"]
+    }
+  },
+  "resolved_artifacts": {
+    "hydra_x200_dual_driver": {
+      "name": "hydra_x200_dual_driver",
+      "version": "1.0.0",
+      "hash": "sha256-hydra-x200-dual",
+      "source": "artifact://drivers/hydra_x200_dual.so",
+      "target": "/opt/configflux/drivers/hydra_x200_dual.so",
+      "doc": "Hydra X200 dual-pump driver"
+    }
+  },
+  "error_count": 0,
+  "warning_count": 0,
+  "diagnostics": {
+    "schema_version": 4,
+    "diagnostics": [],
+    "error_count": 0,
+    "warning_count": 0
+  }
+}

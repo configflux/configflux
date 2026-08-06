@@ -24,6 +24,7 @@ COMPILER_LIB_SRCS = [
     "src/conditions/ast.rs",
     "src/conditions/ast/parser_tests.rs",
     "src/compiler_core.rs",
+    "src/compiler_core_tests.rs",
     "src/conditions/eval.rs",
     "src/conditions/implication.rs",
     "src/conditions/implication/tests.rs",
@@ -57,6 +58,9 @@ COMPILER_LIB_SRCS = [
     "src/loader_api/shared_ops.rs",
     "src/loader_api/software_bom_ops.rs",
     "src/loader_api/tests.rs",
+    "src/loader_api/unsat_attribution.rs",
+    "src/loader_api/unsat_attribution_tests.rs",
+    "src/model_identity_tests.rs",
     "src/prelude.rs",
     "src/proc_rss.rs",
     "src/progress.rs",
@@ -78,19 +82,20 @@ COMPILER_LIB_SRCS = [
     "src/runtime_api/sync_ops.rs",
     "src/runtime_api/tests.rs",
     "src/runtime_api/write_reset_ops.rs",
+    "src/scenario_baseline_tests.rs",
     "src/scenario_byte_stability_tests.rs",
     "src/scenario_diamond_tests.rs",
-    "src/scenario_loop0_tests.rs",
-    "src/scenario_loop10_tests.rs",
-    "src/scenario_loop3_tests.rs",
-    "src/scenario_loop4_tests.rs",
-    "src/scenario_loop5_tests.rs",
-    "src/scenario_loop6_tests.rs",
-    "src/scenario_loop7_tests.rs",
-    "src/scenario_loop9_tests.rs",
+    "src/scenario_early_binding_tests.rs",
+    "src/scenario_inspect_tests.rs",
+    "src/scenario_resolve_tests.rs",
     "src/scenario_resource_budget_tests.rs",
+    "src/scenario_runtime_tests.rs",
+    "src/scenario_scale_tests.rs",
+    "src/scenario_selection_tests.rs",
+    "src/scenario_software_bom_tests.rs",
     "src/scenario_test_support.rs",
     "src/schema.rs",
+    "src/source_digest_tests.rs",
     "src/sync_transport.rs",
     "src/telemetry_sink.rs",
 ]
@@ -99,9 +104,8 @@ COMPILER_LIB_SRCS = [
 # construction path (`src/cudd_build/`) is gated behind the compiler crate's
 # `cudd` feature (compiler/Cargo.toml [features]); the lean `compiler_lib` built
 # from this list compiles without that feature and links no CUDD C backend. This
-# is the target the solver-free edge agent (//agent:agent, ADR-0036 sec3) and
-# every pure-runtime consumer (runtime, interpreter, ledger, relay, examples,
-# sdk, the compiler CLI) link.
+# is the target every pure-runtime consumer (runtime, interpreter, examples,
+# sdk, the compiler CLI) links.
 COMPILER_LIB_DEPS = [
     "@crates//:anyhow",
     "@crates//:flate2",
@@ -213,7 +217,11 @@ rust_test(
     name = "ccm_emitter_roundtrip_test",
     size = "small",
     timeout = "short",
-    srcs = ["tests/ccm_emitter_roundtrip.rs"],
+    srcs = [
+        "tests/ccm_emitter_roundtrip.rs",
+        "tests/temp_dirs.rs",
+    ],
+    crate_root = "tests/ccm_emitter_roundtrip.rs",
     edition = "2021",
     deps = [
         ":compiler_lib",
@@ -236,7 +244,11 @@ rust_test(
     name = "provenance_sidecar_test",
     size = "small",
     timeout = "short",
-    srcs = ["tests/provenance_sidecar.rs"],
+    srcs = [
+        "tests/provenance_sidecar.rs",
+        "tests/temp_dirs.rs",
+    ],
+    crate_root = "tests/provenance_sidecar.rs",
     compile_data = glob(["scenarios/s1_water_pump/smoke/cue/*.json"]),
     edition = "2021",
     deps = [
@@ -254,6 +266,27 @@ rust_test(
     deps = [":compiler_lib"],
 )
 
+# configflux-3j2i: docs/runtime-v2-contract.md section 11.4 documents the lineage
+# `entry_id` worked example as a NORMATIVE byte layout plus two normative content
+# addresses. Its canonical payload injects PRODUCT_SCHEMA_VERSION (see
+# compute_lineage_entry_content_address), so every schema rotation invalidates both
+# documented digests — and nothing executed the example, so it rotted silently. The
+# test `include_str!`s the contract itself (hence the compile_data dep, mirroring the
+# //:VERSION idiom) and re-derives the digests through the real serializer, so the
+# doc can no longer drift from the implementation in either direction.
+rust_test(
+    name = "runtime_v2_lineage_doc_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["tests/runtime_v2_lineage_doc.rs"],
+    compile_data = ["//:docs/runtime-v2-contract.md"],
+    edition = "2021",
+    deps = [
+        ":compiler_lib",
+        "@crates//:sha2",
+    ],
+)
+
 # configflux-9hi2: the product compile path (compile_model -> emit_ir) must
 # emit the v2 multi-part .ccm directory alongside the CMP package, surface its
 # path on ModelHandle, and bind it to the CMP model_hash (ADR-0005 §9). This
@@ -263,7 +296,11 @@ rust_test(
     name = "product_compile_ccm_test",
     size = "small",
     timeout = "short",
-    srcs = ["tests/product_compile_ccm.rs"],
+    srcs = [
+        "tests/product_compile_ccm.rs",
+        "tests/temp_dirs.rs",
+    ],
+    crate_root = "tests/product_compile_ccm.rs",
     # The test `include_str!`s the smoke scenario fixtures at compile time;
     # they must be available as a compile input to the test crate.
     compile_data = glob(["scenarios/s1_water_pump/smoke/cue/*.json"]),
@@ -284,7 +321,11 @@ rust_test(
     name = "facet_symbol_synthesis_test",
     size = "small",
     timeout = "short",
-    srcs = ["tests/facet_symbol_synthesis.rs"],
+    srcs = [
+        "tests/facet_symbol_synthesis.rs",
+        "tests/temp_dirs.rs",
+    ],
+    crate_root = "tests/facet_symbol_synthesis.rs",
     edition = "2021",
     deps = [
         ":compiler_lib",
@@ -304,7 +345,11 @@ rust_test(
     name = "facet_mixed_arm_options_test",
     size = "small",
     timeout = "short",
-    srcs = ["tests/facet_mixed_arm_options.rs"],
+    srcs = [
+        "tests/facet_mixed_arm_options.rs",
+        "tests/temp_dirs.rs",
+    ],
+    crate_root = "tests/facet_mixed_arm_options.rs",
     edition = "2021",
     deps = [
         ":compiler_lib",
@@ -320,12 +365,35 @@ rust_test(
     name = "facet_resolve_defaults_test",
     size = "small",
     timeout = "short",
-    srcs = ["tests/facet_resolve_defaults.rs"],
+    srcs = [
+        "tests/facet_resolve_defaults.rs",
+        "tests/temp_dirs.rs",
+    ],
+    crate_root = "tests/facet_resolve_defaults.rs",
     edition = "2021",
     deps = [
         ":compiler_lib",
         "@crates//:serde_json",
     ],
+)
+
+# configflux-6j91: the DIAGNOSTIC CODE the declared-facet constraint rule
+# reaches the caller with. `product_api::map_graph_error` classifies link/verify
+# failures by substring, so the rule's unit tests can all pass while the code
+# silently falls through to the generic ingest bucket — which is how the defect
+# arose. Drives `compile_model` (what `compiler compile` calls) so a reword of
+# the message fails here instead of downgrading the code in silence.
+rust_test(
+    name = "constraint_facet_diagnostic_test",
+    size = "small",
+    timeout = "short",
+    srcs = [
+        "tests/constraint_facet_diagnostic.rs",
+        "tests/temp_dirs.rs",
+    ],
+    crate_root = "tests/constraint_facet_diagnostic.rs",
+    edition = "2021",
+    deps = [":compiler_lib"],
 )
 
 # CUDD-side construction round-trip — configflux-wbzw (ADR-0011
@@ -339,7 +407,11 @@ rust_test(
     name = "cudd_construction_roundtrip_test",
     size = "small",
     timeout = "short",
-    srcs = ["tests/cudd_construction_roundtrip.rs"],
+    srcs = [
+        "tests/cudd_construction_roundtrip.rs",
+        "tests/temp_dirs.rs",
+    ],
+    crate_root = "tests/cudd_construction_roundtrip.rs",
     edition = "2021",
     # configflux-4jmc: this is the one integration test that exercises the real
     # CUDD construction path (`emit_ccm_dir_with_construction(.., "cudd")`), so it
@@ -359,7 +431,11 @@ rust_test(
     name = "ccm_emitter_equivalence_test",
     size = "small",
     timeout = "short",
-    srcs = ["tests/ccm_emitter_equivalence.rs"],
+    srcs = [
+        "tests/ccm_emitter_equivalence.rs",
+        "tests/temp_dirs.rs",
+    ],
+    crate_root = "tests/ccm_emitter_equivalence.rs",
     edition = "2021",
     deps = [
         ":compiler_lib",
@@ -373,7 +449,11 @@ rust_test(
     name = "ccm_emitter_scale_test",
     size = "large",
     timeout = "moderate",
-    srcs = ["tests/ccm_emitter_scale.rs"],
+    srcs = [
+        "tests/ccm_emitter_scale.rs",
+        "tests/temp_dirs.rs",
+    ],
+    crate_root = "tests/ccm_emitter_scale.rs",
     edition = "2021",
     deps = [":compiler_lib"],
 )
@@ -388,7 +468,11 @@ rust_test(
     name = "ccm_emitter_scale_10k_test",
     size = "enormous",
     timeout = "long",
-    srcs = ["tests/ccm_emitter_scale.rs"],
+    srcs = [
+        "tests/ccm_emitter_scale.rs",
+        "tests/temp_dirs.rs",
+    ],
+    crate_root = "tests/ccm_emitter_scale.rs",
     edition = "2021",
     args = [
         "--ignored",
@@ -402,12 +486,26 @@ rust_test(
     deps = [":compiler_lib"],
 )
 
+# The scenario aggregates enumerate their module filters explicitly: a generic
+# substring (e.g. "scenario_") would silently absorb the byte-stability /
+# diamond / resource-budget suites, and a filter that stops matching after a
+# module rename would leave the target green while running zero tests.
+SCENARIO_SUITE_FILTERS = [
+    "scenario_baseline_tests::",
+    "scenario_early_binding_tests::",
+    "scenario_inspect_tests::",
+    "scenario_resolve_tests::",
+    "scenario_runtime_tests::",
+    "scenario_scale_tests::",
+    "scenario_selection_tests::",
+    "scenario_software_bom_tests::",
+]
+
 rust_test(
     name = "scenario_smoke_test",
     size = "small",
     timeout = "short",
-    args = [
-        "loop",
+    args = SCENARIO_SUITE_FILTERS + [
         "--skip",
         "medium",
         "--skip",
@@ -420,8 +518,7 @@ rust_test(
     name = "scenario_medium_test",
     size = "small",
     timeout = "short",
-    args = [
-        "loop",
+    args = SCENARIO_SUITE_FILTERS + [
         "--skip",
         "large",
     ],
@@ -432,15 +529,41 @@ rust_test(
     name = "scenario_large_test",
     size = "small",
     timeout = "short",
-    args = ["loop"],
+    args = SCENARIO_SUITE_FILTERS,
     crate = ":compiler_lib",
 )
 
 rust_test(
-    name = "scenario_loop10_test",
+    name = "scenario_runtime_test",
     size = "small",
     timeout = "short",
-    args = ["scenario_loop10_tests::"],
+    args = ["scenario_runtime_tests::"],
+    crate = ":compiler_lib",
+)
+
+# ADR-0056: model identity is content-canonical. Compiles the same content
+# under differing source-id spellings and orderings through the real product
+# API and asserts one model_hash, which is the only way to witness the
+# guarantee — the defect this suite pins was asserted in a comment and
+# contradicted by the code for as long as the comment existed.
+rust_test(
+    name = "model_identity_test",
+    size = "small",
+    timeout = "short",
+    args = ["model_identity_tests::"],
+    crate = ":compiler_lib",
+)
+
+# ADR-0056 section 9: the source-manifest digest that inspect and verify report
+# is a second preimage, on the pre-parse path model_identity_test cannot reach.
+# Asserts over serialized envelopes rather than struct fields, because the
+# rename this pins (InspectionResult.model_hash -> source_digest) is a
+# wire-format change and a field-named test would stop witnessing it.
+rust_test(
+    name = "source_digest_test",
+    size = "small",
+    timeout = "short",
+    args = ["source_digest_tests::"],
     crate = ":compiler_lib",
 )
 
@@ -486,7 +609,7 @@ rust_binary(
     # src/main.rs resolves `--version` to the workspace release version.
     # rules_rust defaults CARGO_PKG_VERSION to "0.0.0" when this attr is
     # absent, so it must mirror /VERSION (lint_repo.py enforces this).
-    version = "0.2.0",
+    version = "0.3.0",
     deps = [
         ":compiler_lib",
         "@crates//:anyhow",

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 
+/// registry: cause = the request's schema_version, or a persisted snapshot's schema_version, is not the version this build implements; remedy = set schema_version to the version this binary reports; a snapshot written by an older build must be re-opened from a fresh resolve rather than replayed
 pub const E_RUNTIME_UNSUPPORTED_SCHEMA_VERSION: &str = "E_RUNTIME_UNSUPPORTED_SCHEMA_VERSION";
+/// registry: cause = the open request or the snapshot it produces is malformed: a hash field that is not a 64-character hexadecimal digest, an unusable scope, undecodable resolved output, a dependency list that is unsorted or names an unknown component, or a parameter path that is ambiguous across scope roots; remedy = open with the unmodified output of a successful resolve, and qualify any parameter path the diagnostic reports as ambiguous with its scope root
 pub const E_RUNTIME_OPEN_INVALID: &str = "E_RUNTIME_OPEN_INVALID";
 // ADR-0030 D2 frozen code: `runtime-open` fails closed when the snapshot's
 // `ccm_ref` does not resolve to a usable solver model (empty reference,
@@ -8,26 +10,46 @@ pub const E_RUNTIME_OPEN_INVALID: &str = "E_RUNTIME_OPEN_INVALID";
 // runtime CLI wrapper (`runtime::cli_adapter`), which can import `solver`;
 // the code is defined here so the whole `E_RUNTIME_OPEN_*` family stays in
 // one place for the interface contract.
+/// registry: cause = the snapshot's solver-model reference is empty, will not load, or carries no symbol table, so the session cannot be opened; remedy = recompile the model so a complete solver model is emitted beside the package, and keep it reachable from the snapshot's reference
 pub const E_RUNTIME_OPEN_SOLVER_MODEL_UNAVAILABLE: &str =
     "E_RUNTIME_OPEN_SOLVER_MODEL_UNAVAILABLE";
+/// registry: cause = the resolve hash recomputed at open time does not match the hash supplied with the request, so the selection fields and the hash no longer agree; remedy = pass the resolve result through to open unmodified: dropping or editing the choices, context tags, or defaulted choices invalidates the hash
 pub const E_RUNTIME_HASH_MISMATCH: &str = "E_RUNTIME_HASH_MISMATCH";
+/// registry: cause = the scope root is blank, or it is not present in the resolved output the session was opened with; remedy = use a scope root that appears in the opened snapshot, or re-open the session against a resolve that covers the scope you need
 pub const E_RUNTIME_UNKNOWN_SCOPE: &str = "E_RUNTIME_UNKNOWN_SCOPE";
+/// registry: cause = the parameter path does not have the form component.<id>.param.<key>, or no scope root in the session contains that component and parameter; remedy = list the session's parameters to find the exact path, and qualify it with a scope root when the same component appears under more than one
 pub const E_RUNTIME_UNKNOWN_PATH: &str = "E_RUNTIME_UNKNOWN_PATH";
+/// registry: cause = the value written to a parameter is not compatible with the type that parameter declares; remedy = send a value of the declared type; the diagnostic names both the expected type and the kind of value it received
 pub const E_RUNTIME_TYPE_MISMATCH: &str = "E_RUNTIME_TYPE_MISMATCH";
+/// registry: cause = the value written to a parameter falls outside the limits that parameter declares, whether a string length bound or a numeric minimum or maximum; remedy = send a value inside the declared bounds, or widen the limits in the model source and recompile if the bound itself is wrong
 pub const E_RUNTIME_LIMIT_VIOLATION: &str = "E_RUNTIME_LIMIT_VIOLATION";
+/// registry: cause = the parameter is declared with a construction or startup lifecycle, so it is fixed for the life of the session and cannot be written at runtime; remedy = change the value at the lifecycle stage that owns it and re-open the session, or declare the parameter with a runtime lifecycle if it genuinely needs to be mutable
 pub const E_RUNTIME_LIFECYCLE_IMMUTABLE: &str = "E_RUNTIME_LIFECYCLE_IMMUTABLE";
+/// registry: cause = an artifact-typed parameter holds a blank or non-string value, or names an artifact that the session's resolved artifact catalog does not contain; remedy = open the session with a resolve result that carries every artifact its parameters reference, so the catalog is complete
 pub const E_RUNTIME_ARTIFACT_UNKNOWN: &str = "E_RUNTIME_ARTIFACT_UNKNOWN";
+/// registry: cause = an override operation is inconsistent with the session's override state: a blank actor, a rollback of a path that is not overridden, a generation that disagrees with the recorded one, or a working-configuration identifier that no longer matches; remedy = re-read the current override state before acting on it; a working-configuration mismatch means another writer changed the session first, so refresh and retry
 pub const E_RUNTIME_DIRTY_INVALID: &str = "E_RUNTIME_DIRTY_INVALID";
+/// registry: cause = the session's event buffer is malformed: a zero capacity or sequence, or buffered events that are not in strict ascending sequence order; remedy = re-open the session from a fresh resolve; a persisted snapshot whose event buffer fails these checks has been truncated or edited outside the runtime
 pub const E_RUNTIME_EVENT_INVALID: &str = "E_RUNTIME_EVENT_INVALID";
+/// registry: cause = the commit request is unusable: a blank actor, or a changed-path hint naming a path that is not currently overridden; remedy = supply a non-empty actor and list only paths that are actually overridden, or omit the hint and let the commit determine the changed set itself
 pub const E_RUNTIME_COMMIT_INVALID: &str = "E_RUNTIME_COMMIT_INVALID";
+/// registry: cause = the commit supplied an expected base configuration identifier that no longer matches the session's committed configuration, so another commit landed first; remedy = re-read the current configuration identity, reconcile your changes against it, and retry the commit
 pub const E_RUNTIME_COMMIT_BASE_MISMATCH: &str = "E_RUNTIME_COMMIT_BASE_MISMATCH";
+/// registry: cause = the commit finished but left the committed and working configuration identifiers diverged, which means override state survived a commit that should have cleared it; remedy = this is an internal invariant failure rather than a usage error: report it with the session's override state and the commit request
 pub const E_RUNTIME_COMMIT_TARGET_HASH_MISMATCH: &str = "E_RUNTIME_COMMIT_TARGET_HASH_MISMATCH";
+/// registry: cause = the update request is unusable: a blank actor, the same path written twice, or a synchronization status field carrying an impossible value; remedy = send one write per path with a non-empty actor; duplicate paths are rejected rather than silently reduced to a last-writer-wins result
 pub const E_RUNTIME_SYNC_INVALID: &str = "E_RUNTIME_SYNC_INVALID";
+/// registry: cause = an incremental update names a base configuration that is not the session's current committed configuration, so the delta was computed against a state this session has moved past; remedy = request a delta rebased on the session's current configuration, and reserve a full snapshot for bootstrap or divergence recovery
 pub const E_RUNTIME_SYNC_BASE_MISMATCH: &str = "E_RUNTIME_SYNC_BASE_MISMATCH";
+/// registry: cause = an incremental write omits the prior value's hash, or the hash it carries does not match the parameter's current committed value; remedy = include an accurate prior-value hash on every incremental write, and rebase the delta when a hash no longer matches
 pub const E_RUNTIME_SYNC_BEFORE_HASH_MISMATCH: &str = "E_RUNTIME_SYNC_BEFORE_HASH_MISMATCH";
+/// registry: cause = the update payload is internally inconsistent: a write's stated resulting hash does not match its own value, or the configuration identifier after applying the writes is not the one the payload claimed; remedy = regenerate the update payload from the producing side; a mismatch here means the payload was assembled or edited incorrectly, not that the session drifted
 pub const E_RUNTIME_SYNC_TARGET_HASH_MISMATCH: &str = "E_RUNTIME_SYNC_TARGET_HASH_MISMATCH";
+/// registry: cause = the update is marked incremental but omits the base or target configuration identifier that an incremental apply requires; remedy = include both identifiers on an incremental update, or send the update as a full snapshot
 pub const E_RUNTIME_SYNC_FULL_SNAPSHOT_REQUIRED: &str = "E_RUNTIME_SYNC_FULL_SNAPSHOT_REQUIRED";
+/// registry: cause = a warning, not a failure: the update succeeded, and in doing so replaced local overrides on one or more paths, which the result lists; remedy = no action is required for the update itself; review the listed paths to decide whether any local intent needs to be re-applied
 pub const E_RUNTIME_SYNC_CONFLICT_OVERRIDDEN: &str = "E_RUNTIME_SYNC_CONFLICT_OVERRIDDEN";
+/// registry: cause = the session's audit log is malformed: a zero or non-ascending sequence, a blank actor, unsorted changed paths, or an uploaded-sequence marker beyond the events actually recorded; remedy = re-open the session from a fresh resolve; an audit log that fails these checks has been truncated or edited outside the runtime and is no longer evidence
 pub const E_RUNTIME_AUDIT_INVALID: &str = "E_RUNTIME_AUDIT_INVALID";
 const DEFAULT_DIRTY_ACTOR: &str = "runtime_api.set_parameter";
 const DEFAULT_SYSTEM_ACTOR: &str = "system/unknown";
@@ -637,6 +659,17 @@ pub struct SetParameterResult {
     pub runtime_snapshot: Option<RuntimeSnapshot>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parameter: Option<RuntimeParameterPayload>,
+    /// The labeled unsat core of a constraint rejection (ADR-0017 amendment D4).
+    /// `Some(..)` ONLY when the write was rejected because the resulting
+    /// assignment violates a declared constraint; `None` on every other outcome,
+    /// success and non-constraint rejection alike. Omitted from the wire when
+    /// `None`, so no previously-serialized payload changes a byte — which is why
+    /// neither `PRODUCT_SCHEMA_VERSION` nor the Runtime envelope version moves.
+    /// It lives on the result envelope rather than on `Diagnostic`, which is
+    /// shared across the whole compiler surface and must not grow a
+    /// selection-specific field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unsat_core: Option<crate::loader_api::UnsatCore>,
     pub error_count: u32,
     pub warning_count: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -737,6 +770,13 @@ pub struct SetParametersAtomicallyResult {
     #[serde(default)]
     pub rejected_paths: Vec<String>,
     pub dirty_generation_max: u64,
+    /// The labeled unsat core of a constraint rejection (ADR-0017 amendment D4).
+    /// See `SetParameterResult::unsat_core`; on this envelope a `Some(..)` is
+    /// accompanied by `applied_count = 0`, `dirty_generation_max = 0`, no
+    /// snapshot, and `rejected_paths` naming the writes that participate in the
+    /// violation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unsat_core: Option<crate::loader_api::UnsatCore>,
     pub error_count: u32,
     pub warning_count: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1088,8 +1128,8 @@ pub struct ProvenanceLineageEntry {
     /// state was recorded (ADR-0037; threaded from the device report in
     /// configflux-ts7z). It is the report-level (sticky-Compensating-aggregated)
     /// classification — `compensating` if ANY active override path was
-    /// compensating, else `experimental` — so the ledger can distinguish a
-    /// compensating deviation from an experimental one.
+    /// compensating, else `experimental` — so a report consumer can distinguish
+    /// a compensating deviation from an experimental one.
     ///
     /// `#[serde(default = "default_override_intent")]` for at-rest back-compat:
     /// entries persisted before this field existed deserialize as `experimental`
@@ -1234,6 +1274,14 @@ pub struct CommitConfigurationResult {
     pub changed_paths: Vec<RuntimeDeltaPathChange>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub delta_manifest: Option<RuntimeDeltaManifest>,
+    /// The labeled unsat core of a constraint rejection (ADR-0017 amendment D4).
+    /// See `SetParameterResult::unsat_core`. Promoting dirty entries to the
+    /// committed overlay leaves every effective value unchanged, so under D2 the
+    /// assignment is invariant under commit and this can only be `Some(..)` for a
+    /// snapshot whose writes did NOT go through the enforced path — the
+    /// defense-in-depth boundary of D6.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unsat_core: Option<crate::loader_api::UnsatCore>,
     pub error_count: u32,
     pub warning_count: u32,
     #[serde(skip_serializing_if = "Option::is_none")]

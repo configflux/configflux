@@ -49,8 +49,17 @@ Command-to-API mapping is 1:1:
 2. `get-scope-metadata` -> `get_scope_metadata(GetScopeMetadataRequest)`
 3. `list-parameters` -> `list_parameters(ListParametersRequest)`
 4. `get-parameter` -> `get_parameter(GetParameterRequest)`
-5. `set-parameter` -> `set_parameter(SetParameterRequest)`, preceded by the
-   solver option-validity pre-check (fail closed on a solver fault, ADR-0030 D4)
+5. `set-parameter` -> `set_parameter(SetParameterRequest)`, followed by the
+   solver constraint check over the session's total known assignment (fail
+   closed on a solver fault, ADR-0030 D4)
+6. `set-parameters-atomically` ->
+   `set_parameters_atomically(SetParametersAtomicallyRequest)`, likewise
+   followed by the solver constraint check — applied to the batch as a whole,
+   so writes that are individually valid but jointly violating are rejected
+   together
+7. `commit-configuration` ->
+   `commit_configuration(CommitConfigurationRequest)`, likewise followed by the
+   solver constraint check
 
 ## 3. I/O Modes
 Default mode:
@@ -104,8 +113,9 @@ Runtime domain diagnostics (from runtime API):
 9. `E_RUNTIME_LIFECYCLE_IMMUTABLE`
 10. `E_RUNTIME_ARTIFACT_UNKNOWN`
 
-Selection-family diagnostics surfaced by `set-parameter` (the solver
-option-validity pre-check, ADR-0017 §5 and ADR-0030 D4):
+Selection-family diagnostics surfaced by `set-parameter`,
+`set-parameters-atomically` and `commit-configuration` (the solver constraint
+check, ADR-0017 §5 and its 2026-08-03 amendment, and ADR-0030 D4):
 1. `E_SELECTION_CONFLICT`, `E_SELECTION_INVALID_OPTION`,
    `E_SELECTION_UNKNOWN_FACET`, `E_SELECTION_UNSATISFIABLE` (typed constraint
    violations)
@@ -140,10 +150,65 @@ For runtime operations derived from interpreter resolve outputs:
 3. runtime read/write responses preserve the same `model_hash` + `resolve_hash`
 4. runtime write/readback does not alter hash lineage identifiers
 
+Upstream precondition (ADR-0054 §2/§6). A `resolve` whose total post-default
+assignment violates a constraint the model declares is rejected with
+`E_SELECTION_CONFLICT` and produces neither a `resolve_hash` nor a
+`resolved_output`. There is therefore no snapshot for the runtime to open, and
+no partial artifact to open by mistake: a configuration that broke a declared
+policy cannot enter the runtime's lineage at all. This tightens what reaches
+`runtime-open`; it changes no runtime command, envelope, exit code, or
+diagnostic family.
+
 ## 9. Verification Evidence
 Implementation evidence is validated by runtime RUN matrix tests:
-1. `runtime/src/main.rs` test cases `run_001` .. `run_020`
+1. `runtime/src/tests.rs` test cases `run_001` .. `run_050`
 2. `//runtime:runtime_cli_test`
 3. `//runtime:runtime_scenario_smoke_test`
 4. `//runtime:runtime_scenario_medium_test`
 5. `//runtime:runtime_system_e2e_gate_test`
+
+## 10. Read Command Request Examples
+Concrete request bodies for the read commands `get-scope-metadata`,
+`list-parameters`, and `get-parameter`. Every read request threads the
+`runtime_snapshot` object returned by `runtime-open` (see the open request in
+`docs/service-integration-guide.md`) and adds a command-specific selector.
+`schema_version` is the current product schema version (`4`). The snapshot is
+abbreviated below as `{ "...": "from runtime-open" }`; pass the full object
+through unchanged.
+
+`get-scope-metadata` — component/parameter/artifact counts for one scope root:
+
+```json
+{
+  "schema_version": 4,
+  "runtime_snapshot": { "...": "from runtime-open" },
+  "scope_root": "runtime_tuner"
+}
+```
+
+`list-parameters` — the sorted parameter paths in one scope root:
+
+```json
+{
+  "schema_version": 4,
+  "runtime_snapshot": { "...": "from runtime-open" },
+  "scope_root": "runtime_tuner"
+}
+```
+
+`get-parameter` — one parameter's value and metadata. `path` is a
+`component.<component_id>.param.<param_key>` path (one of the paths
+`list-parameters` returns):
+
+```json
+{
+  "schema_version": 4,
+  "runtime_snapshot": { "...": "from runtime-open" },
+  "path": "component.runtime_tuner.param.max_rpm"
+}
+```
+
+A malformed request envelope fails closed with `E_RUNTIME_CLI_REQUEST_INVALID`
+(exit `1`) and the diagnostic names the offending field — for example a request
+that omits `scope_root` reports a missing required `scope_root` field. Field
+*values* are never echoed (§7).

@@ -1,6 +1,6 @@
-# Loop 5 Generator Baseline Metrics (S1 Smoke)
+# Early-Binding Generator Baseline Metrics (S1 Smoke)
 
-These baseline numbers are recorded from the Loop 5 early-binding generator path on the smoke profile.
+These baseline numbers are recorded from the early-binding generator path on the smoke profile.
 
 ## Commands
 - `bazel test //compiler:scenario_smoke_test`
@@ -14,9 +14,9 @@ These baseline numbers are recorded from the Loop 5 early-binding generator path
 
 ## Metrics
 - Bazel elapsed wall-clock: `0.563s` (Invocation `3ef27737-f82d-4478-9dc0-8ab2c09452e1`).
-- Generator operation timing (from `loop5_generator_metrics_snapshot` in `--nocapture` run):
+- Generator operation timing (from `early_binding_generator_metrics_snapshot` in `--nocapture` run):
   - `export_us=206`
 - Process memory snapshot:
   - `rss_kib=7808`
 
-These are the Loop 5 baseline values for future generation-regression tracking.
+These are the early-binding baseline values for future generation-regression tracking.

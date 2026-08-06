@@ -23,9 +23,58 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+
+/// Per-process monotonic discriminator for temp-dir names.
+///
+/// This is the uniqueness primitive: `fetch_add` hands out a value at most
+/// once per process, so two names built from it can never be equal. Each
+/// including crate gets its own copy of this static, which is fine — the
+/// crates are separate test binaries and `pid` separates those.
+static TEMP_DIR_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Create a temp dir that cannot collide with any other path this process
+/// hands out, and return it.
+///
+/// Determinism (configflux-q5rr, configflux-rvpb): the solver tests' old name
+/// was `<prefix>-<label>-<pid>`, with no clock component at all, so two tests
+/// reaching one helper with one label got the *same* directory every time —
+/// unique only because each caller happened to pass a distinct label. The
+/// atomic `seq` removes the race by construction; `nanos` is a triage aid in
+/// the path name and carries no uniqueness guarantee, so a degenerate clock
+/// degrades readability rather than correctness.
+///
+/// The leaf is created with `create_dir` rather than `create_dir_all` so the
+/// no-collision invariant is *enforced*, not merely reasoned about: if a name
+/// were ever handed out twice the second create would fail loudly instead of
+/// silently sharing a directory with another test. For the same reason the
+/// callers' old `remove_dir_all` pre-wipe is gone — it was the collision
+/// *amplifier*, deleting a concurrent test's tree rather than reporting the
+/// clash.
+pub fn unique_temp_dir(prefix: &str, label: &str) -> PathBuf {
+    let seq = TEMP_DIR_SEQ.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|since_epoch| since_epoch.as_nanos())
+        .unwrap_or(0);
+    let base = std::env::temp_dir().join(format!(
+        "{}-{}-{}-{}-{}",
+        prefix,
+        label,
+        std::process::id(),
+        seq,
+        nanos
+    ));
+    if let Some(parent) = base.parent() {
+        fs::create_dir_all(parent).expect("create temp dir parent");
+    }
+    fs::create_dir(&base).expect("mkdir tempdir");
+    base
+}
 
 /// Encode a 32-byte digest as lowercase hex. Hand-rolled to avoid a
 /// `hex` crate dep in the test crates.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BUSL-1.1
+
 //! Human-readable rendering of an unsat core (ADR-0031 D5, configflux-9d28).
 //!
 //! `render_unsat_core` turns the machine-form `UnsatCore` JSON envelope
@@ -45,7 +47,7 @@ use compiler::loader_api::{ConflictingConstraint, ConstraintFacet, ConstraintKin
 /// ```text
 /// cannot select engine.v8:
 ///   blocked by your earlier choice: engine.v6
-///   blocked by model rule: engine.v6 excludes engine.v8
+///   blocked by constraint one_engine_only: engine != 'v6' || engine != 'v8'
 /// (one minimal explanation; other equivalent explanations may exist)
 /// ```
 ///
@@ -87,17 +89,27 @@ pub fn render_unsat_core(core: &UnsatCore) -> String {
 ///   rejected option.
 /// - `ModelRule` — a `requires`/`excludes`-style rule baked into the model.
 ///
+/// A `ModelRule` that carries a `constraint_id` is an **authored**
+/// `constraints:` declaration (ADR-0054 §5.4): the line names it, with the
+/// entry's `summary` (the constraint's condition text) after the colon.
+/// Without one, no declared constraint accounts for the clause and the generic
+/// model-rule wording stands — §5.4 forbids naming a synthesized cardinality
+/// conjunct as if it were authored policy.
+///
 /// `ModelRule` uses the entry's advisory `summary` gloss (itself a JSON field);
 /// `Selection` names the labeled `{facet}.{option}` pairs directly so the line
-/// echoes the prior choice without relying on the gloss.
+/// echoes the prior choice without relying on the gloss. The "blocked by ..."
+/// label belongs to the renderer, never to the gloss — a gloss that carried its
+/// own label printed it twice (configflux-hdgn).
 fn render_constraint(constraint: &ConflictingConstraint) -> String {
     match constraint.kind {
         ConstraintKind::Selection => {
             format!("  blocked by your earlier choice: {}", facets_joined(&constraint.facets))
         }
-        ConstraintKind::ModelRule => {
-            format!("  blocked by model rule: {}", constraint.summary)
-        }
+        ConstraintKind::ModelRule => match constraint.constraint_id.as_deref() {
+            Some(id) => format!("  blocked by constraint {id}: {}", constraint.summary),
+            None => format!("  blocked by model rule: {}", constraint.summary),
+        },
     }
 }
 
@@ -148,11 +160,15 @@ mod tests {
                     kind: ConstraintKind::Selection,
                     facets: vec![facet("engine", "v6")],
                     summary: "blocked by your earlier choice: engine.v6".to_string(),
+                    constraint_id: None,
                 },
                 ConflictingConstraint {
                     kind: ConstraintKind::ModelRule,
                     facets: vec![facet("engine", "v6"), facet("engine", "v8")],
-                    summary: "engine.v6 excludes engine.v8".to_string(),
+                    // ADR-0054 §5.4: an authored constraint names itself; the
+                    // summary is its condition text, not a re-labelled gloss.
+                    summary: "engine != 'v6' || engine != 'v8'".to_string(),
+                    constraint_id: Some("one_engine_only".to_string()),
                 },
             ],
             minimal: true,
@@ -168,6 +184,7 @@ mod tests {
                 kind: ConstraintKind::Selection,
                 facets: vec![facet("storage", "local")],
                 summary: "ignored gloss".to_string(),
+                constraint_id: None,
             }],
             minimal: true,
             note: NOTE.to_string(),
@@ -185,21 +202,63 @@ mod tests {
     }
 
     #[test]
-    fn renders_model_rule_entry() {
+    fn renders_declared_constraint_entry_by_id() {
+        // ADR-0054 §5.4: a model clause attributed to an authored constraint
+        // names that constraint and quotes its condition.
         let core = UnsatCore {
             rejected: facet("database", "postgres"),
             conflicting_constraints: vec![ConflictingConstraint {
                 kind: ConstraintKind::ModelRule,
                 facets: vec![facet("database", "postgres"), facet("storage", "remote")],
-                summary: "database.postgres requires storage.remote".to_string(),
+                summary: "database != 'postgres' || storage == 'remote'".to_string(),
+                constraint_id: Some("postgres_needs_remote".to_string()),
             }],
             minimal: true,
             note: NOTE.to_string(),
         };
         let text = render_unsat_core(&core);
         assert!(
-            text.contains("blocked by model rule: database.postgres requires storage.remote"),
-            "model-rule entry must render its summary gloss; got:\n{text}"
+            text.contains(
+                "blocked by constraint postgres_needs_remote: \
+                 database != 'postgres' || storage == 'remote'"
+            ),
+            "a declared constraint must be named by id; got:\n{text}"
+        );
+        // The renderer owns the label; it must appear exactly once
+        // (configflux-hdgn).
+        assert_eq!(
+            text.matches("blocked by").count(),
+            1,
+            "the 'blocked by' label must not be duplicated; got:\n{text}"
+        );
+    }
+
+    #[test]
+    fn renders_unattributed_model_rule_without_naming_a_constraint() {
+        // ADR-0054 §5.4 hard rule: a clause no declared constraint accounts
+        // for is reported as the model being over-constrained. It must NOT
+        // borrow a constraint id.
+        let core = UnsatCore {
+            rejected: facet("engine", "v8"),
+            conflicting_constraints: vec![ConflictingConstraint {
+                kind: ConstraintKind::ModelRule,
+                facets: vec![facet("engine", "v6"), facet("engine", "v8")],
+                summary: "the model is over-constrained here; \
+                          no declared constraint accounts for this conflict"
+                    .to_string(),
+                constraint_id: None,
+            }],
+            minimal: true,
+            note: NOTE.to_string(),
+        };
+        let text = render_unsat_core(&core);
+        assert!(
+            text.contains("blocked by model rule: the model is over-constrained here"),
+            "an unattributed model clause keeps the generic wording; got:\n{text}"
+        );
+        assert!(
+            !text.contains("blocked by constraint"),
+            "an unattributed model clause must name no constraint; got:\n{text}"
         );
     }
 
@@ -242,7 +301,7 @@ mod tests {
         let expected = "\
 cannot select engine.v8:
   blocked by your earlier choice: engine.v6
-  blocked by model rule: engine.v6 excludes engine.v8
+  blocked by constraint one_engine_only: engine != 'v6' || engine != 'v8'
 (one minimal explanation; other minimal cores may exist)";
         assert_eq!(render_unsat_core(&core), expected);
     }
@@ -255,6 +314,7 @@ cannot select engine.v8:
                 kind: ConstraintKind::Selection,
                 facets: vec![facet("storage", "local"), facet("cache", "off")],
                 summary: String::new(),
+                constraint_id: None,
             }],
             minimal: true,
             note: NOTE.to_string(),
@@ -274,6 +334,7 @@ cannot select engine.v8:
                 kind: ConstraintKind::Selection,
                 facets: vec![],
                 summary: String::new(),
+                constraint_id: None,
             }],
             minimal: true,
             note: NOTE.to_string(),

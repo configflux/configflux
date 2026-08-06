@@ -9,12 +9,13 @@ use crate::loader_api::{
     E_SELECTION_UNSATISFIABLE,
 };
 use crate::product_api::{OperationStatus, PRODUCT_SCHEMA_VERSION};
+use crate::scenario_test_support::unique_temp_path;
 use crate::Compiler;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 const S1_SOURCE_DEFS: &str = "scenarios/s1_water_pump/smoke/chunks/00_definitions.toml";
 const S1_SOURCE_COMPONENTS: &str = "scenarios/s1_water_pump/smoke/chunks/10_components.toml";
@@ -48,16 +49,7 @@ struct OptionsGolden {
 }
 
 fn emitted_cmp_dir(chunks: &[(&str, &str)], label: &str) -> Result<(PathBuf, ir::IrIndex)> {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .context("Failed to compute unique timestamp")?
-        .as_nanos();
-    let temp_dir = std::env::temp_dir().join(format!(
-        "configflux-loop3-selection-{}-{}-{}",
-        label,
-        std::process::id(),
-        unique
-    ));
+    let temp_dir = unique_temp_path("cfx-selection", label);
     std::fs::create_dir_all(&temp_dir)
         .with_context(|| format!("Failed to create temp dir '{}'", temp_dir.display()))?;
 
@@ -149,7 +141,7 @@ fn read_vm_rss_kib() -> Option<u64> {
 }
 
 #[test]
-fn loop3_contract_s1_get_selection_options_envelope_has_required_fields() -> Result<()> {
+fn selection_contract_s1_get_selection_options_envelope_has_required_fields() -> Result<()> {
     let (temp_dir, index) = emitted_cmp_dir(
         &[
             (S1_SOURCE_DEFS, S1_CHUNK_DEFS),
@@ -179,7 +171,7 @@ fn loop3_contract_s1_get_selection_options_envelope_has_required_fields() -> Res
 }
 
 #[test]
-fn loop3_list_selection_facets_returns_sorted_s1_facet_universe() -> Result<()> {
+fn selection_list_selection_facets_returns_sorted_s1_facet_universe() -> Result<()> {
     // `list_selection_facets` (configflux-2awb.4 / CFX-3) enumerates exactly the
     // facets `get_selection_options`/`apply_selection` validate against — the S1
     // model's condition facets — in sorted order, so `cfx options` can iterate
@@ -210,7 +202,7 @@ fn loop3_list_selection_facets_returns_sorted_s1_facet_universe() -> Result<()> 
 }
 
 #[test]
-fn loop3_golden_s1_option_sets_match() -> Result<()> {
+fn selection_golden_s1_option_sets_match() -> Result<()> {
     let (temp_dir, _index) = emitted_cmp_dir(
         &[
             (S1_SOURCE_DEFS, S1_CHUNK_DEFS),
@@ -243,7 +235,7 @@ fn loop3_golden_s1_option_sets_match() -> Result<()> {
 }
 
 #[test]
-fn loop3_golden_s3_option_sets_match() -> Result<()> {
+fn selection_golden_s3_option_sets_match() -> Result<()> {
     let (temp_dir, _index) = emitted_cmp_dir(
         &[
             (S3_SOURCE_DEFS, S3_CHUNK_DEFS),
@@ -279,7 +271,7 @@ fn loop3_golden_s3_option_sets_match() -> Result<()> {
 }
 
 #[test]
-fn loop3_mutation_invalid_facet_option_conflict_and_unsat_are_rejected() -> Result<()> {
+fn selection_mutation_invalid_facet_option_conflict_and_unsat_are_rejected() -> Result<()> {
     let (temp_dir, _index) = emitted_cmp_dir(
         &[
             (S1_SOURCE_DEFS, S1_CHUNK_DEFS),
@@ -330,7 +322,7 @@ fn loop3_mutation_invalid_facet_option_conflict_and_unsat_are_rejected() -> Resu
 }
 
 #[test]
-fn loop3_explain_rejection_returns_stable_code_and_payload() -> Result<()> {
+fn selection_explain_rejection_returns_stable_code_and_payload() -> Result<()> {
     let (temp_dir, _index) = emitted_cmp_dir(
         &[
             (S1_SOURCE_DEFS, S1_CHUNK_DEFS),
@@ -372,7 +364,7 @@ fn loop3_explain_rejection_returns_stable_code_and_payload() -> Result<()> {
 }
 
 #[test]
-fn loop3_determinism_selection_state_hash_and_option_sets_are_stable() -> Result<()> {
+fn selection_determinism_selection_state_hash_and_option_sets_are_stable() -> Result<()> {
     let (temp_dir, _index) = emitted_cmp_dir(
         &[
             (S1_SOURCE_DEFS, S1_CHUNK_DEFS),
@@ -415,7 +407,7 @@ fn loop3_determinism_selection_state_hash_and_option_sets_are_stable() -> Result
 }
 
 #[test]
-fn loop3_monotonic_narrowing_on_s1_and_s3_smoke() -> Result<()> {
+fn selection_monotonic_narrowing_on_s1_and_s3_smoke() -> Result<()> {
     let (s1_dir, _s1_index) = emitted_cmp_dir(
         &[
             (S1_SOURCE_DEFS, S1_CHUNK_DEFS),
@@ -484,7 +476,7 @@ fn loop3_monotonic_narrowing_on_s1_and_s3_smoke() -> Result<()> {
 }
 
 #[test]
-fn loop3_selection_metrics_snapshot() -> Result<()> {
+fn selection_metrics_snapshot() -> Result<()> {
     let (temp_dir, _index) = emitted_cmp_dir(
         &[
             (S1_SOURCE_DEFS, S1_CHUNK_DEFS),
@@ -522,7 +514,7 @@ fn loop3_selection_metrics_snapshot() -> Result<()> {
     assert_eq!(explained.status, OperationStatus::Error);
 
     eprintln!(
-        "loop3_selection_metrics get_options_us={} apply_selection_us={} explain_rejection_us={} rss_kib={}",
+        "selection_metrics get_options_us={} apply_selection_us={} explain_rejection_us={} rss_kib={}",
         get_options_us,
         apply_selection_us,
         explain_rejection_us,

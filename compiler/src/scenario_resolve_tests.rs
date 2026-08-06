@@ -7,13 +7,14 @@ use crate::loader_api::{
     E_RESOLVE_SCOPE_INVALID, E_SELECTION_STATE_INVALID,
 };
 use crate::product_api::{OperationStatus, PRODUCT_SCHEMA_VERSION};
+use crate::scenario_test_support::unique_temp_path;
 use crate::Compiler;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 const S1_SOURCE_DEFS: &str = "scenarios/s1_water_pump/smoke/chunks/00_definitions.toml";
 const S1_SOURCE_COMPONENTS: &str = "scenarios/s1_water_pump/smoke/chunks/10_components.toml";
@@ -43,16 +44,7 @@ struct ResolveGolden {
 }
 
 fn emitted_cmp_dir(chunks: &[(&str, &str)], label: &str) -> Result<(PathBuf, ir::IrIndex)> {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .context("Failed to compute unique timestamp")?
-        .as_nanos();
-    let temp_dir = std::env::temp_dir().join(format!(
-        "configflux-loop4-resolve-{}-{}-{}",
-        label,
-        std::process::id(),
-        unique
-    ));
+    let temp_dir = unique_temp_path("cfx-resolve", label);
     std::fs::create_dir_all(&temp_dir)
         .with_context(|| format!("Failed to create temp dir '{}'", temp_dir.display()))?;
 
@@ -124,7 +116,7 @@ fn resolve(
 }
 
 fn load_resolve_golden(contents: &str) -> Result<ResolveGolden> {
-    serde_json::from_str(contents).context("Failed to parse Loop 4 resolve-result golden JSON")
+    serde_json::from_str(contents).context("Failed to parse resolve-result golden JSON")
 }
 
 fn read_vm_rss_kib() -> Option<u64> {
@@ -139,7 +131,7 @@ fn read_vm_rss_kib() -> Option<u64> {
 }
 
 #[test]
-fn loop4_contract_s1_resolve_result_envelope_has_required_fields() -> Result<()> {
+fn resolve_contract_s1_resolve_result_envelope_has_required_fields() -> Result<()> {
     let (temp_dir, index) = emitted_cmp_dir(
         &[
             (S1_SOURCE_DEFS, S1_CHUNK_DEFS),
@@ -169,7 +161,7 @@ fn loop4_contract_s1_resolve_result_envelope_has_required_fields() -> Result<()>
 }
 
 #[test]
-fn loop4_golden_s1_resolve_result_and_hash_match() -> Result<()> {
+fn resolve_golden_s1_resolve_result_and_hash_match() -> Result<()> {
     let (temp_dir, _index) = emitted_cmp_dir(
         &[
             (S1_SOURCE_DEFS, S1_CHUNK_DEFS),
@@ -200,7 +192,7 @@ fn loop4_golden_s1_resolve_result_and_hash_match() -> Result<()> {
 }
 
 #[test]
-fn loop4_golden_s5_resolve_result_and_hash_match() -> Result<()> {
+fn resolve_golden_s5_resolve_result_and_hash_match() -> Result<()> {
     let (temp_dir, _index) = emitted_cmp_dir(
         &[
             (S5_SOURCE_DEFS, S5_CHUNK_DEFS),
@@ -231,7 +223,7 @@ fn loop4_golden_s5_resolve_result_and_hash_match() -> Result<()> {
 }
 
 #[test]
-fn loop4_determinism_identical_calls_stable_hash_and_payload() -> Result<()> {
+fn resolve_determinism_identical_calls_stable_hash_and_payload() -> Result<()> {
     let (temp_dir, _index) = emitted_cmp_dir(
         &[
             (S1_SOURCE_DEFS, S1_CHUNK_DEFS),
@@ -254,7 +246,7 @@ fn loop4_determinism_identical_calls_stable_hash_and_payload() -> Result<()> {
 }
 
 #[test]
-fn loop4_determinism_selection_key_order_does_not_change_resolve_hash() -> Result<()> {
+fn resolve_determinism_selection_key_order_does_not_change_resolve_hash() -> Result<()> {
     let (temp_dir, _index) = emitted_cmp_dir(
         &[
             (S1_SOURCE_DEFS, S1_CHUNK_DEFS),
@@ -295,7 +287,7 @@ fn loop4_determinism_selection_key_order_does_not_change_resolve_hash() -> Resul
 }
 
 #[test]
-fn loop4_mutation_invalid_scope_selection_hash_and_missing_context_are_rejected() -> Result<()> {
+fn resolve_mutation_invalid_scope_selection_hash_and_missing_context_are_rejected() -> Result<()> {
     let (temp_dir, _index) = emitted_cmp_dir(
         &[
             (S1_SOURCE_DEFS, S1_CHUNK_DEFS),
@@ -346,7 +338,7 @@ fn loop4_mutation_invalid_scope_selection_hash_and_missing_context_are_rejected(
 }
 
 #[test]
-fn loop4_resolve_metrics_snapshot() -> Result<()> {
+fn resolve_metrics_snapshot() -> Result<()> {
     let (temp_dir, _index) = emitted_cmp_dir(
         &[
             (S1_SOURCE_DEFS, S1_CHUNK_DEFS),
@@ -364,7 +356,7 @@ fn loop4_resolve_metrics_snapshot() -> Result<()> {
 
     assert_eq!(result.status, OperationStatus::Ok);
     eprintln!(
-        "loop4_resolve_metrics resolve_us={} rss_kib={}",
+        "resolve_metrics resolve_us={} rss_kib={}",
         resolve_us,
         read_vm_rss_kib().unwrap_or(0)
     );

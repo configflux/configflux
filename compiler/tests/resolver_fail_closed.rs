@@ -8,8 +8,7 @@
 //! `unwrap_or`). The JSON ingest path (`add_chunk_json_with_source` /
 //! `add_chunk_auto`) shares that sink and is intentionally unguarded because the
 //! ADR-0027 Decision 8 invariant is that JSON chunks originate from CUE
-//! whole-pack export, which bakes the parent definition's declared
-//! safety/lifecycle/access into the emitted chunk.
+//! whole-pack export, which bakes the parent's declared metadata into the chunk.
 //!
 //! These black-box tests pin Option 1 (the decided fix): a parameter that
 //! carries `inherits` and drops a metadata field its parent definition declared
@@ -73,6 +72,7 @@ fn single_param_config(
         components,
         artifacts,
         facets: Default::default(),
+        constraints: Default::default(),
     }
 }
 

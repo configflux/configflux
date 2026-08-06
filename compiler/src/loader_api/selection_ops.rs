@@ -455,6 +455,41 @@ pub fn apply_selection(request: ApplySelectionRequest) -> ApplySelectionResult {
         );
     }
 
+    // ADR-0054 §2 / configflux-narb: the policy screen, ahead of the generic
+    // option-validity screen below purely so the REJECTION READS WELL — the
+    // shared `option_is_valid` predicate would already refuse this choice, but
+    // it would refuse it as an anonymous "unsatisfiable under current
+    // constraints" with no id and no condition text.
+    //
+    // Rendering it here instead means `select` and `resolve` reject a violated
+    // policy with the SAME diagnostic — the existing `E_SELECTION_CONFLICT`,
+    // naming the constraint and quoting it (no new code, no new field). That
+    // matters most on the interpreter seam: before this screen existed the
+    // solver rejected the choice, the loader accepted it, and `session_compose`
+    // correctly reported the disagreement as `E_SELECTION_ENGINE_DIVERGENCE` —
+    // an INTERNAL-FAULT code, telling a machine consumer to recompile the model
+    // when in truth the model had just done its job.
+    //
+    // `Ternary::Unknown` is not a violation, so a partial selection that has
+    // not yet decided a policy still applies cleanly; the violation surfaces on
+    // the choice that decides it, which is the choice actually at fault.
+    let mut candidate = assignments.clone();
+    candidate.insert(
+        request.selection_delta.facet.clone(),
+        request.selection_delta.option.clone(),
+    );
+    if let Some(violated) = first_violated_constraint(&model, &candidate) {
+        return apply_selection_failed(
+            model_hash,
+            scope,
+            vec![constraint_violation_diagnostic(
+                &violated.id,
+                &violated.condition,
+                Some(violated.source_id.as_str()),
+            )],
+        );
+    }
+
     let valid_options =
         valid_options_for_facet(&model, &assignments, &request.selection_delta.facet, domain);
     if !valid_options.contains(&request.selection_delta.option) {

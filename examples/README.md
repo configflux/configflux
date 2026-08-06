@@ -22,15 +22,19 @@ export CONFIGFLUX_COMPILER=/path/to/compiler
 
 | # | Directory | What it shows | CUE lines |
 |---|-----------|--------------|------------|
+| 0 | [00-service-multi-env](00-service-multi-env/) | **Start here for services.** One web service resolved across three environments (dev/staging/prod) with `cfx`; a compiled policy (no debug logging in prod) shown by `cfx options` + `cfx explain` | ~55 |
 | 1 | [01-hello-led](01-hello-led/) | 1 component, 0 selections — bare minimum pipeline | ~18 |
 | 2 | [02-sensor-gateway](02-sensor-gateway/) | Selections, overrides, conditional component | ~40 |
 | 3 | [03-motor-controller](03-motor-controller/) | Artifact references, 2-step selection, export-resolved, BOM | ~65 |
 | 4 | [04-fleet-edge-node](04-fleet-edge-node/) | Full pipeline: compile → interpret → resolve → runtime handoff, 3 selection facets, region-conditional component | ~90 |
 | 5 | [05-compose-fleet](05-compose-fleet/) | One model, two named environments × two service scopes; matrix resolve, delivery bundles, a containerized Pattern 1 service, and a standalone debug run | ~140 |
 
-Start with `01-hello-led` and work through them in order. Each example
-builds on concepts introduced by the previous one.
+If you configure services across environments, start with
+`00-service-multi-env`. To learn the pipeline from the ground up, start with
+`01-hello-led` and work through `01`–`05` in order — each builds on concepts
+introduced by the previous one.
 
+Example 00 uses the compiler and `cfx` binaries and `python3` for JSON shaping.
 Examples 01–03 use only the compiler binary. Example 04 additionally
 exercises the interpreter and runtime binaries and uses `jq` between
 stages. Example 05 adds named environments, the delivery bundle, and

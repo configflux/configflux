@@ -36,18 +36,6 @@
                     "req_id": "req_labeled_mus_003"
                 }
             }
-        },
-        "highperf_requires_liquid": {
-            "type": "policy_module",
-            "condition": "cpu != 'highperf' || cooling != 'air'"
-        },
-        "highperf_requires_gold": {
-            "type": "policy_module",
-            "condition": "cpu != 'highperf' || psu != 'bronze'"
-        },
-        "facet_option_domains": {
-            "type": "policy_module",
-            "condition": "cpu == 'standard' || cooling == 'liquid' || psu == 'gold'"
         }
     }
 }

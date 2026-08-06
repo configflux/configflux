@@ -13,6 +13,35 @@ package(default_visibility = ["//visibility:public"])
 # The examples break loudly in CI if the compile/verify/inspect pipeline
 # regresses or if the example sources drift out of sync with the CLI.
 
+# Example 00 is the multi-environment web-service hero example: ONE model
+# resolved across three named environments (dev/staging/prod) with `cfx resolve`,
+# a determinism re-resolve assertion, and the constraint showcase (`cfx options`
+# hides log_level=debug in prod; `cfx explain` names the minimal prod+debug
+# conflict). run.sh self-checks every step, so this smoke test fails loudly on
+# any regression. Depends on the compiler and cfx binaries; uses python3 for JSON
+# shaping (no jq on the produce path).
+sh_test(
+    name = "00_service_multi_env_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["run_example_test.sh"],
+    data = [
+        "00-service-multi-env/00_definitions.json",
+        "00-service-multi-env/10_components.json",
+        "00-service-multi-env/cue/00_definitions.cue",
+        "00-service-multi-env/cue/10_components.cue",
+        "00-service-multi-env/environments.json",
+        "00-service-multi-env/run.sh",
+        "//cfx:cfx",
+        "//compiler:compiler",
+    ],
+    env = {
+        "CFX_RLOCATION": "$(rootpath //cfx:cfx)",
+        "COMPILER_RLOCATION": "$(rootpath //compiler:compiler)",
+        "EXAMPLE_RUN_RLOCATION": "$(rootpath 00-service-multi-env/run.sh)",
+    },
+)
+
 sh_test(
     name = "01_hello_led_test",
     size = "small",

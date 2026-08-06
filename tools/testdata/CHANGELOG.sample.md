@@ -35,7 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - First public release of ConfigFlux.
 - Compiler, runtime, and interpreter binaries.
 - ROS2 SDK adapter with lifecycle-mode coverage.
-- Scenario packs: `loop5`, `loop6`.
+- Scenario packs: early-binding generator, software BOM.
 
 ### Security
 

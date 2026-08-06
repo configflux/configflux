@@ -6,9 +6,10 @@ name: Release
 # release-pipeline regression cannot block non-release PRs.
 #
 # Outputs (per ADR-0009): for each Linux platform (x86_64, aarch64), a
-# gzipped tarball containing `compiler`, `interpreter`, `runtime`, `LICENSE`,
-# and `NOTICE`, plus per-artifact SHA-256 and cosign signature/certificate
-# files, plus a combined `SHA256SUMS` manifest signed with cosign keyless.
+# gzipped tarball containing `compiler`, `interpreter`, `runtime`, `cfx`,
+# `LICENSE`, and `NOTICE`, plus per-artifact SHA-256 and cosign
+# signature/certificate files, plus a combined `SHA256SUMS` manifest
+# signed with cosign keyless.
 on:
   push:
     tags:
@@ -80,7 +81,8 @@ jobs:
             --target ${{ matrix.target }} \
             --package compiler \
             --package interpreter \
-            --package runtime
+            --package runtime \
+            --package cfx
 
       - name: Stage tarball contents
         id: stage
@@ -90,7 +92,7 @@ jobs:
           platform="${{ matrix.platform }}"
           stage_dir="configflux-v${version}-${platform}"
           mkdir -p "dist/${stage_dir}"
-          for bin in compiler interpreter runtime; do
+          for bin in compiler interpreter runtime cfx; do
             cp "target/${{ matrix.target }}/release/${bin}" \
               "dist/${stage_dir}/${bin}"
             chmod +x "dist/${stage_dir}/${bin}"

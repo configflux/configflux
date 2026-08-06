@@ -42,8 +42,8 @@ fn inspect_with_chunks(query: InspectQuery, chunks: &[(&str, &str)]) -> Inspecti
     })
 }
 
-fn with_dynamic_model_hash(template: &str, model_hash: &str) -> String {
-    template.replace("__DYNAMIC_MODEL_HASH__", model_hash)
+fn with_dynamic_source_digest(template: &str, source_digest: &str) -> String {
+    template.replace("__DYNAMIC_SOURCE_DIGEST__", source_digest)
 }
 
 fn parse_json(content: &str) -> Result<JsonValue> {
@@ -51,7 +51,7 @@ fn parse_json(content: &str) -> Result<JsonValue> {
 }
 
 #[test]
-fn loop9_contract_inspect_parameter_envelope_has_required_fields() {
+fn inspect_contract_inspect_parameter_envelope_has_required_fields() {
     let result = inspect_with_chunks(
         InspectQuery::Parameter {
             component_id: "thermal_control".to_string(),
@@ -65,7 +65,7 @@ fn loop9_contract_inspect_parameter_envelope_has_required_fields() {
 
     assert_eq!(result.status, OperationStatus::Ok);
     assert_eq!(result.schema_version, PRODUCT_SCHEMA_VERSION);
-    assert!(!result.model_hash.is_empty());
+    assert!(!result.source_digest.is_empty());
     assert_eq!(result.error_count, 0);
     assert_eq!(result.warning_count, 0);
     assert_eq!(result.diagnostics.error_count, 0);
@@ -81,7 +81,7 @@ fn loop9_contract_inspect_parameter_envelope_has_required_fields() {
 }
 
 #[test]
-fn loop9_contract_inspect_scoped_stats_envelope_has_required_fields() {
+fn inspect_contract_inspect_scoped_stats_envelope_has_required_fields() {
     let result = inspect_with_chunks(
         InspectQuery::ScopedStats {
             scope: "component:swift_ring_standard".to_string(),
@@ -94,7 +94,7 @@ fn loop9_contract_inspect_scoped_stats_envelope_has_required_fields() {
 
     assert_eq!(result.status, OperationStatus::Ok);
     assert_eq!(result.schema_version, PRODUCT_SCHEMA_VERSION);
-    assert!(!result.model_hash.is_empty());
+    assert!(!result.source_digest.is_empty());
     assert_eq!(result.error_count, 0);
     assert_eq!(result.warning_count, 0);
     assert_eq!(result.diagnostics.error_count, 0);
@@ -111,7 +111,7 @@ fn loop9_contract_inspect_scoped_stats_envelope_has_required_fields() {
 }
 
 #[test]
-fn loop9_golden_s1_parameter_query_matches() -> Result<()> {
+fn inspect_golden_s1_parameter_query_matches() -> Result<()> {
     let result = inspect_with_chunks(
         InspectQuery::Parameter {
             component_id: "thermal_control".to_string(),
@@ -124,7 +124,7 @@ fn loop9_golden_s1_parameter_query_matches() -> Result<()> {
     );
     assert_eq!(result.status, OperationStatus::Ok);
 
-    let expected = with_dynamic_model_hash(S1_GOLDEN_INSPECT_PARAMETER, &result.model_hash);
+    let expected = with_dynamic_source_digest(S1_GOLDEN_INSPECT_PARAMETER, &result.source_digest);
     let expected_json = parse_json(&expected)?;
     let actual_json = serde_json::to_value(result).context("Failed to serialize result")?;
     assert_eq!(actual_json, expected_json);
@@ -132,7 +132,7 @@ fn loop9_golden_s1_parameter_query_matches() -> Result<()> {
 }
 
 #[test]
-fn loop9_golden_s3_scoped_stats_query_matches() -> Result<()> {
+fn inspect_golden_s3_scoped_stats_query_matches() -> Result<()> {
     let result = inspect_with_chunks(
         InspectQuery::ScopedStats {
             scope: "component:swift_ring_standard".to_string(),
@@ -144,7 +144,7 @@ fn loop9_golden_s3_scoped_stats_query_matches() -> Result<()> {
     );
     assert_eq!(result.status, OperationStatus::Ok);
 
-    let expected = with_dynamic_model_hash(S3_GOLDEN_INSPECT_SCOPED_STATS, &result.model_hash);
+    let expected = with_dynamic_source_digest(S3_GOLDEN_INSPECT_SCOPED_STATS, &result.source_digest);
     let expected_json = parse_json(&expected)?;
     let actual_json = serde_json::to_value(result).context("Failed to serialize result")?;
     assert_eq!(actual_json, expected_json);
@@ -152,7 +152,7 @@ fn loop9_golden_s3_scoped_stats_query_matches() -> Result<()> {
 }
 
 #[test]
-fn loop9_mutation_unknown_parameter_scope_and_invalid_payload_emit_stable_codes() {
+fn inspect_mutation_unknown_parameter_scope_and_invalid_payload_emit_stable_codes() {
     let unknown_parameter = inspect_with_chunks(
         InspectQuery::Parameter {
             component_id: "thermal_control".to_string(),
@@ -217,7 +217,7 @@ fn loop9_mutation_unknown_parameter_scope_and_invalid_payload_emit_stable_codes(
 }
 
 #[test]
-fn loop9_determinism_inspect_payloads_are_byte_stable() -> Result<()> {
+fn inspect_determinism_inspect_payloads_are_byte_stable() -> Result<()> {
     let first = inspect_with_chunks(
         InspectQuery::ScopedStats {
             scope: "component:swift_ring_standard".to_string(),

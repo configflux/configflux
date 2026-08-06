@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "bom_version": 1,
   "bom_hash": "__DYNAMIC_BOM_HASH__",
   "hash_algo": "sha256",

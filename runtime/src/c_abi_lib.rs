@@ -10,16 +10,23 @@
 //
 // It deliberately includes ONLY the modules the C ABI needs:
 //   - `solver_validation`: the shared `runtime_open_with_solver_validation`
-//     fail-closed wrapper and `ccm_usable_for_open` predicate (also used by the
-//     runtime CLI handler — single enforcement point).
+//     fail-closed wrapper, the `ccm_usable_for_open` predicate, and the
+//     snapshot→facet-assignment projection (all also used by the runtime CLI —
+//     single enforcement point).
+//   - `write_enforcement`: the three `*_with_solver_validation` write wrappers
+//     the ABI dispatches to (configflux-jraj, ADR-0017 amendment D7). Before
+//     that change the ABI called the raw `compiler::runtime_api` write functions
+//     and ran no constraint check at all, so every C++/ROS2 SDK write was
+//     unchecked. The wrappers live in their own module rather than in
+//     `cli_adapter` precisely so this crate root can reach them.
 //   - `runtime_c_abi`: the `#[no_mangle] extern "C"` exports themselves.
 //
 // It does NOT include `cli_adapter` (the clap-based CLI shell), so the staticlib
-// stays free of CLI machinery. `solver_validation` also carries the
-// `set_parameter` constraint-validation surface, which this staticlib does not
-// call; `allow(dead_code)` covers that intentionally-unused subset rather than
-// fragmenting the module.
+// stays free of CLI machinery. Some of what these modules carry is unused from
+// here; `allow(dead_code)` covers that intentionally-unused subset rather than
+// fragmenting the modules.
 #![allow(dead_code)]
 
 mod runtime_c_abi;
 mod solver_validation;
+mod write_enforcement;

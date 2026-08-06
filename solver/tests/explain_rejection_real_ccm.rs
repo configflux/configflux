@@ -43,7 +43,6 @@
 // Never imports `oxidd::*` or `batsat::*` (ADR-0003 §2/§3, ADR-0004 §4).
 
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::PathBuf;
 
 use serde::Serialize;
@@ -155,14 +154,7 @@ fn build_cooling_brand_symbols_json() -> Vec<u8> {
 // ---------------------------------------------------------------------------
 
 fn tempdir_for(test_name: &str) -> PathBuf {
-    let base = std::env::temp_dir().join(format!(
-        "configflux-solver-explain-real-ccm-{}-{}",
-        test_name,
-        std::process::id()
-    ));
-    let _ = fs::remove_dir_all(&base);
-    fs::create_dir_all(&base).expect("mkdir tempdir");
-    base
+    fixture_v2::unique_temp_dir("configflux-solver-explain-real-ccm", test_name)
 }
 
 fn load_cooling_brand_session(label: &str) -> Session<OxiddBackend> {

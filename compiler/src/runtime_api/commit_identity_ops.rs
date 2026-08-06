@@ -596,6 +596,7 @@ pub fn commit_configuration(request: CommitConfigurationRequest) -> CommitConfig
         target_configuration_id: Some(target_configuration_id),
         changed_paths,
         delta_manifest: Some(delta_manifest),
+        unsat_core: None,
         error_count: diagnostics.error_count,
         warning_count: diagnostics.warning_count,
         diagnostics_ref: None,

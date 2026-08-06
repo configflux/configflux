@@ -192,6 +192,25 @@ pub(crate) fn for_each_eq_predicate<F: FnMut(&str, &str)>(expr: &ConditionExpr, 
     });
 }
 
+/// Visit every predicate atom in `expr` — **both** `==` and `!=` — in
+/// left-to-right DFS pre-order, reporting each as its `(tag, value)` pair.
+///
+/// This is the *symbol-universe* walk, and it is deliberately broader than
+/// [`for_each_eq_predicate`] (the domain-widening walk, which is `Eq`-only).
+/// A `(tag, value)` pair names the same `.ccm` variable under either operator:
+/// `ccm_emitter::compile_predicate` lowers `Eq` to `var` and `NotEq` to
+/// `not(var)` over that one variable (ADR-0054 §5.2). So the set of pairs
+/// reported here is exactly the set of symbols the `var_order` traversal
+/// collects from the same expression.
+///
+/// configflux-9xxq / ADR-0054 §5.1 uses this to land a branch selector's
+/// symbols without asserting the selector on the BDD root.
+pub(crate) fn for_each_predicate_symbol<F: FnMut(&str, &str)>(expr: &ConditionExpr, mut sink: F) {
+    visit_predicates(expr, &mut |predicate| {
+        sink(&predicate.tag, &predicate.value);
+    });
+}
+
 fn visit_predicates<F: FnMut(&ConditionPredicate)>(expr: &ConditionExpr, sink: &mut F) {
     match expr {
         ConditionExpr::Bool(_) => {}

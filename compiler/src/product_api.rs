@@ -27,15 +27,33 @@ use std::path::Path;
 // namespace to the authored model, rotating `model_hash` globally this release.
 // The product-contract discriminator advances in lockstep so a consumer can tell
 // a facet-aware model package from a pre-facet one.
-pub const PRODUCT_SCHEMA_VERSION: u32 = 3;
+// Bumped 3 -> 4 (ADR-0054 §7): the first-class `constraints` namespace makes
+// `condition` mean exactly one thing again — an inclusion selector, never a
+// policy assertion (§3). A v3 request is rejected by the existing check in
+// `verify_model` / `open_model` / the runtime and BOM entry points with
+// E_UNSUPPORTED_SCHEMA_VERSION, the same mechanism 0.2.0 used for v2 -> v3.
+//
+// ZERO back-compat shims: no dual-read of v3 chunks, no `constraints`-absent
+// fallback, no migration tool. The product has no external users in this window,
+// and a shim written now is dead code to be maintained and tested forever.
+// Coupling the semantic change to the version bump is the point — a v3 model
+// that encoded a policy as a phantom component is rejected at the version check,
+// before the component is ever read, so there is no window in which the same
+// bytes mean two different things. `IR_FORMAT_VERSION` 2 -> 3 is the matching
+// barrier on the PACKAGE side (this constant guards the REQUEST).
+pub const PRODUCT_SCHEMA_VERSION: u32 = 4;
 
+/// registry: cause = a component's depends_on entry names a component identifier that does not exist in the model; remedy = correct the identifier or add the missing component; every depends_on target must resolve to a component the model defines
 pub const E_UNKNOWN_COMPONENT_DEP: &str = "E_UNKNOWN_COMPONENT_DEP";
 // ADR-0047: a facet key declared by more than one chunk (the pack-global
 // at-most-one-declarer invariant), raised at ingest merge.
+/// registry: cause = the same facet is declared in more than one source chunk, and a facet is a pack-global domain that may have only one declaring chunk; remedy = keep the declaration in exactly one chunk and let the others reference the facet without redeclaring it
 pub const E_INGEST_DUPLICATE_FACET: &str = "E_INGEST_DUPLICATE_FACET";
 // ADR-0047 §3: a closed facet's declared domain is exhaustive, but a condition
 // equality predicate names a value outside it.
+/// registry: cause = a constraint names a facet the model never declares, or a condition or constraint names a value that is not in a closed facet's exhaustively declared domain; remedy = declare the missing facet with its value domain, or drop it from the constraint; for an undeclared value, add it to the facet's declared values, mark the facet open if its domain is genuinely extensible, or correct the reference to use a declared value
 pub const E_FACET_VALUE_UNDECLARED: &str = "E_FACET_VALUE_UNDECLARED";
+/// registry: cause = the component dependency graph contains a cycle, so no valid build or initialization order exists; remedy = break the cycle the diagnostic traces, so that the dependency graph is acyclic
 pub const E_COMPONENT_DEP_CYCLE: &str = "E_COMPONENT_DEP_CYCLE";
 // RETIRED by ADR-0048: diamond dependencies are permitted (the component graph
 // may be any DAG). This code is reserved and never reused — it is kept as a
@@ -44,15 +62,25 @@ pub const E_COMPONENT_DEP_CYCLE: &str = "E_COMPONENT_DEP_CYCLE";
 // emits it; the constant exists only to burn the identifier under its old
 // meaning.
 #[allow(dead_code)]
+/// registry: cause = no current code path emits this code; diamond-shaped dependencies are permitted and the component graph may be any acyclic graph; remedy = no action is needed: the code is reserved and never reused so that the registry stays a stable contract, and a diamond dependency is accepted
 pub const E_COMPONENT_DEP_DIAMOND: &str = "E_COMPONENT_DEP_DIAMOND";
+/// registry: cause = a source chunk could not be ingested, or the model failed link and verification for a reason outside the dependency, cycle, and closed-facet families; remedy = read the wrapped message: it names the offending source and the schema or structural rule the input broke
 pub const E_COMPILE_INPUT_INVALID: &str = "E_COMPILE_INPUT_INVALID";
+/// registry: cause = the model verified successfully but its artifacts could not be written, which is almost always a permissions or filesystem problem on the output directory; remedy = choose a writable output directory and check its ownership and mount options; the diagnostic's hint names the specific filesystem condition
 pub const E_COMPILE_EMIT_FAILED: &str = "E_COMPILE_EMIT_FAILED";
+/// registry: cause = the request's schema_version is not the version this build implements, and older versions are rejected rather than silently adapted; remedy = set schema_version to the version this binary reports, or use a binary built for the version your caller targets
 pub const E_UNSUPPORTED_SCHEMA_VERSION: &str = "E_UNSUPPORTED_SCHEMA_VERSION";
+/// registry: cause = the inspect query names a component identifier the model does not define; remedy = check the identifier for typos and list the model's components to find the one you meant
 pub const E_INSPECT_UNKNOWN_COMPONENT: &str = "E_INSPECT_UNKNOWN_COMPONENT";
+/// registry: cause = the inspect query names a definition identifier the model does not define; remedy = check the identifier for typos and list the model's definitions to find the one you meant
 pub const E_INSPECT_UNKNOWN_DEFINITION: &str = "E_INSPECT_UNKNOWN_DEFINITION";
+/// registry: cause = the inspect query names an artifact identifier the model does not define; remedy = check the identifier for typos and list the model's artifacts to find the one you meant
 pub const E_INSPECT_UNKNOWN_ARTIFACT: &str = "E_INSPECT_UNKNOWN_ARTIFACT";
+/// registry: cause = the component in the inspect query exists, but it declares no parameter by the requested key; remedy = inspect the component first to list the parameter keys it actually declares
 pub const E_INSPECT_UNKNOWN_PARAMETER: &str = "E_INSPECT_UNKNOWN_PARAMETER";
+/// registry: cause = the inspect scope names a component that does not exist, names a component that is not a platform where a platform was required, or matches no components at all; remedy = use a scope whose component exists and has the expected type; a platform selector must name a component declared as a platform
 pub const E_INSPECT_UNKNOWN_SCOPE: &str = "E_INSPECT_UNKNOWN_SCOPE";
+/// registry: cause = the inspect query is malformed: an identifier is not a valid snake-case name, the scope string does not parse, or a parameter's metadata could not be materialized; remedy = correct the identifier or scope syntax; if the failure is in materializing parameter metadata, check the parameter's definition chain for a broken link
 pub const E_INSPECT_QUERY_INVALID: &str = "E_INSPECT_QUERY_INVALID";
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -377,7 +405,10 @@ pub enum InspectionItem {
 pub struct InspectionResult {
     pub schema_version: u32,
     pub status: OperationStatus,
-    pub model_hash: String,
+    /// The source-manifest digest (ADR-0056 §9.2). Deliberately not
+    /// `model_hash`: `inspect_model` never emits a package, so this can never
+    /// hold the CMP identity that `model_hash` denotes on the compile path.
+    pub source_digest: String,
     pub query: InspectQuery,
     pub summary: InspectionSummary,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -821,7 +852,7 @@ pub fn inspect_model(request: InspectModelRequest) -> InspectionResult {
     } = request;
 
     let source_count = source_manifest.len() as u32;
-    let model_hash = hash_sources(&source_manifest);
+    let source_digest = hash_sources(&source_manifest);
     if schema_version != PRODUCT_SCHEMA_VERSION {
         let diagnostic = Diagnostic {
             code: E_UNSUPPORTED_SCHEMA_VERSION.to_string(),
@@ -835,7 +866,7 @@ pub fn inspect_model(request: InspectModelRequest) -> InspectionResult {
             hint: Some(format!("Set request.schema_version to {}", PRODUCT_SCHEMA_VERSION)),
         };
         return inspect_result_with_failures(
-            model_hash,
+            source_digest,
             query,
             empty_inspection_summary(source_count),
             vec![diagnostic],
@@ -848,7 +879,7 @@ pub fn inspect_model(request: InspectModelRequest) -> InspectionResult {
             compiler.add_chunk_auto(source.source_id.clone(), &source.inline_content)
         {
             return inspect_result_with_failures(
-                model_hash,
+                source_digest,
                 query,
                 empty_inspection_summary(source_count),
                 vec![map_compile_input_error(
@@ -861,7 +892,7 @@ pub fn inspect_model(request: InspectModelRequest) -> InspectionResult {
 
     if let Err(err) = compiler.link_and_verify() {
         return inspect_result_with_failures(
-            model_hash,
+            source_digest,
             query,
             inspection_summary(compiler.get_repo(), source_count),
             vec![map_graph_error(&err.to_string())],
@@ -874,7 +905,7 @@ pub fn inspect_model(request: InspectModelRequest) -> InspectionResult {
         InspectQuery::Component { component_id } => {
             let Some(component) = compiler.get_repo().components.get(component_id) else {
                 return inspect_result_with_failures(
-                    model_hash,
+                    source_digest,
                     query.clone(),
                     summary,
                     vec![inspect_unknown_component_diagnostic(component_id)],
@@ -885,7 +916,7 @@ pub fn inspect_model(request: InspectModelRequest) -> InspectionResult {
         InspectQuery::Definition { definition_id } => {
             let Some(definition) = compiler.get_repo().definitions.get(definition_id) else {
                 return inspect_result_with_failures(
-                    model_hash,
+                    source_digest,
                     query.clone(),
                     summary,
                     vec![Diagnostic {
@@ -911,7 +942,7 @@ pub fn inspect_model(request: InspectModelRequest) -> InspectionResult {
         InspectQuery::Artifact { artifact_id } => {
             let Some(artifact) = compiler.get_repo().artifacts.get(artifact_id) else {
                 return inspect_result_with_failures(
-                    model_hash,
+                    source_digest,
                     query.clone(),
                     summary,
                     vec![Diagnostic {
@@ -941,7 +972,7 @@ pub fn inspect_model(request: InspectModelRequest) -> InspectionResult {
         } => {
             if !is_valid_snake_case_ident(component_id) || !is_valid_snake_case_ident(param_key) {
                 return inspect_result_with_failures(
-                    model_hash,
+                    source_digest,
                     query.clone(),
                     summary,
                     vec![Diagnostic {
@@ -962,7 +993,7 @@ pub fn inspect_model(request: InspectModelRequest) -> InspectionResult {
             }
             let Some(component) = compiler.get_repo().components.get(component_id) else {
                 return inspect_result_with_failures(
-                    model_hash,
+                    source_digest,
                     query.clone(),
                     summary,
                     vec![inspect_unknown_component_diagnostic(component_id)],
@@ -970,7 +1001,7 @@ pub fn inspect_model(request: InspectModelRequest) -> InspectionResult {
             };
             let Some(parameter) = component.params.get(param_key) else {
                 return inspect_result_with_failures(
-                    model_hash,
+                    source_digest,
                     query.clone(),
                     summary,
                     vec![Diagnostic {
@@ -998,7 +1029,7 @@ pub fn inspect_model(request: InspectModelRequest) -> InspectionResult {
                 Ok(item) => Some(item),
                 Err(diagnostic) => {
                     return inspect_result_with_failures(
-                        model_hash,
+                        source_digest,
                         query.clone(),
                         summary,
                         vec![diagnostic],
@@ -1011,7 +1042,7 @@ pub fn inspect_model(request: InspectModelRequest) -> InspectionResult {
                 Ok(item) => Some(item),
                 Err(diagnostic) => {
                     return inspect_result_with_failures(
-                        model_hash,
+                        source_digest,
                         query.clone(),
                         summary,
                         vec![diagnostic],
@@ -1021,7 +1052,7 @@ pub fn inspect_model(request: InspectModelRequest) -> InspectionResult {
         }
     };
 
-    inspect_result_ok(model_hash, query, summary, item)
+    inspect_result_ok(source_digest, query, summary, item)
 }
 
 fn compile_stats(source_count: u32, chunk_count: u32, compiler: &Compiler) -> CompileStats {
@@ -1477,7 +1508,7 @@ fn is_valid_snake_case_ident(value: &str) -> bool {
 }
 
 fn inspect_result_ok(
-    model_hash: String,
+    source_digest: String,
     query: InspectQuery,
     summary: InspectionSummary,
     item: Option<InspectionItem>,
@@ -1491,7 +1522,7 @@ fn inspect_result_ok(
     InspectionResult {
         schema_version: PRODUCT_SCHEMA_VERSION,
         status: OperationStatus::Ok,
-        model_hash,
+        source_digest,
         query,
         summary,
         item,
@@ -1503,7 +1534,7 @@ fn inspect_result_ok(
 }
 
 fn inspect_result_with_failures(
-    model_hash: String,
+    source_digest: String,
     query: InspectQuery,
     summary: InspectionSummary,
     diagnostics: Vec<Diagnostic>,
@@ -1512,7 +1543,7 @@ fn inspect_result_with_failures(
     InspectionResult {
         schema_version: PRODUCT_SCHEMA_VERSION,
         status: OperationStatus::Error,
-        model_hash,
+        source_digest,
         query,
         summary,
         item: None,
@@ -1613,7 +1644,10 @@ fn summary_for_diagnostic_code(code: &str) -> &'static str {
         E_UNKNOWN_COMPONENT_DEP => "Unknown dependency target",
         E_COMPONENT_DEP_CYCLE => "Component dependency cycle detected",
         E_INGEST_DUPLICATE_FACET => "Facet declared in more than one chunk",
-        E_FACET_VALUE_UNDECLARED => "Condition value outside a closed facet domain",
+        // Covers both rules this code carries (configflux-6j91): a value outside
+        // a closed facet's declared domain, and a constraint naming a facet that
+        // is not declared at all. The per-diagnostic message says which.
+        E_FACET_VALUE_UNDECLARED => "Undeclared facet or facet value",
         E_INSPECT_UNKNOWN_COMPONENT => "Unknown component in inspect query",
         E_INSPECT_UNKNOWN_DEFINITION => "Unknown definition in inspect query",
         E_INSPECT_UNKNOWN_ARTIFACT => "Unknown artifact in inspect query",
@@ -1704,6 +1738,29 @@ fn map_graph_error(message: &str) -> Diagnostic {
                     .to_string(),
             ),
         }
+    } else if message.contains("is not declared under `facets`") {
+        // configflux-6j91: a constraint naming a facet nothing declares. Shares
+        // E_FACET_VALUE_UNDECLARED with the closed-domain rule above because it
+        // is the same authoring fault one step earlier — the domain the policy
+        // asserts over was never written down — and both are raised by
+        // `link_verify::validate_constraints`. Without this arm it fell through
+        // to the generic ingest bucket below, which told the author nothing and
+        // contradicted the Link/Verify table in docs/model-spec.md.
+        //
+        // The message already carries the remedy verbatim, so the hint states
+        // the RULE instead of repeating it.
+        Diagnostic {
+            code: E_FACET_VALUE_UNDECLARED.to_string(),
+            severity: DiagnosticSeverity::Error,
+            message: message.to_string(),
+            source_id: None,
+            entity_path: None,
+            hint: Some(
+                "A constraint asserts over a declared domain, never one inferred from \
+                 conditions; declare the facet under `facets`"
+                    .to_string(),
+            ),
+        }
     } else {
         Diagnostic {
             code: E_COMPILE_INPUT_INVALID.to_string(),
@@ -1744,16 +1801,35 @@ fn map_compile_input_error(message: &str, source_id: Option<String>) -> Diagnost
     }
 }
 
+/// The source-manifest digest (ADR-0056 §9.1): the SHA-256 of the per-source
+/// content digests, sorted ascending as unsigned byte sequences and
+/// concatenated raw.
+///
+/// `source_id` is deliberately absent from both the preimage and the sort key.
+/// It is a `--source` argument exactly as the caller spelled it, never
+/// canonicalized, so admitting it would make this value depend on where a tree
+/// is checked out and on whether the path was written relative or absolute —
+/// the invariant ADR-0056 §5 states as *no path string may enter any hash
+/// preimage*.
+///
+/// Every element is exactly 32 bytes wide, so the concatenation is unambiguous
+/// and carries no separator, prefix or terminator. Equal contents are fed twice
+/// rather than de-duplicated: this runs before ingest, which is the stage that
+/// rejects a duplicate `chunk_hash` (§3), so the function stays total over
+/// manifests ingest will go on to reject. Sort stability is irrelevant — equal
+/// keys carry equal payloads, so tie order cannot move the preimage.
 fn hash_sources(sources: &[SourceManifestEntry]) -> String {
-    let mut ordered: Vec<_> = sources.iter().collect();
-    ordered.sort_by(|a, b| a.source_id.cmp(&b.source_id));
+    let mut content_digests: Vec<[u8; 32]> = Vec::with_capacity(sources.len());
+    for source in sources {
+        let mut content_digest = [0u8; 32];
+        content_digest.copy_from_slice(&Sha256::digest(source.inline_content.as_bytes()));
+        content_digests.push(content_digest);
+    }
+    content_digests.sort_unstable();
 
     let mut hasher = Sha256::new();
-    for source in ordered {
-        hasher.update(source.source_id.as_bytes());
-        hasher.update([0]);
-        hasher.update(source.inline_content.as_bytes());
-        hasher.update([255]);
+    for content_digest in &content_digests {
+        hasher.update(content_digest);
     }
 
     let digest = hasher.finalize();
@@ -1777,8 +1853,8 @@ fn hex_char(nibble: u8) -> char {
 mod tests {
     use super::*;
     use crate::loader_api::{open_model, OpenModelRequest};
+    use crate::scenario_test_support::unique_temp_path;
     use std::path::Path;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn verify_with_chunk(content: &str) -> VerifyReport {
         verify_model(VerifyModelRequest {
@@ -1824,10 +1900,13 @@ mod tests {
     }
 
     #[test]
-    fn product_schema_version_is_three() {
-        // ADR-0047 §2: the facet namespace + model_hash rotation advance the
-        // product-contract discriminator 2 -> 3.
-        assert_eq!(PRODUCT_SCHEMA_VERSION, 3);
+    fn product_schema_version_is_four() {
+        // ADR-0047 §2 advanced the product-contract discriminator 2 -> 3 (the
+        // facet namespace + model_hash rotation). ADR-0054 §7 advances it
+        // 3 -> 4: the `constraints` namespace, and with it `condition` reverting
+        // to inclusion-selector-only semantics. A v3 request is rejected with
+        // E_UNSUPPORTED_SCHEMA_VERSION; there are no back-compat shims.
+        assert_eq!(PRODUCT_SCHEMA_VERSION, 4);
     }
 
     #[test]
@@ -1836,6 +1915,21 @@ mod tests {
             "Condition value 'mars' is not in the closed facet 'region' domain [eu, us]",
         );
         assert_eq!(diag.code, E_FACET_VALUE_UNDECLARED);
+    }
+
+    #[test]
+    fn map_graph_error_tags_undeclared_constraint_facet() {
+        // configflux-6j91. The literal here is a copy of what
+        // `link_verify::validate_constraints` builds; the end-to-end guard that
+        // the two stay in step is
+        // //compiler:constraint_facet_diagnostic_test, which drives the real
+        // compile path rather than hand-writing the message.
+        let diag = map_graph_error(
+            "Constraint 'pinned_arch' references facet 'arch', which is not declared under \
+             `facets`: declare the facet with its value domain, or remove it from the constraint",
+        );
+        assert_eq!(diag.code, E_FACET_VALUE_UNDECLARED);
+        assert!(diag.hint.is_some(), "the author needs the rule, not just the fault");
     }
 
     #[test]
@@ -2212,15 +2306,7 @@ mod tests {
         let defs = include_str!("../scenarios/s1_water_pump/smoke/cue/00_definitions.json");
         let comps = include_str!("../scenarios/s1_water_pump/smoke/cue/10_components.json");
 
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time")
-            .as_nanos();
-        let output_dir = std::env::temp_dir().join(format!(
-            "configflux-loop2-compile-handoff-{}-{}",
-            std::process::id(),
-            unique
-        ));
+        let output_dir = unique_temp_path("cfx-compile", "handoff");
 
         let result = compile_model(CompileModelRequest {
             schema_version: PRODUCT_SCHEMA_VERSION,
@@ -2272,15 +2358,7 @@ mod tests {
         let defs = include_str!("../scenarios/s1_water_pump/smoke/cue/00_definitions.json");
         let comps = include_str!("../scenarios/s1_water_pump/smoke/cue/10_components.json");
 
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time")
-            .as_nanos();
-        let base = std::env::temp_dir().join(format!(
-            "configflux-emit-perm-{}-{}",
-            std::process::id(),
-            unique
-        ));
+        let base = unique_temp_path("configflux-emit", "perm");
         let ro_parent = base.join("ro");
         std::fs::create_dir_all(&ro_parent).expect("create ro parent");
         std::fs::set_permissions(&ro_parent, std::fs::Permissions::from_mode(0o555))
@@ -2344,15 +2422,7 @@ mod tests {
         // form, keeping the default result byte-identical to today.
         let defs = include_str!("../scenarios/s1_water_pump/smoke/cue/00_definitions.json");
         let comps = include_str!("../scenarios/s1_water_pump/smoke/cue/10_components.json");
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time")
-            .as_nanos();
-        let output_dir = std::env::temp_dir().join(format!(
-            "configflux-9pjy4-unbudgeted-{}-{}",
-            std::process::id(),
-            unique
-        ));
+        let output_dir = unique_temp_path("configflux-9pjy4", "unbudgeted");
         let result = compile_model(CompileModelRequest {
             schema_version: PRODUCT_SCHEMA_VERSION,
             source_manifest: vec![
@@ -2461,15 +2531,7 @@ mod tests {
                 inline_content: comps.to_string(),
             },
         ];
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time")
-            .as_nanos();
-        let base = std::env::temp_dir().join(format!(
-            "configflux-9pjy4-clustermatch-{}-{}",
-            std::process::id(),
-            unique
-        ));
+        let base = unique_temp_path("configflux-9pjy4", "clustermatch");
 
         // A tiny budget: below the 64 MiB overhead floor, so derive_knobs
         // partitions every nontrivial model (effective cluster_size = 1).

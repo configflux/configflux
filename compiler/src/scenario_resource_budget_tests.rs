@@ -86,16 +86,16 @@ const BUDGET_TEST_COMPONENTS_JSON: &str = r#"{
 /// enough variables that a loose budget never derives a `cluster_size`
 /// (verified in the byte-neutrality test before it is relied upon).
 fn budget_test_model() -> ConditionModel {
-    ConditionModel {
-        bound_model_hash: BUDGET_TEST_HASH.to_string(),
-        clauses: vec![
+    ConditionModel::from_clauses(
+        BUDGET_TEST_HASH.to_string(),
+        vec![
             "z == 'on' && a == 'enabled'".to_string(),
             "a == 'enabled' || m == 'auto'".to_string(),
             "!(b == 'off')".to_string(),
             "z == 'off' || (m == 'auto' && a == 'enabled')".to_string(),
             "exactly_one_of(p == 'x', p == 'y', p == 'z')".to_string(),
         ],
-    }
+    )
 }
 
 /// Source manifest for the full-pipeline tests (progress + serde).

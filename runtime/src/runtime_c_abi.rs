@@ -17,13 +17,17 @@
 // bypass D2.
 
 use crate::solver_validation::runtime_open_with_solver_validation;
+use crate::write_enforcement::{
+    commit_configuration_with_solver_validation, set_parameter_with_solver_validation,
+    set_parameters_atomically_with_solver_validation,
+};
 use compiler::product_api::OperationStatus;
 use compiler::runtime_api::{
-    check_for_updates, commit_configuration, export_pending_sync_bundle, get_auto_reset_policy,
+    check_for_updates, export_pending_sync_bundle, get_auto_reset_policy,
     get_configuration_identity, get_dirty_metadata, get_parameter, get_scope_metadata,
     get_sync_status, list_dirty_parameters, list_parameters, pull_updates, push_audit_events,
-    rollback_dirty, set_auto_reset_policy, set_parameter, set_parameters_atomically,
-    subscribe_events, CheckForUpdatesRequest, CheckForUpdatesResult, CommitConfigurationRequest,
+    rollback_dirty, set_auto_reset_policy, subscribe_events,
+    CheckForUpdatesRequest, CheckForUpdatesResult, CommitConfigurationRequest,
     CommitConfigurationResult, ExportPendingSyncBundleRequest, ExportPendingSyncBundleResult,
     GetAutoResetPolicyRequest, GetAutoResetPolicyResult, GetConfigurationIdentityRequest,
     GetConfigurationIdentityResult, GetDirtyMetadataRequest, GetDirtyMetadataResult,
@@ -274,13 +278,24 @@ pub unsafe extern "C" fn configflux_runtime_session_execute_json(
             ConfigFluxRuntimeOperation::GetParameter => {
                 dispatch!(GetParameterRequest, GetParameterResult, get_parameter)
             }
-            ConfigFluxRuntimeOperation::SetParameter => {
-                dispatch!(SetParameterRequest, SetParameterResult, set_parameter)
-            }
+            // configflux-jraj (ADR-0017 amendment D7): the three write arms go
+            // through the runtime-crate validation wrappers, NOT the raw
+            // `compiler::runtime_api` entry points. Until this change they
+            // dispatched straight to the compiler, so every C++/ROS2 SDK write
+            // ran with no solver check at all — not even the `choices`-based one
+            // the CLI already had. That is the same split configflux-u32v closed
+            // for open, and it is closed here for the same reason: enforcement
+            // that a caller can sidestep by picking a transport is not
+            // enforcement.
+            ConfigFluxRuntimeOperation::SetParameter => dispatch!(
+                SetParameterRequest,
+                SetParameterResult,
+                set_parameter_with_solver_validation
+            ),
             ConfigFluxRuntimeOperation::SetParametersAtomically => dispatch!(
                 SetParametersAtomicallyRequest,
                 SetParametersAtomicallyResult,
-                set_parameters_atomically
+                set_parameters_atomically_with_solver_validation
             ),
             ConfigFluxRuntimeOperation::ListDirtyParameters => {
                 dispatch!(ListDirtyParametersRequest, ListDirtyParametersResult, list_dirty_parameters)
@@ -291,9 +306,11 @@ pub unsafe extern "C" fn configflux_runtime_session_execute_json(
             ConfigFluxRuntimeOperation::RollbackDirty => {
                 dispatch!(RollbackDirtyRequest, RollbackDirtyResult, rollback_dirty)
             }
-            ConfigFluxRuntimeOperation::CommitConfiguration => {
-                dispatch!(CommitConfigurationRequest, CommitConfigurationResult, commit_configuration)
-            }
+            ConfigFluxRuntimeOperation::CommitConfiguration => dispatch!(
+                CommitConfigurationRequest,
+                CommitConfigurationResult,
+                commit_configuration_with_solver_validation
+            ),
             ConfigFluxRuntimeOperation::GetConfigurationIdentity => dispatch!(
                 GetConfigurationIdentityRequest,
                 GetConfigurationIdentityResult,

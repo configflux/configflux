@@ -7,6 +7,7 @@
 //! the parent's `pub(super)`/private items via `super::*`.
 
 use super::*;
+use crate::scenario_test_support::unique_temp_path;
 use std::collections::BTreeMap;
 
 const HASH: &str = "1111111111111111111111111111111111111111111111111111111111111111";
@@ -105,10 +106,10 @@ fn parse_condition_model_exposes_condition_exprs_for_partitioner() {
     // previously produced — byte-stability of emitted CCM depends
     // transitively on this. Sole consumer: configflux-0qo3
     // (rung-3 scope partitioner).
-    let bad = ConditionModel {
-        bound_model_hash: "not-a-hash".to_string(),
-        clauses: vec!["a == 'x'".to_string()],
-    };
+    let bad = ConditionModel::from_clauses(
+        "not-a-hash".to_string(),
+        vec!["a == 'x'".to_string()],
+    );
     assert!(parse_condition_model(&bad).is_err());
     let model = sample_model();
     let lifted = parse_condition_model(&model).expect("parse");
@@ -119,10 +120,7 @@ fn parse_condition_model_exposes_condition_exprs_for_partitioner() {
 
 #[test]
 fn empty_model_emits_terminal_true() {
-    let model = ConditionModel {
-        bound_model_hash: HASH.to_string(),
-        clauses: Vec::new(),
-    };
+    let model = ConditionModel::from_clauses(HASH.to_string(), Vec::new());
     let emission = build_ccm_artifact(&model).expect("emit");
     assert_eq!(&emission.bdd_bin[0..4], bdd::CCM_BDD_BIN_MAGIC);
     assert_eq!(u32_at(&emission.bdd_bin, 8), 0);
@@ -132,10 +130,7 @@ fn empty_model_emits_terminal_true() {
 
 #[test]
 fn invalid_bound_model_hash_is_rejected() {
-    let model = ConditionModel {
-        bound_model_hash: "ABC".to_string(),
-        clauses: Vec::new(),
-    };
+    let model = ConditionModel::from_clauses("ABC".to_string(), Vec::new());
     assert!(build_ccm_artifact(&model).is_err());
 }
 
@@ -335,15 +330,15 @@ fn sample_model() -> ConditionModel {
     // tag (z.on / z.off), nested unary negation, conjunctions and
     // disjunctions. This is the fixture used by every byte-
     // stability assertion in this module.
-    ConditionModel {
-        bound_model_hash: HASH.to_string(),
-        clauses: vec![
+    ConditionModel::from_clauses(
+        HASH.to_string(),
+        vec![
             "z == 'on' && a == 'enabled'".to_string(),
             "a == 'enabled' || m == 'auto'".to_string(),
             "!(b == 'off')".to_string(),
             "z == 'off' || (m == 'auto' && a == 'enabled')".to_string(),
         ],
-    }
+    )
 }
 
 #[test]
@@ -793,9 +788,7 @@ fn emit_ccm_dir_with_timings_records_disk_write_and_matches_legacy() {
     // through `std::fs::read` and compare against the in-memory
     // emission to pin the contract.
     let model = sample_model();
-    let dir =
-        std::env::temp_dir().join("configflux-o89x-emit-dir-with-timings");
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = unique_temp_path("configflux-o89x", "emit-dir-with-timings");
     let timings = emit_ccm_dir_with_timings(&model, &dir, "facet-name-ascending")
         .expect("timed dir emit");
     // disk_write must have advanced (we wrote 3 small files).
@@ -841,7 +834,7 @@ fn cudd_construction_fails_closed_in_lean_build() {
     );
     // (2) multi-part dir entry point (the second gated arm via
     // `build_bdd_bin_via_construction`) must also fail closed.
-    let dir = std::env::temp_dir().join(format!("cfx_4jmc_lean_cudd_{}", std::process::id()));
+    let dir = unique_temp_path("cfx-4jmc", "lean-cudd");
     let dir_err = emit_ccm_dir_with_construction(&model, &dir, "facet-name-ascending", "cudd")
         .expect_err("cudd dir emit must fail closed without the `cudd` feature");
     assert!(

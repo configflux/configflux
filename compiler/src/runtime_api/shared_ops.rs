@@ -954,9 +954,9 @@ impl ProvenanceLineageEntry {
     /// references the prior entry's content address, or `None` at the chain
     /// root.
     ///
-    /// Part of the public lineage contract surface: the reporting sensor
-    /// (configflux-ccql.5) and ledger ingest (configflux-ccql.6) build entries
-    /// through this constructor so the content address is computed one way.
+    /// Part of the public lineage contract surface: report producers and
+    /// verifiers (configflux-ccql.5 / configflux-ccql.6) build entries through
+    /// this constructor so the content address is computed one way.
     pub fn new(
         state: ProvenanceVersionTriple,
         actor: String,
@@ -991,8 +991,8 @@ impl ProvenanceLineageEntry {
 /// a 64-char hex string consistent with `model_hash` / `resolve_hash` /
 /// `committed_configuration_id`.
 ///
-/// Public so consumers (e.g. ledger ingest, configflux-ccql.6) can verify a
-/// reported entry's content address without reconstructing the entry.
+/// Public so downstream verifiers (configflux-ccql.6) can verify a reported
+/// entry's content address without reconstructing the entry.
 pub fn compute_lineage_entry_content_address(
     state: &ProvenanceVersionTriple,
     actor: &str,
@@ -2162,6 +2162,7 @@ fn commit_configuration_failed(
         target_configuration_id: None,
         changed_paths: Vec::new(),
         delta_manifest: None,
+        unsat_core: None,
         error_count: diagnostics.error_count,
         warning_count: diagnostics.warning_count,
         diagnostics_ref: None,
@@ -2210,6 +2211,7 @@ fn set_parameter_failed(
         path,
         runtime_snapshot: None,
         parameter: None,
+        unsat_core: None,
         error_count: diagnostics.error_count,
         warning_count: diagnostics.warning_count,
         diagnostics_ref: None,
@@ -2235,6 +2237,7 @@ fn set_parameters_atomically_failed(
         applied_count: 0,
         rejected_paths,
         dirty_generation_max: 0,
+        unsat_core: None,
         error_count: diagnostics.error_count,
         warning_count: diagnostics.warning_count,
         diagnostics_ref: None,

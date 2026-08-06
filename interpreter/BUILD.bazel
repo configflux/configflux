@@ -115,7 +115,7 @@ rust_binary(
     # src/cli_adapter.rs resolves `--version` to the workspace release
     # version. rules_rust defaults CARGO_PKG_VERSION to "0.0.0" when this
     # attr is absent, so it must mirror /VERSION (lint_repo.py enforces this).
-    version = "0.2.0",
+    version = "0.3.0",
     deps = COMMON_DEPS,
 )
 

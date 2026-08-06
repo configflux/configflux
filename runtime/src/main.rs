@@ -19,6 +19,11 @@ mod explain_renderer;
 // and exercised by the runtime test crate.
 mod runtime_c_abi;
 mod solver_validation;
+// Constraint enforcement for the three write commands (configflux-jraj,
+// ADR-0017 amendment). Like `solver_validation` it is part of the C ABI
+// staticlib root (`c_abi_lib.rs`), because the ABI must enforce identically to
+// the CLI — the wrappers cannot live in the clap-based `cli_adapter`.
+mod write_enforcement;
 
 #[cfg(test)]
 use cli_adapter::*;

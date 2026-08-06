@@ -1,6 +1,6 @@
-# Loop 6 Software BOM Baseline Metrics (Smoke + Medium)
+# Software BOM Baseline Metrics (Smoke + Medium)
 
-These baseline numbers are recorded from the Loop 6 software-BOM export path.
+These baseline numbers are recorded from the software-BOM export path.
 
 ## Commands
 - `bazel test //compiler:scenario_smoke_test`
@@ -15,11 +15,11 @@ These baseline numbers are recorded from the Loop 6 software-BOM export path.
 
 ## Metrics
 - Bazel elapsed wall-clock: `0.465s` (Invocation `1d0fe83c-cfa6-475d-afac-063c00421879`).
-- Software BOM operation timings (from `loop6_bom_metrics_snapshot_smoke_and_medium`):
+- Software BOM operation timings (from `software_bom_metrics_snapshot_smoke_and_medium`):
   - `smoke_export_us=755`
   - `medium_s1_export_us=632`
   - `medium_s3_export_us=512`
 - Process memory snapshot:
   - `rss_kib=8576`
 
-These are the Loop 6 baseline values for future BOM-regression tracking.
+These are the software-BOM baseline values for future BOM-regression tracking.

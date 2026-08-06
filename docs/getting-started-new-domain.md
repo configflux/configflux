@@ -13,14 +13,21 @@ end to end.
 
 ## Prerequisites
 
-- The ConfigFlux compiler binary, built from this repo:
+- The two ConfigFlux commands, built from this repo and exposed on your `PATH`:
 
   ```bash
-  bazel build //compiler
+  bazel build //compiler:compiler //cfx:cfx
+
+  mkdir -p .cfx-bin
+  ln -sf "$PWD/bazel-bin/compiler/compiler" .cfx-bin/configflux-compiler
+  ln -sf "$PWD/bazel-bin/cfx/cfx"           .cfx-bin/cfx
+  export PATH="$PWD/.cfx-bin:$PATH"
   ```
 
-  This produces `bazel-bin/compiler/compiler`. The tool identifies itself as
-  `configflux-compiler`; in commands you invoke it as `bazel-bin/compiler/compiler`.
+  `configflux-compiler` compiles your authored model into a Compiled Model
+  Package (CMP). `cfx` is the one-shot resolver that turns that package into a
+  concrete resolved configuration. Every command in this guide is written
+  against those two names, and every command is run from the repository root.
 
 - The pinned `cue` binary, **version 0.16.1**. The export step requires this
   exact version; other versions are not supported. Set the `$CUE` environment
@@ -30,9 +37,9 @@ end to end.
 - A clear picture of the "things" your product configures and the choices a
   customer or integrator makes when ordering or commissioning it.
 
-## The Big Picture: Author, Export, Compile
+## The Big Picture: Author, Export, Compile, Resolve
 
-ConfigFlux authoring has three stages. Keep this pipeline in mind as you read
+ConfigFlux authoring has four stages. Keep this pipeline in mind as you read
 the rest of the guide:
 
 ```
@@ -40,6 +47,12 @@ the rest of the guide:
  (you author)   ---->   (export step emits)  ---->   (compiler ingests)
   package configflux      inheritance filled in       cmp.manifest.json, *.cfir
   chunk: #Config & {...}  by #ResolvePack             index.cfir.json, ccm/
+                                                                |
+                                                                |  cfx resolve
+                                                                v
+                                                         resolved snapshot
+                                                       (one configuration,
+                                                        hash-pinned)
 ```
 
 1. **Author** your model as CUE chunks validated against `compiler/cue/schema.cue`.
@@ -47,17 +60,21 @@ the rest of the guide:
    schema's inheritance engine (`#ResolvePack`), so the emitted JSON has every
    inherited field filled in. This is the JSON the compiler ingests.
 3. **Compile** the resolved JSON into a Compiled Model Package (CMP) with
-   `configflux-compiler compile`.
+   `configflux-compiler compile`. The CMP is your **150% model** — every variant
+   your chunks describe, merged and validated.
+4. **Resolve** the CMP down to one concrete configuration — the **100% model** —
+   with `cfx resolve`. Section 11 walks through this stage.
 
-The fastest way to see all three stages run is to execute a shipping example:
+The fastest way to see the whole pipeline run is to execute a shipping example:
 
 ```bash
-cd examples/01-hello-led && ./run.sh
+cd examples/00-service-multi-env && ./run.sh
 ```
 
-That script locates the compiler binary and runs compile -> verify -> inspect
-against the example's already-exported JSON. Read the rest of this guide to
-learn how to build your own.
+That script compiles the example's already-exported JSON and then resolves it
+with `cfx`: one model, three environments, each exported to its own
+deterministic snapshot. Read the rest of this guide to learn how to build your
+own.
 
 ## 1) Think in Components
 
@@ -387,9 +404,10 @@ at resolve time an unbound declared facet **auto-binds to its `default`** — so
 user who selects nothing still gets a valid resolution, and the resolved output
 records the auto-bind under `defaulted_choices`. Declare a facet only when you
 want its full domain or its default to be first-class; leaving a facet implicit
-keeps today's inferred behavior. Every value your conditions reference must be
-in a closed facet's `values`, and `default` must be one of them — the compiler
-re-checks both.
+keeps today's inferred behavior — unless you want to write a policy constraint
+over it, which requires a declaration (see "Declaring a policy constraint"
+below). Every value your conditions reference must be in a closed facet's
+`values`, and `default` must be one of them — the compiler re-checks both.
 
 ### The default context
 
@@ -398,6 +416,64 @@ facet. This is the starting point for selection. For an implicit facet it must
 name a value the model can resolve; for a declared facet you may instead rely on
 its declared `default`, which auto-binds when the facet is left unbound. The
 compiler and interpreter use the default context as the baseline.
+
+### Declaring a policy constraint
+
+Facets say what a user may choose. A **constraint** says which *combinations*
+of those choices are legal — "debug logging is not permitted in production".
+Constraints are pack-global — any chunk may declare them, and an id may be
+declared only once across the pack — but by convention they live in the same
+`00_definitions` chunk that owns your facets (ADR-0054):
+
+```cue
+constraints: {
+    prod_forbids_debug: {
+        condition: "environment != 'prod' || log_level != 'debug'"
+        doc:       "Debug logging is not permitted in production."
+    }
+}
+```
+
+A constraint is a named rule with an id of its own, so it can be documented and
+referred to rather than smuggled into the model as a component that exists only
+to hold a condition string. The expression uses exactly the condition grammar of
+section 6 — there is no second language — and the rule it expresses is a single
+sentence: every declared constraint must hold in every resolved configuration.
+
+The compiler checks each declaration when you compile: the expression must parse
+(an unparseable constraint is a compile error, not a silently ignored rule),
+every facet it names must be **declared** under `facets`, and every value it
+names must be in a closed facet's `values`. That last check covers `!=` as well
+as `==`, because against a closed domain a mistyped `environment != 'prod0'` is
+not a harmless no-op — it is always true, and would quietly void the rule.
+
+The declaration requirement is worth calling out, because it is the one thing a
+constraint needs that a `condition` does not. A facet you only ever compare
+against in conditions is fine as an implicit facet — but the moment a constraint
+names it, you have to declare it with its value domain. Only a declared facet
+gets the mutual-exclusion clauses that make `cfx options` and `cfx select`
+enforce a rule the same way `cfx resolve` does; without them a rule like
+`arch == 'x86'` would still leave `arch=arm` on offer while `resolve` refused
+it. Rather than half-apply the rule, the compiler rejects the model and tells
+you which constraint and which facet to fix.
+
+**Where a constraint is enforced.** A declared constraint is compiled into the
+solver model, and the selection surfaces screen against it. `cfx options` offers
+a value only if some configuration satisfying every constraint still contains it
+— pick `environment=prod` in the example above and `log_level=debug` disappears
+from the offered options. `cfx explain` names the blocking constraint by its id
+and quotes its condition when it reports why a combination is impossible:
+`blocked by constraint prod_forbids_debug: environment != 'prod' || log_level
+!= 'debug'`. A constraint is not advisory: declaring one changes what the tools
+will let a user pick. And `cfx resolve` refuses a selection that violates one —
+exit `3`, naming the constraint — so a selection your own code assembles, rather
+than walking out of `cfx options`, is screened too.
+
+If a combination is impossible but no constraint you declared rules it out, that
+is not a policy violation and `cfx explain` will not pretend otherwise: it
+reports the model as over-constrained instead of naming the nearest constraint.
+Choosing two values for one facet is the everyday case — a facet holds exactly
+one value, which is the model's own structure rather than something you wrote.
 
 ## 5) Artifact References
 
@@ -530,6 +606,11 @@ components: {
 does not interpret them. They pass through verbatim to the compiler and solver,
 which evaluate them during resolution.
 
+An override condition is a **branch selector**, not a rule about what is legal:
+it picks which value applies when it matches, and it does not restrict what a
+user may select. Writing `condition: "environment == 'prod'"` on an override
+says "use this value in prod", never "the selection must be prod".
+
 ### Condition syntax
 
 Conditions are boolean expressions using the facet names defined in your
@@ -553,6 +634,16 @@ the double quotes delimiting the CUE string.
   conditional component depend on another component that might not exist.
 - **Facet coverage**: Every facet used in a condition must be defined in the
   selection domains, so the selection system can evaluate it.
+
+### Conditions gate inclusion; constraints state policy
+
+A condition answers "is this component (or this value) part of the resolved
+configuration?" If what you actually want to say is "this combination of choices
+is never legal", that is a **constraint** (section 4) — declare it under
+`constraints` with an id of its own, rather than adding a component whose only
+purpose is to carry the rule. A rule declared that way is named, documented, and
+kept out of the component graph, so it never turns up in a resolved output, a
+manifest, or a bill of materials.
 
 ## 7) Naming Conventions
 
@@ -847,7 +938,7 @@ so no format flag is needed. Pass one `--source` per chunk and an `--out`
 directory:
 
 ```bash
-bazel-bin/compiler/compiler compile \
+configflux-compiler compile \
   --source 00_definitions.json \
   --source 10_components.json \
   --out out/cmp
@@ -856,8 +947,8 @@ bazel-bin/compiler/compiler compile \
 `compile` prints a JSON result to stdout. A successful run looks like:
 
 ```json
-{ "schema_version": 1, "status": "ok",
-  "model_hash": "eacc8c3a...5169b4",
+{ "schema_version": 4, "status": "ok",
+  "model_hash": "89d1692f...6352f3",
   "compiled_model_package_ref": "out/cmp/cmp.manifest.json",
   "stats": { "source_count": 2, "chunk_count": 2, "definition_count": 3, "component_count": 3, "artifact_count": 0 } }
 ```
@@ -878,7 +969,7 @@ compilation error.
 authoring to catch problems early:
 
 ```bash
-bazel-bin/compiler/compiler verify \
+configflux-compiler verify \
   --source 00_definitions.json \
   --source 10_components.json
 ```
@@ -891,24 +982,28 @@ and condition compatibility (dependent components have compatible conditions).
 `inspect ... summary` prints an overview of the merged model:
 
 ```bash
-bazel-bin/compiler/compiler inspect \
+configflux-compiler inspect \
   --source 00_definitions.json \
   --source 10_components.json \
   summary
 ```
 
 Use `inspect` to confirm the merged model looks correct before moving on to
-selection and resolution.
+selection and resolution in section 11.
 
-## 10) From an Empty Directory to a Compiled CMP
+## 10) From an Empty Directory to a Resolved Configuration
 
 Here is the full sequence for modeling a new domain from scratch. Every command
 below is one you run directly; substitute your own pack directory and file
 names.
 
 ```bash
-# 0. One-time: build the compiler.
-bazel build //compiler
+# 0. One-time: build both commands and put them on your PATH.
+bazel build //compiler:compiler //cfx:cfx
+mkdir -p .cfx-bin
+ln -sf "$PWD/bazel-bin/compiler/compiler" .cfx-bin/configflux-compiler
+ln -sf "$PWD/bazel-bin/cfx/cfx"           .cfx-bin/cfx
+export PATH="$PWD/.cfx-bin:$PATH"
 
 # 1. Author the pack. Create my_domain/cue/ and write two chunks:
 #      my_domain/cue/00_definitions.cue   (definitions; valueless)
@@ -927,24 +1022,32 @@ bazel build //compiler
 #    the repo's own in-repo fixtures and will not see my_domain/.
 
 # 3. Compile the resolved JSON into a CMP.
-bazel-bin/compiler/compiler compile \
+configflux-compiler compile \
   --source 00_definitions.json \
   --source 10_components.json \
   --out out/cmp
 
 # 4. (Optional) Verify and inspect.
-bazel-bin/compiler/compiler verify \
+configflux-compiler verify \
   --source 00_definitions.json \
   --source 10_components.json
-bazel-bin/compiler/compiler inspect \
+configflux-compiler inspect \
   --source 00_definitions.json \
   --source 10_components.json \
   summary
+
+# 5. Resolve the CMP down to one concrete configuration.
+#    Substitute your own facet names and values (section 4).
+cfx options --model out/cmp/cmp.manifest.json
+cfx resolve --model out/cmp/cmp.manifest.json \
+  --select my_facet=my_value \
+  --out out/snapshot
 ```
 
-The output of step 3 is your Compiled Model Package under `out/cmp/`. From
-there you can move on to selection and resolution against the profile you
-designed in section 4.
+Step 3 produces your Compiled Model Package under `out/cmp/` — the 150% model.
+Step 5 turns it into a resolved snapshot under `out/snapshot/`, the 100% model
+for one selection. Section 11 walks through that last stage against a model you
+can run today.
 
 ### The fastest start: run a shipping example
 
@@ -952,13 +1055,16 @@ If you would rather see the pipeline work before authoring anything, run one of
 the example packs end to end:
 
 ```bash
-cd examples/01-hello-led && ./run.sh
+cd examples/00-service-multi-env && ./run.sh
 ```
 
-Each example's `run.sh` locates the compiler binary and runs
-compile -> verify -> inspect against the example's already-exported JSON. The
-shipping examples, in increasing complexity, are:
+Each example's `run.sh` locates the two binaries and drives them against the
+example's already-exported JSON. The shipping examples, in increasing
+complexity, are:
 
+- `examples/00-service-multi-env/` -- the hero example: one model resolved
+  across dev, staging, and prod, plus a compiled policy that `cfx explain`
+  narrates.
 - `examples/01-hello-led/` -- bare minimum: one definition, one component,
   single-file CUE chunk.
 - `examples/02-sensor-gateway/` -- two-file pack: inheritance, conditional
@@ -968,15 +1074,228 @@ shipping examples, in increasing complexity, are:
 
 See `examples/README.md` for an overview of the example set.
 
+## 11) Resolve Your First Configuration
+
+A CMP is the **150% model**: every variant your chunks describe, merged and
+validated. Resolution picks one point in that space and emits the **100%
+model** — the resolved configuration for exactly one product, environment, or
+deployment.
+
+Three `cfx` commands cover the loop:
+
+| Command | What it answers |
+|---|---|
+| `cfx options` | What can I choose, and what is still valid? |
+| `cfx resolve` | Give me the resolved configuration for these choices. |
+| `cfx explain` | Why is this combination impossible? |
+
+The transcripts below run against the shipping `examples/02-sensor-gateway`
+pack: the two-file layout from section 8, the declared facets from section 4,
+and the conditional override from section 6. Run them verbatim to see the
+shape, then substitute your own pack's JSON and facet names.
+
+First compile the pack, exactly as in section 9:
+
+```bash
+configflux-compiler compile \
+  --source examples/02-sensor-gateway/00_definitions.json \
+  --source examples/02-sensor-gateway/10_components.json \
+  --out build
+```
+
+### Step 1: See what is selectable
+
+`cfx options` opens the compiled model and lists every facet with the options
+currently valid for it. With no choices applied, this is the whole decision
+space your model offers:
+
+```console
+$ cfx options --model build/cmp.manifest.json
+facet bus_type [closed, default: serial]
+  ethernet
+  serial
+facet environment [closed, default: standard]
+  high_speed
+  standard
+```
+
+Both facets read `[closed, default: ...]` because `00_definitions.json`
+declares them with `#Facet` (section 4). `closed` means the listed values are
+the entire vocabulary; `default` is the arm that auto-binds when the facet is
+left unbound. A facet you never declared would appear here too, with its domain
+inferred from the conditions that reference it.
+
+Apply a choice with `--select FACET=OPTION`. The chosen facet is marked
+`[selected: ...]`:
+
+```console
+$ cfx options --model build/cmp.manifest.json --select bus_type=ethernet
+facet bus_type [selected: ethernet, default: serial]
+  ethernet
+facet environment [closed, default: standard]
+  high_speed
+  standard
+```
+
+Here `environment` is unchanged: `sensor_gateway`'s two facets vary
+independently, so choosing a bus type rules nothing else out. In a model whose
+facets are linked by a rule, the *other* facets' option lists shrink as choices
+land — step 4 shows that case.
+
+This is the guided-walk primitive: an interactive tool calls `cfx options`
+after every choice, so a user is only ever offered options that can still lead
+to a valid configuration. `cfx options` writes nothing — it is a read-only
+query, safe to call as often as you like.
+
+### Step 2: Resolve the configuration
+
+Once the facets you care about are chosen, `cfx resolve` runs
+open → select → resolve → export in one process. It prints the hash lineage and
+the relative path of every exported file, then writes the snapshot under
+`--out`:
+
+```console
+$ cfx resolve --model build/cmp.manifest.json --select bus_type=ethernet --select environment=high_speed --out snapshot
+model_hash: 89d1692f3553ff31d638f1567bf23abb737b2f5b0b76f6c609b97853b16352f3
+selection_state_hash: a92a02293c2c11d9e1716283f66455573e0199aa6907b52928f73d7d502fba14
+resolve_hash: 47cac6b16c06c022eb9197039e16e14798975120919f2380ab855f642e8cb36d
+wrote: generated/config.hpp
+wrote: generated/config_artifact_manifest.json
+wrote: generated/config_build_flags.cmake
+```
+
+Three hashes, each derived from the one above it: `model_hash` fingerprints the
+150% model, `selection_state_hash` fingerprints the choices, and `resolve_hash`
+fingerprints this exact resolved configuration. Run the same command again and
+all three are identical and the exported bytes are unchanged — that
+reproducibility is the contract.
+
+### Step 3: Read the resolved snapshot
+
+The snapshot is what a build or a runtime actually consumes. For the C++
+early-binding profile the resolved parameters land in a header:
+
+```console
+$ cat snapshot/generated/config.hpp
+#pragma once
+
+namespace configflux::buildcfg {
+inline constexpr const char* kSensorBusProtocol = "modbus_tcp";
+}  // namespace configflux::buildcfg
+```
+
+Note the value: `modbus_tcp`, not the base value `modbus_rtu`. Selecting
+`bus_type=ethernet` fired the conditional override you authored in section 6.
+The same values arrive as CMake definitions for build-system consumers:
+
+```console
+$ cat snapshot/generated/config_build_flags.cmake
+# Generated by ConfigFlux profile cpp_early_binding_v1
+set(CFG_SENSOR_BUS_PROTOCOL "modbus_tcp")
+add_compile_definitions(
+  CFG_SENSOR_BUS_PROTOCOL_MODBUS_TCP=1
+)
+```
+
+And `config_artifact_manifest.json` records the resolved artifact ids together
+with the hash lineage, so a deployed configuration can always be traced back to
+the model it came from:
+
+```console
+$ cat snapshot/generated/config_artifact_manifest.json
+{
+  "artifacts": [],
+  "model_hash": "89d1692f3553ff31d638f1567bf23abb737b2f5b0b76f6c609b97853b16352f3",
+  "profile": "cpp_early_binding_v1",
+  "resolve_hash": "47cac6b16c06c022eb9197039e16e14798975120919f2380ab855f642e8cb36d",
+  "schema_version": 4
+}
+```
+
+The list is empty because this pack declares no artifacts; a model that selects
+driver binaries (section 5) lists them here.
+
+### Step 4: Understand an impossible selection
+
+`sensor_gateway`'s two facets vary independently, so every combination
+resolves. Asking `cfx explain` about a workable selection says so and exits
+with code 3 — there is nothing to explain:
+
+```console
+$ cfx explain --model build/cmp.manifest.json --select bus_type=ethernet --select environment=high_speed
+selection is satisfiable; nothing to explain
+```
+
+Models get interesting when they encode a **policy** — a rule spanning two
+facets. The hero example ships one, declared as a constraint (section 4) in its
+`00_definitions.json` chunk alongside the facets it talks about:
+
+```json
+"constraints": {
+  "prod_forbids_debug": {
+    "condition": "environment != 'prod' || log_level != 'debug'",
+    "doc": "Debug logging is not permitted in production."
+  }
+}
+```
+
+The rule has an id of its own, so it stays out of the component graph and can be
+named in a diagnostic. `cfx options` and `cfx explain` screen selections against
+it: pick `environment=prod` and `log_level=debug` disappears from the offered
+options, and asking about that pair produces the explanation below.
+
+Compile that pack:
+
+```bash
+configflux-compiler compile \
+  --source examples/00-service-multi-env/00_definitions.json \
+  --source examples/00-service-multi-env/10_components.json \
+  --out build-svc
+```
+
+Then ask for the forbidden combination:
+
+```console
+$ cfx explain --model build-svc/cmp.manifest.json --select environment=prod --select log_level=debug
+cannot select log_level.debug:
+  blocked by your earlier choice: environment.prod
+  blocked by constraint prod_forbids_debug: environment != 'prod' || log_level != 'debug'
+(one minimal explanation; other minimal cores may exist)
+```
+
+That is the **unsat core**: the minimal set of choices and rules that cannot
+hold together, named in the vocabulary you authored. It does not dump the whole
+constraint system — it names the earlier choice, then the constraint that rules
+the combination out, by the id you gave it and with its condition quoted back.
+Writing the rule down in the model, rather than leaving it in a runbook, is what
+buys you this explanation for free.
+
+`cfx explain` exits `0` when it printed a core, `3` when the selection was
+satisfiable, and `2` on a usage or IO error. Diagnostics elsewhere in the
+pipeline carry stable `E_` codes; `docs/faq.md` covers the ones evaluators hit
+most often.
+
+### You now hold a resolved configuration
+
+That is the whole pipeline: CUE chunks → resolved JSON → CMP → snapshot. From
+here, `docs/canonical-worked-example.md` replays `cfx options` and
+`cfx resolve` against the larger water-pump reference model, and
+`examples/00-service-multi-env/run.sh` shows one model resolved across three
+environments with a determinism check on every snapshot.
+
 ## Related Documentation
 
 - `examples/README.md` -- overview of the shipping example packs
+- `examples/00-service-multi-env/` -- the hero example: one model, three
+  environments, a compiled policy, and a determinism check
 - `compiler/cue/README.md` -- the CUE authoring front-end: schema, export
   script, and verification harness
 - `compiler/cue/schema.cue` -- the authoring schema (`#Config`, `#Profile`,
   `#snakeId`, `#ResolvePack`, and the rest of the constraints)
 - `docs/canonical-worked-example.md` -- end-to-end operator flow using the
-  water pump scenario
+  water pump scenario, with the same `cfx` commands used in section 11
+- `docs/faq.md` -- common evaluator questions, including the stable `E_`
+  diagnostic codes the tools emit
 - `docs/model-spec.md` -- formal model specification (schema, IR, hashes)
 - `docs/design.md` -- architecture and pipeline rationale
 - `docs/interface-contracts.md` -- application boundary contracts

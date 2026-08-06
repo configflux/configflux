@@ -9,11 +9,12 @@ use crate::ccm_emitter::{
 // default path (ADR-0005 Amendment 2).
 use crate::progress::ProgressTracker;
 use crate::resource_budget::{derive_knobs, ResourceBudget};
-use crate::conditions::parse_condition_expr;
+use crate::conditions::{for_each_predicate_symbol, parse_condition_expr, ConditionExpr};
 use crate::ingest_merge::build_ir_index;
 use crate::ir;
 use crate::link_verify::{
-    validate_component_dependencies, validate_definition_inheritance, validate_facets,
+    validate_component_dependencies, validate_constraints, validate_definition_inheritance,
+    validate_facets,
 };
 use crate::schema::{self, Component, Config, Parameter};
 use anyhow::{bail, Context, Result};
@@ -45,13 +46,17 @@ pub enum ChunkFormat {
 /// document never does (its top level is `key = value` / `[table]` /
 /// `# comment`), so a leading brace is an unambiguous discriminator.
 ///
-/// Detection is by *content*, not by a filename extension, on purpose: the
-/// chunk's `source_id` is folded into `model_hash` (see [`ir::IrChunkRef`] —
-/// chunks are sorted by and hashed with their `source_id`), so a CUE-emitted
-/// JSON chunk and its equivalent TOML chunk must be presented under an
-/// *identical* `source_id` to produce a byte-identical CMP (ADR 0021, phase 6).
-/// A format-carrying extension would perturb the `source_id` and rotate the
-/// hash, defeating the differential equivalence gate.
+/// Detection is by *content*, not by a filename extension, on purpose: a
+/// `source_id` is an opaque label and need not carry an extension at all — the
+/// inline path below names its chunks `inline-<n>`, and the CLI passes whatever
+/// string it was given. There is nothing in a `source_id` to dispatch on.
+///
+/// Since ADR-0056 the chunk vector is ordered by `chunk_hash` and `source_id`
+/// is OUTSIDE the `model_hash` preimage entirely (it survives on disk as
+/// provenance). So the equivalence this detection serves is now stronger than
+/// the ADR-0021 phase-6 gate needed: a CUE-emitted JSON chunk and its
+/// equivalent TOML chunk share a `model_hash` under *any* pair of source ids,
+/// not only under an identical one.
 pub fn detect_chunk_format(content: &str) -> ChunkFormat {
     if content.trim_start().starts_with('{') {
         ChunkFormat::Json
@@ -104,6 +109,7 @@ impl Compiler {
                 components: Default::default(),
                 artifacts: Default::default(),
                 facets: Default::default(),
+                constraints: Default::default(),
             },
             chunks: Vec::new(),
         }
@@ -172,6 +178,41 @@ impl Compiler {
         self.merge_partial(partial.clone())?;
 
         let chunk_hash = ir::chunk_hash_from_config(&partial)?;
+        // ADR-0056 §3: two chunks with one `chunk_hash` are rejected here.
+        //
+        // The package cannot represent the duplicate — chunks are written as
+        // `chunk-<chunk_hash>.cfir` and resolved back by the same construction
+        // on every read path, so both chunks write ONE file and the loser's
+        // `source_id` is lost. Multiplicity would live only in the index's
+        // vector, and identity must not depend on state the on-disk form
+        // cannot hold. The verdict is not new: `verify_index_integrity` already
+        // bails one stage later with "Duplicate chunk hash '<h>' in index".
+        // Moving it here changes no outcome, only the diagnostic — the index
+        // check knows the hash but not which two sources produced it.
+        //
+        // Checked after `merge_partial` rather than beside the `source_id`
+        // check above because that is where `chunk_hash` first exists, and
+        // moving the hash earlier would reorder existing diagnostics: two
+        // entity-bearing duplicates are already reported by the duplicate-id
+        // rules, which name the offending entity. The only input that reaches
+        // here is an entity-free chunk, which merge ignores.
+        //
+        // The message must not read "declared in more than one chunk" —
+        // `product_api::map_compile_input_error` routes that phrasing to
+        // E_INGEST_DUPLICATE_FACET.
+        if let Some(existing) = self
+            .chunks
+            .iter()
+            .find(|chunk| chunk.chunk_hash == chunk_hash)
+        {
+            bail!(
+                "Duplicate chunk content: '{}' and '{}' have identical content \
+                 (chunk hash {}). Remove one, or give them distinct content.",
+                existing.source_id,
+                source_id,
+                chunk_hash
+            );
+        }
         self.chunks.push(SourceChunk {
             source_id,
             chunk_hash,
@@ -228,6 +269,20 @@ impl Compiler {
             }
             self.repository.facets.insert(key, facet);
         }
+
+        // Merge Constraints (ADR-0054 §1). Pack-global and verbatim, like
+        // facets: no inheritance, no gap-fill, no merge. A repeated id is a
+        // duplicate, phrased exactly like the definition/component/artifact
+        // duplicates above so it lands in the same generic ingest diagnostic —
+        // deliberately NOT the facet phrasing ("declared in more than one
+        // chunk"), which `product_api::map_compile_input_error` routes to
+        // E_INGEST_DUPLICATE_FACET. ADR-0054 adds no diagnostic code.
+        for (key, constraint) in partial.constraints {
+            if self.repository.constraints.contains_key(&key) {
+                bail!("Duplicate constraint ID found: '{}'", key);
+            }
+            self.repository.constraints.insert(key, constraint);
+        }
         Ok(())
     }
 
@@ -242,7 +297,8 @@ impl Compiler {
             &self.repository.facets,
             &self.repository.components,
             &self.repository.definitions,
-        )
+        )?;
+        validate_constraints(&self.repository.constraints, &self.repository.facets)
     }
 
     pub fn emit_ir(&self, output_dir: impl AsRef<Path>) -> Result<ir::IrIndex> {
@@ -324,9 +380,12 @@ impl Compiler {
         progress: Option<&mut ProgressTracker>,
     ) -> Result<(std::path::PathBuf, EmitBudgetOutcome)> {
         let ccm_dir = cmp_output_dir.as_ref().join("ccm");
+        let declared_facets = self.declared_facets();
         let model = ConditionModel {
             bound_model_hash: model_hash.to_string(),
-            clauses: self.collect_ccm_clauses(),
+            clauses: self.collect_ccm_clauses(&declared_facets),
+            constraints: self.collect_ccm_constraints(),
+            cardinality: synthesize_facet_cardinality(&declared_facets),
         };
 
         // Derive internal knobs from the soft budget. With no budget,
@@ -399,22 +458,37 @@ impl Compiler {
         Ok((ccm_dir, outcome))
     }
 
-    /// Harvest the model's constraint `condition`s into the
-    /// `ccm_emitter`-grammar clause list. Walks every chunk's components and
-    /// definitions in a stable, content-derived order (component/definition id
-    /// ascending, then override order) so the emitted `.ccm` is reproducible
-    /// byte-for-byte regardless of the chunks' `HashMap` iteration order
-    /// (ADR-0005 §10 G1).
+    /// Harvest the model's `condition`s into the `ccm_emitter`-grammar clause
+    /// list. Walks every chunk's components and definitions in a stable,
+    /// content-derived order (component/definition id ascending, then override
+    /// order) so the emitted `.ccm` is reproducible byte-for-byte regardless of
+    /// the chunks' `HashMap` iteration order (ADR-0005 §10 G1).
+    ///
+    /// **No harvested `condition` is asserted** (ADR-0054 §5.1). Every one of
+    /// them — a component's activation `condition` and a parameter override's
+    /// branch `condition` alike — is an *inclusion selector*, so it contributes
+    /// its `(facet, value)` symbols and nothing else, via the same ADR-0047
+    /// tautology [`synthesize_symbol_introduction`] emits. The root conjuncts
+    /// come from the `constraints` namespace only
+    /// ([`Self::collect_ccm_constraints`]).
+    ///
+    /// This is the structural elimination of the configflux-9xxq defect class:
+    /// a selector has no syntactic path to the root, because this function has
+    /// no path from an authored condition string to an emitted clause that is
+    /// anything other than a tautology. `compiler_core_tests` pins that.
     ///
     /// Only conditions that parse under the typed condition grammar are
     /// included — exactly mirroring the legacy `register_condition`
     /// fall-through, where a condition that does not parse widens no facet
     /// domain and forms no group. This keeps the product compile from failing
     /// on a pass-through condition string the BDD grammar cannot represent.
+    /// (A `constraints` entry that does not parse is the opposite: a hard
+    /// ingest error in `link_verify::validate_constraints`, because a policy
+    /// that cannot be understood must never be silently dropped.)
     /// De-duplication keeps an identical condition that appears on multiple
     /// entities from inflating the clause set (the BDD AND-fold is idempotent,
     /// so this is also a semantics-preserving normalization).
-    fn collect_ccm_clauses(&self) -> Vec<String> {
+    fn collect_ccm_clauses(&self, declared: &BTreeMap<String, &schema::Facet>) -> Vec<String> {
         // Pass 1: gather every raw condition string in a stable,
         // content-derived order (chunk order, then id ascending, then
         // override order).
@@ -446,6 +520,10 @@ impl Compiler {
         // Pass 2: keep first-seen, parseable, non-empty conditions only. A
         // condition that does not parse widens no facet and forms no clause,
         // mirroring the legacy `register_condition` fall-through.
+        //
+        // Every surviving condition is replaced by one symbol-introducing
+        // tautology per `(facet, value)` pair it names, so its symbols still
+        // land while the AND-fold sees only `TRUE` (ADR-0054 §5.1).
         let mut seen: BTreeSet<String> = BTreeSet::new();
         let mut clauses: Vec<String> = Vec::new();
         for condition in raw {
@@ -453,11 +531,13 @@ impl Compiler {
             if trimmed.is_empty() {
                 continue;
             }
-            if parse_condition_expr(trimmed).is_err() {
+            let Ok(expr) = parse_condition_expr(trimmed) else {
                 continue;
-            }
-            if seen.insert(trimmed.to_string()) {
-                clauses.push(trimmed.to_string());
+            };
+            for clause in synthesize_selector_symbols(&expr) {
+                if seen.insert(clause.clone()) {
+                    clauses.push(clause);
+                }
             }
         }
 
@@ -473,15 +553,76 @@ impl Compiler {
         // pre-ADR path. Duplicate facet keys across chunks are rejected at
         // ingest (`E_INGEST_DUPLICATE_FACET`), so the `BTreeMap` collapse below
         // never drops a distinct declaration.
+        clauses.extend(synthesize_facet_clauses(declared));
+        clauses
+    }
+
+    /// The pack's DECLARED facets, collapsed across chunks in name-ascending
+    /// order. Duplicate facet keys across chunks are rejected at ingest
+    /// (`E_INGEST_DUPLICATE_FACET`), so the `BTreeMap` collapse never drops a
+    /// distinct declaration.
+    ///
+    /// Shared by the symbol-introduction pass (ADR-0047 §4 Amendment 1) and the
+    /// cardinality synthesis (ADR-0054 §5.2) so both see exactly one notion of
+    /// "declared".
+    fn declared_facets(&self) -> BTreeMap<String, &schema::Facet> {
         let mut declared: BTreeMap<String, &schema::Facet> = BTreeMap::new();
         for chunk in &self.chunks {
             for (name, facet) in &chunk.config.facets {
                 declared.insert(name.clone(), facet);
             }
         }
-        clauses.extend(synthesize_facet_clauses(&declared));
-        clauses
+        declared
     }
+
+    /// Harvest the pack's `constraints` namespace into the emitter's root
+    /// conjuncts: `(constraint_id, condition_text)` in id-ascending order
+    /// (ADR-0054 §5.1).
+    ///
+    /// This is the ONLY producer of root conjuncts. Constraints are pack-global
+    /// — no inheritance, no gap-fill, no merge — so the walk is a flat collapse
+    /// across chunks, and duplicate ids across chunks are rejected at ingest.
+    ///
+    /// Conditions are passed through VERBATIM rather than re-serialized: the
+    /// text is what the §5.4 manifest roster shows the operator, so it must
+    /// stay the string the author wrote. Every constraint is known to parse by
+    /// this point (`link_verify::validate_constraints` makes a parse failure a
+    /// hard ingest error), so unlike a selector condition there is no
+    /// skip-on-unparseable path here — a policy is never silently dropped.
+    fn collect_ccm_constraints(&self) -> Vec<(String, String)> {
+        let mut by_id: BTreeMap<String, String> = BTreeMap::new();
+        for chunk in &self.chunks {
+            for (id, constraint) in &chunk.config.constraints {
+                by_id.insert(id.clone(), constraint.condition.clone());
+            }
+        }
+        by_id.into_iter().collect()
+    }
+}
+
+/// The symbol-universe contribution of one branch selector: a
+/// [`synthesize_symbol_introduction`] tautology per `(facet, value)` pair the
+/// selector names, in left-to-right DFS pre-order, first-sight only.
+///
+/// configflux-9xxq / ADR-0054 §5.1. Each emitted string lowers to the canonical
+/// `TRUE` terminal, so the AND-fold is a no-op (`and(root, TRUE) = root`) while
+/// the `var_order` predicate walk still collects every symbol. Emitting one
+/// tautology per pair — rather than wrapping the whole condition — keeps the
+/// pairs, and hence the symbols, exactly those the selector contributed before:
+/// the default `FacetNameAscending` heuristic orders symbols from the *set* of
+/// pairs, so `ccm.symbols.json` is byte-identical across this change.
+///
+/// Both `==` and `!=` atoms are collected, because either operator names the
+/// same variable (`compile_predicate` lowers `NotEq` to `not(var)`).
+fn synthesize_selector_symbols(expr: &ConditionExpr) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
+    for_each_predicate_symbol(expr, |tag, value| {
+        if seen.insert((tag.to_string(), value.to_string())) {
+            out.push(synthesize_symbol_introduction(tag, value));
+        }
+    });
+    out
 }
 
 /// Synthesize the ADR-0047 §4 (Amendment 1) declared-facet symbols: one
@@ -496,22 +637,93 @@ impl Compiler {
 /// including a default arm that no condition names, becomes a first-class
 /// symbol without asserting any constraint. This is the F2 fix.
 ///
-/// **Closed and open facets are handled identically** — symbol-introduction
-/// only, with no `exactly_one_of`, no pairwise at-most-one, and no
-/// at-least-one. Amendment 1 (configflux-5zqr) records why: the compiled model
-/// is a *permissive feasibility screen* whose guards are hard assertions
-/// AND-folded into the root, so a synthesized cardinality clause (AMO or
-/// exactly-one) collides with a forced guard and prunes the unforced default
-/// arm — re-creating the F2 trap. Intra-facet exclusivity never lived in the
-/// BDD; it lives at the selection/tag layer (a single-valued choices map),
-/// membership at validation (`E_FACET_VALUE_UNDECLARED`), and defaulting at
-/// resolve time (§5 auto-bind). The closed/open distinction therefore matters
-/// at the validation and render layers, not here.
+/// **Closed and open facets are handled identically here** — symbol-
+/// introduction only. Cardinality is a separate, later channel
+/// ([`synthesize_facet_cardinality`]) and deliberately does not ride on this
+/// pass: this one must stay a pure no-op on the BDD root so a model that
+/// declares a facet but no policy keeps a permissive root.
 fn synthesize_facet_clauses(facets: &BTreeMap<String, &schema::Facet>) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for (name, facet) in facets {
         for value in &facet.values {
             out.push(synthesize_symbol_introduction(name, value));
+        }
+    }
+    out
+}
+
+/// Synthesize the ADR-0054 §5.2 intra-facet cardinality conjuncts: the
+/// soundness floor that makes a *constraint* mean the same thing on the solver
+/// surfaces as it does under a concrete resolve.
+///
+/// Per DECLARED facet, in facet-name-ascending then declared-value order:
+///
+/// * **Closed facet** — `exactly_one_of(f == 'v1', …, f == 'vN')`: at-least-one
+///   conjoined with pairwise at-most-one. Sound because a closed domain is
+///   exhaustive by declaration (`E_FACET_VALUE_UNDECLARED` rejects anything
+///   outside it), so exactly one declared value holds in every completion. A
+///   one-value closed facet degenerates to the bare `f == 'v1'` — the grammar's
+///   cardinality operators require N ≥ 2 arguments, and with an exhaustive
+///   single-value domain that literal is what "exactly one of" means.
+/// * **Open facet** — pairwise at-most-one ONLY, emitted as one
+///   `f != 'vi' || f != 'vj'` mutex per unordered pair in ascending `(i, j)`
+///   order. An open domain is extensible, so "some *declared* value holds" is
+///   not a theorem and at-least-one would be unsound.
+/// * **Undeclared (condition-inferred) facet** — nothing. Its domain is an
+///   artifact of what conditions happened to mention rather than a
+///   declaration, so asserting cardinality over it would assert something the
+///   author never wrote.
+///
+/// Why this is needed at all, and why the hero example is NOT the proof: option
+/// validity is an *existential* SAT query (`is_var_sat_under`), a selection
+/// asserts only the positive literal, and `==`/`!=` share one variable. A
+/// constraint that positively equates a facet to a value (`log_level == 'info'`)
+/// therefore UNDER-prunes without at-most-one — the query
+/// `root ∧ log_level.info ∧ log_level.debug` is satisfiable because the two
+/// variables are independent, so `debug` stays on the options list while a
+/// concrete resolve correctly rejects it. At-least-one closes the mirror gap: a
+/// genuinely over-constrained model would otherwise be satisfiable by setting
+/// every arm false, and `explain` would fail to report it. Cardinality is
+/// neither necessary nor sufficient for the hero example's disjunction-of-
+/// negations constraint; it is a general soundness floor (ADR-0054 §5.3).
+///
+/// This does NOT re-create the ADR-0047 Amendment 1 trap. That amendment
+/// removed exactly this synthesis, and was right to under its premise: every
+/// selector `condition` was a hard root assertion, so a synthesized
+/// at-most-one collided with a *forced* guard and pruned the unforced default
+/// arm. ADR-0054 §5.1 removes the guards from the root, so there is nothing
+/// left to collide with — a per-arm query fails only when a genuine constraint
+/// forbids that arm.
+///
+/// No auxiliary variables: the emitted strings lower through ADR-0006 §4's
+/// `ExactlyOneOf` path, whose AMO is pairwise, so the `.ccm` variable space
+/// keeps modelling only real `(tag, value)` pairs and the byte-layout contract
+/// is untouched. The emitter's advisory `EXACTLY_ONE_OF_PAIRWISE_AMO_BOUND`
+/// (16, a stderr warning and never a build failure) applies unchanged.
+fn synthesize_facet_cardinality(facets: &BTreeMap<String, &schema::Facet>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for (name, facet) in facets {
+        if facet.open {
+            // At-most-one only: one pairwise mutex ¬(vi ∧ vj) per unordered
+            // pair, in ascending (i, j) order.
+            for i in 0..facet.values.len() {
+                for j in (i + 1)..facet.values.len() {
+                    out.push(format!(
+                        "{} || {}",
+                        facet_ne_predicate(name, &facet.values[i]),
+                        facet_ne_predicate(name, &facet.values[j])
+                    ));
+                }
+            }
+        } else if facet.values.len() == 1 {
+            out.push(facet_eq_predicate(name, &facet.values[0]));
+        } else if facet.values.len() >= 2 {
+            let args: Vec<String> = facet
+                .values
+                .iter()
+                .map(|value| facet_eq_predicate(name, value))
+                .collect();
+            out.push(format!("exactly_one_of({})", args.join(", ")));
         }
     }
     out
@@ -557,6 +769,12 @@ fn facet_ne_predicate(name: &str, value: &str) -> String {
 /// chain into `out`, in override order then nested-override order. Mirrors the
 /// legacy `register_parameter_conditions` traversal so the product `.ccm`
 /// reflects exactly the conditions the selection model already understood.
+/// Harvest a parameter's override-chain `condition`s, in override order,
+/// recursing into nested payloads.
+///
+/// Every condition on an override block is an inclusion selector: it selects
+/// which value the override contributes, and asserts nothing about which models
+/// are valid (configflux-9xxq / ADR-0054 §5.1).
 fn collect_parameter_conditions(parameter: &Parameter, out: &mut Vec<String>) {
     for override_block in &parameter.overrides {
         out.push(override_block.condition.clone());
@@ -574,6 +792,7 @@ pub fn verify_ir_dir(output_dir: impl AsRef<Path>) -> Result<()> {
     let mut components: HashMap<String, Component> = HashMap::new();
     let mut artifacts: HashMap<String, schema::Artifact> = HashMap::new();
     let mut facets: HashMap<String, schema::Facet> = HashMap::new();
+    let mut constraints: HashMap<String, schema::Constraint> = HashMap::new();
 
     for chunk_ref in &index.chunks {
         let chunk_path = output_dir.join(format!("chunk-{}.cfir", chunk_ref.chunk_hash));
@@ -599,130 +818,21 @@ pub fn verify_ir_dir(output_dir: impl AsRef<Path>) -> Result<()> {
                 bail!("Facet '{}' is declared in more than one chunk", id);
             }
         }
+        for (id, constraint) in chunk.constraints {
+            if constraints.insert(id.clone(), constraint).is_some() {
+                bail!("Duplicate constraint '{}' appears across chunks", id);
+            }
+        }
     }
 
     validate_definition_inheritance(&definitions)?;
     validate_component_dependencies(&components)?;
     validate_facets(&facets, &components, &definitions)?;
+    validate_constraints(&constraints, &facets)?;
 
     Ok(())
 }
 
 #[cfg(test)]
-mod facet_synthesis_tests {
-    use super::*;
-
-    fn facet(values: &[&str], open: bool) -> schema::Facet {
-        schema::Facet {
-            values: values.iter().map(|v| v.to_string()).collect(),
-            default: None,
-            open,
-            doc: None,
-        }
-    }
-
-    fn declared<'a>(pairs: &'a [(&str, &'a schema::Facet)]) -> BTreeMap<String, &'a schema::Facet> {
-        pairs.iter().map(|(n, f)| (n.to_string(), *f)).collect()
-    }
-
-    #[test]
-    fn closed_facet_introduces_each_declared_value_in_declared_order() {
-        // Amendment 1: symbol-introduction only. Declared order (eu, us, apac)
-        // is preserved verbatim — NOT sorted — so the emitted symbols are a pure
-        // function of the declaration. No `exactly_one_of`, no constraint.
-        let region = facet(&["eu", "us", "apac"], false);
-        let clauses = synthesize_facet_clauses(&declared(&[("region", &region)]));
-        assert_eq!(
-            clauses,
-            vec![
-                "region == 'eu' || region != 'eu'".to_string(),
-                "region == 'us' || region != 'us'".to_string(),
-                "region == 'apac' || region != 'apac'".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn single_value_closed_facet_introduces_its_lone_value() {
-        let mode = facet(&["only"], false);
-        let clauses = synthesize_facet_clauses(&declared(&[("mode", &mode)]));
-        assert_eq!(clauses, vec!["mode == 'only' || mode != 'only'".to_string()]);
-    }
-
-    #[test]
-    fn open_facet_introduces_declared_values_without_at_most_one() {
-        // Amendment 1: open facets are handled identically to closed — symbol
-        // introduction only, no AMO. Condition-referenced-but-undeclared values
-        // enter the symbol universe via the authored clauses, not here, so the
-        // synthesized output depends only on the declared values.
-        let env = facet(&["prod", "staging"], true);
-        let clauses = synthesize_facet_clauses(&declared(&[("env", &env)]));
-        assert_eq!(
-            clauses,
-            vec![
-                "env == 'prod' || env != 'prod'".to_string(),
-                "env == 'staging' || env != 'staging'".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn single_value_open_facet_emits_symbol_introducing_tautology() {
-        let flag = facet(&["on"], true);
-        let clauses = synthesize_facet_clauses(&declared(&[("flag", &flag)]));
-        assert_eq!(clauses, vec!["flag == 'on' || flag != 'on'".to_string()]);
-    }
-
-    #[test]
-    fn multiple_facets_emit_in_facet_name_ascending_order() {
-        let region = facet(&["eu", "us"], false);
-        let tier = facet(&["free", "paid"], false);
-        // Insertion order (tier, region) is irrelevant: the BTreeMap key order
-        // (region < tier) is the emission order; values keep declared order.
-        let clauses =
-            synthesize_facet_clauses(&declared(&[("tier", &tier), ("region", &region)]));
-        assert_eq!(
-            clauses,
-            vec![
-                "region == 'eu' || region != 'eu'".to_string(),
-                "region == 'us' || region != 'us'".to_string(),
-                "tier == 'free' || tier != 'free'".to_string(),
-                "tier == 'paid' || tier != 'paid'".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn value_with_single_quote_falls_back_to_double_quotes() {
-        let odd = facet(&["a'b", "c"], false);
-        let clauses = synthesize_facet_clauses(&declared(&[("odd", &odd)]));
-        assert_eq!(
-            clauses,
-            vec![
-                "odd == \"a'b\" || odd != \"a'b\"".to_string(),
-                "odd == 'c' || odd != 'c'".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn no_declared_facets_synthesizes_nothing() {
-        let clauses = synthesize_facet_clauses(&BTreeMap::new());
-        assert!(clauses.is_empty());
-    }
-
-    #[test]
-    fn synthesized_clauses_reparse_under_the_condition_grammar() {
-        // The synthesized strings must round-trip through the same parser the
-        // emitter uses (parse_clauses), or the compile would fail downstream.
-        let region = facet(&["eu", "us", "apac"], false);
-        let env = facet(&["prod"], true);
-        let clauses = synthesize_facet_clauses(&declared(&[("region", &region), ("env", &env)]));
-        for clause in &clauses {
-            assert!(
-                parse_condition_expr(clause).is_ok(),
-                "synthesized clause must parse: {clause}"
-            );
-        }
-    }
-}
+#[path = "compiler_core_tests.rs"]
+mod compiler_core_tests;

@@ -21,6 +21,8 @@ mod explain;
 mod options;
 mod pipeline;
 mod render;
+#[cfg(test)]
+mod tests;
 
 use std::ffi::OsString;
 use std::io::Write;
@@ -194,19 +196,15 @@ fn render_parse_error<W: Write, E: Write>(err: clap::Error, stdout: &mut W, stde
 }
 
 fn run_resolve<W: Write, E: Write>(args: ResolveArgs, stdout: &mut W, stderr: &mut E) -> u8 {
+    let file = args.selection_file.as_deref();
     let selects = match parse_selects(&args.select) {
         Ok(pairs) => pairs,
-        Err(err) => return emit_error(err, &args.model, &args.select, stderr),
+        Err(err) => return emit_error(err, &args.model, file, &args.select, stderr),
     };
 
-    let outcome = match pipeline::run(
-        &args.model,
-        args.selection_file.as_deref(),
-        &selects,
-        &args.out,
-    ) {
+    let outcome = match pipeline::run(&args.model, file, &selects, &args.out) {
         Ok(outcome) => outcome,
-        Err(err) => return emit_error(err, &args.model, &args.select, stderr),
+        Err(err) => return emit_error(err, &args.model, file, &args.select, stderr),
     };
 
     let render_result = match args.format {
@@ -217,14 +215,15 @@ fn run_resolve<W: Write, E: Write>(args: ResolveArgs, stdout: &mut W, stderr: &m
 }
 
 fn run_options<W: Write, E: Write>(args: OptionsArgs, stdout: &mut W, stderr: &mut E) -> u8 {
+    let file = args.selection_file.as_deref();
     let selects = match parse_selects(&args.select) {
         Ok(pairs) => pairs,
-        Err(err) => return emit_error(err, &args.model, &args.select, stderr),
+        Err(err) => return emit_error(err, &args.model, file, &args.select, stderr),
     };
 
-    let outcome = match options::run(&args.model, args.selection_file.as_deref(), &selects) {
+    let outcome = match options::run(&args.model, file, &selects) {
         Ok(outcome) => outcome,
-        Err(err) => return emit_error(err, &args.model, &args.select, stderr),
+        Err(err) => return emit_error(err, &args.model, file, &args.select, stderr),
     };
 
     let render_result = match args.format {
@@ -235,12 +234,13 @@ fn run_options<W: Write, E: Write>(args: OptionsArgs, stdout: &mut W, stderr: &m
 }
 
 fn run_explain<W: Write, E: Write>(args: ExplainArgs, stdout: &mut W, stderr: &mut E) -> u8 {
+    let file = args.selection_file.as_deref();
     let selects = match parse_selects(&args.select) {
         Ok(pairs) => pairs,
-        Err(err) => return emit_error(err, &args.model, &args.select, stderr),
+        Err(err) => return emit_error(err, &args.model, file, &args.select, stderr),
     };
 
-    let result = match explain::run(&args.model, args.selection_file.as_deref(), &selects) {
+    let result = match explain::run(&args.model, file, &selects) {
         // Satisfiable — nothing to explain (exit 3, ADR-0042 §3). The distinct
         // code lets a caller tell "explained" (0) from "no conflict" (3).
         Ok(ExplainOutcome::Satisfiable) => {
@@ -256,7 +256,7 @@ fn run_explain<W: Write, E: Write>(args: ExplainArgs, stdout: &mut W, stderr: &m
             return finish(rendered, EXIT_OK, stderr);
         }
         Ok(ExplainOutcome::Explained(result)) => result,
-        Err(err) => return emit_error(err, &args.model, &args.select, stderr),
+        Err(err) => return emit_error(err, &args.model, file, &args.select, stderr),
     };
 
     // A produced explanation is exit 0 (ADR-0031 D2: a rejection is the success
@@ -277,124 +277,50 @@ fn run_explain<W: Write, E: Write>(args: ExplainArgs, stdout: &mut W, stderr: &m
     finish(render_result, if ok { EXIT_OK } else { EXIT_USAGE }, stderr)
 }
 
-/// Emit a pipeline error to stderr and return its exit code. On the
-/// unsatisfiable path (exit `3`), append the canonical guidance line pointing
-/// at `cfx explain` with the user's own selection flags (ADR-0042 §2).
+/// Rebuild the `cfx explain` command that reproduces the selection the user just
+/// had rejected.
+///
+/// EVERY input that shaped the selection must appear, or the suggestion points
+/// at a DIFFERENT one (configflux-0qk2). `--selection-file` is not optional
+/// detail: it carries the scope and the immutable context tags, neither of which
+/// any `--select` pair can express, and it may carry choices the flags never
+/// mention. Reconstructing from the flags alone yields a command that — run
+/// verbatim — either reports the refused selection satisfiable or confidently
+/// explains an unrelated failure. File first, then flags: the same precedence
+/// the verbs apply (ADR-0042 §2).
+fn explain_hint(
+    model: &std::path::Path,
+    selection_file: Option<&std::path::Path>,
+    selects: &[String],
+) -> String {
+    let mut hint = format!("cfx explain --model {}", model.display());
+    if let Some(path) = selection_file {
+        hint.push_str(&format!(" --selection-file {}", path.display()));
+    }
+    for pair in selects {
+        hint.push_str(&format!(" --select {pair}"));
+    }
+    hint
+}
+
+/// Emit a pipeline error to stderr and return its exit code: the REASON first,
+/// then — on the unsatisfiable path (exit `3`) — the canonical guidance line
+/// pointing at `cfx explain` with the user's own flags (ADR-0042 §2). The reason
+/// names the violated constraint and quotes it (ADR-0054 §6): exit 3 owes a why.
 fn emit_error<E: Write>(
     err: PipelineError,
     model: &std::path::Path,
+    selection_file: Option<&std::path::Path>,
     selects: &[String],
     stderr: &mut E,
 ) -> u8 {
+    let _ = writeln!(stderr, "cfx: {}", err.message);
     if err.unsatisfiable {
-        let mut hint = format!(
-            "selection is unsatisfiable; run: cfx explain --model {}",
-            model.display()
+        let _ = writeln!(
+            stderr,
+            "selection is unsatisfiable; run: {}",
+            explain_hint(model, selection_file, selects)
         );
-        for pair in selects {
-            hint.push_str(&format!(" --select {pair}"));
-        }
-        let _ = writeln!(stderr, "{hint}");
-    } else {
-        let _ = writeln!(stderr, "cfx: {}", err.message);
     }
     err.exit_code
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn run_args(args: &[&str]) -> (u8, String, String) {
-        let mut out = Vec::new();
-        let mut err = Vec::new();
-        let code = run(args.iter().map(|s| s.to_string()), &mut out, &mut err);
-        (
-            code,
-            String::from_utf8(out).unwrap(),
-            String::from_utf8(err).unwrap(),
-        )
-    }
-
-    #[test]
-    fn no_subcommand_is_usage_error() {
-        let (code, _out, _err) = run_args(&["cfx"]);
-        assert_eq!(code, EXIT_USAGE);
-    }
-
-    #[test]
-    fn help_is_success() {
-        let (code, out, _err) = run_args(&["cfx", "--help"]);
-        assert_eq!(code, EXIT_OK);
-        assert!(out.contains("resolve"));
-        assert!(out.contains("options"), "help must list the options verb: {out}");
-        assert!(out.contains("explain"), "help must list the explain verb: {out}");
-    }
-
-    #[test]
-    fn explain_malformed_select_is_usage_error_naming_arg() {
-        let (code, _out, err) = run_args(&[
-            "cfx", "explain", "--model", "/nonexistent/cmp.json", "--select", "bogus",
-        ]);
-        assert_eq!(code, EXIT_USAGE);
-        assert!(err.contains("bogus"), "stderr must name the bad arg: {err}");
-    }
-
-    #[test]
-    fn explain_missing_model_file_is_usage_error() {
-        let (code, _out, err) = run_args(&[
-            "cfx",
-            "explain",
-            "--model",
-            "/nonexistent/cmp.manifest.json",
-        ]);
-        assert_eq!(code, EXIT_USAGE);
-        assert!(err.starts_with("cfx:"), "stderr: {err}");
-    }
-
-    #[test]
-    fn options_malformed_select_is_usage_error_naming_arg() {
-        let (code, _out, err) = run_args(&[
-            "cfx", "options", "--model", "/nonexistent/cmp.json", "--select", "bogus",
-        ]);
-        assert_eq!(code, EXIT_USAGE);
-        assert!(err.contains("bogus"), "stderr must name the bad arg: {err}");
-    }
-
-    #[test]
-    fn options_missing_model_file_is_usage_error() {
-        let (code, _out, err) = run_args(&[
-            "cfx",
-            "options",
-            "--model",
-            "/nonexistent/cmp.manifest.json",
-        ]);
-        assert_eq!(code, EXIT_USAGE);
-        assert!(err.starts_with("cfx:"), "stderr: {err}");
-    }
-
-    #[test]
-    fn malformed_select_is_usage_error_naming_arg() {
-        let (code, _out, err) = run_args(&[
-            "cfx", "resolve", "--model", "/nonexistent/cmp.json", "--out", "/tmp/x", "--select",
-            "bogus",
-        ]);
-        assert_eq!(code, EXIT_USAGE);
-        assert!(err.contains("bogus"), "stderr must name the bad arg: {err}");
-    }
-
-    #[test]
-    fn missing_model_file_is_usage_error() {
-        let dir = std::env::temp_dir().join(format!("cfx-test-{}", std::process::id()));
-        let (code, _out, err) = run_args(&[
-            "cfx",
-            "resolve",
-            "--model",
-            "/nonexistent/cmp.manifest.json",
-            "--out",
-            dir.to_str().unwrap(),
-        ]);
-        assert_eq!(code, EXIT_USAGE);
-        assert!(err.starts_with("cfx:"), "stderr: {err}");
-    }
 }

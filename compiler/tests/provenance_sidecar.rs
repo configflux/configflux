@@ -19,7 +19,6 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use compiler::product_api::{
     compile_model, CompileModelRequest, OperationStatus, SourceManifestEntry,
@@ -163,16 +162,11 @@ fn stamp_time_adds_only_stamped_at_and_leaves_artifacts_unchanged() {
     fs::remove_dir_all(&stamped).ok();
 }
 
+// Collision-proof temp-dir naming shared across the compiler integration
+// tests; see `temp_dirs.rs` (configflux-rvpb).
+#[path = "temp_dirs.rs"]
+mod temp_dirs;
+
 fn tempdir_for(test_name: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock after epoch")
-        .as_nanos();
-    let base = std::env::temp_dir().join(format!(
-        "configflux-compiler-{test_name}-{}-{nanos}",
-        std::process::id()
-    ));
-    let _ = fs::remove_dir_all(&base);
-    fs::create_dir_all(&base).expect("mkdir tempdir");
-    base
+    temp_dirs::unique_temp_dir("configflux-compiler", test_name)
 }

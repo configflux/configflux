@@ -2,11 +2,17 @@
 
 use std::collections::VecDeque;
 
+/// registry: cause = the sync transport did not receive a response within its deadline; remedy = retry the operation, since this condition is transient; a persistent timeout points at network latency or an unresponsive backend rather than the request
 pub const E_RUNTIME_SYNC_TIMEOUT: &str = "E_RUNTIME_SYNC_TIMEOUT";
+/// registry: cause = the sync transport link is down, or an update was requested while the backend is marked disconnected; remedy = restore connectivity and retry; a session may keep serving its committed configuration while disconnected, so this does not by itself invalidate local state
 pub const E_RUNTIME_SYNC_TRANSPORT_DISCONNECTED: &str = "E_RUNTIME_SYNC_TRANSPORT_DISCONNECTED";
+/// registry: cause = the transport received a payload it could not interpret, or a configuration or leaf hash field is not a 64-character hexadecimal digest; remedy = check that hash-shaped fields carry full digests, and that both ends of the link run compatible versions; unlike a timeout, this is not worth retrying unchanged
 pub const E_RUNTIME_SYNC_PAYLOAD_INVALID: &str = "E_RUNTIME_SYNC_PAYLOAD_INVALID";
+/// registry: cause = the sync transport failed for a reason it does not attribute to the link, the payload, or the deadline; remedy = report this with the transport configuration in use; retrying an unchanged request is not expected to help
 pub const E_RUNTIME_SYNC_INTERNAL: &str = "E_RUNTIME_SYNC_INTERNAL";
+/// registry: cause = a non-blocking publish was refused because the transport's outbound queue is already at its configured depth; remedy = let the queue drain and retry, or raise the configured queue depth if the publish rate is legitimately higher than the link can carry
 pub const E_RUNTIME_SYNC_BACKPRESSURE: &str = "E_RUNTIME_SYNC_BACKPRESSURE";
+/// registry: cause = the sync transport's credentials were rejected when connecting to the backend; remedy = check that the credentials are correct, current, and authorized for this device, then reconnect; retrying with the same rejected credentials will not succeed
 pub const E_RUNTIME_SECURITY_AUTHN_FAILED: &str = "E_RUNTIME_SECURITY_AUTHN_FAILED";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

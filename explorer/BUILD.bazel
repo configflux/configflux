@@ -1,0 +1,47 @@
+# Model explorer — static, local, read-only UI (ADR-0043). No build step ships
+# the app itself (the files in this directory ARE what runs). The only Bazel
+# target is the hermetic fixture-schema guard, wired into `//...`.
+#
+# The Playwright smoke suite (//tools:explorer_smoke_test.py) is deliberately
+# NOT a Bazel target — browser-in-sandbox hermeticity (ADR-0043 §4). It is an
+# on-demand dev/release check, run per the flip checklist.
+
+package(default_visibility = ["//visibility:private"])
+
+# configflux-2awb.9 / UI-1: assert every committed explorer fixture is valid
+# JSON at the current product schema version, and that the explorer's JS
+# SUPPORTED_VERSIONS constant agrees. Pure-JSON check — no browser, no network,
+# no pipeline build — so it is cheap enough for the per-change gate.
+#
+# The //compiler:src/product_api.rs data dep is what makes the guard bite
+# (configflux-hcex): the test reads PRODUCT_SCHEMA_VERSION out of that file
+# instead of restating it, and the dep edge is what makes Bazel re-run the test
+# when it moves. Without it the result stays cached PASSED across a bump.
+#
+# //compiler:tests/fixtures/byte-stability-baselines.json is there for the same
+# reason (configflux-6zvh): the test pins s1-resolve-snapshot.json's authentic
+# resolve_hash to the s1-smoke baseline, so a rotation that moves the baseline
+# and forgets the explorer fixture must re-run this test and fail. Without the
+# dep edge that rotation leaves it cached PASSED and the coupling unenforced.
+#
+# js/explain_view.js joins js/schema.js in the glob for the third instance of
+# that same argument (configflux-tv5h): the test reads renderConstraint's
+# wording out of the source and asserts it matches what
+# interpreter/src/explain_renderer.rs prints for an attributed clause, so an
+# edit to the renderer must re-run this test. Without the dep edge a wording
+# regression stays cached PASSED.
+py_test(
+    name = "fixture_schema_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["fixture_schema_test.py"],
+    data = glob([
+        "fixtures/*.json",
+        "js/explain_view.js",
+        "js/schema.js",
+    ]) + [
+        "//compiler:src/product_api.rs",
+        "//compiler:tests/fixtures/byte-stability-baselines.json",
+    ],
+    imports = ["."],
+)

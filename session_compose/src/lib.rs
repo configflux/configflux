@@ -48,11 +48,12 @@
 // the canonical diagnostic bytes), which is byte-fidelity, not fallback.
 
 use compiler::loader_api::{
-    apply_selection, canonical_selection_state, explain_rejection, get_selection_options,
-    resolve_from_selection, ApplySelectionRequest, ApplySelectionResult, ConflictingConstraint,
-    ConstraintFacet, ConstraintKind, ExplainRejectionRequest, ExplainRejectionResult,
-    GetSelectionOptionsRequest, GetSelectionOptionsResult, RejectionReason,
-    ResolveFromSelectionRequest, ResolveResult, SelectionState, UnsatCore,
+    apply_selection, attribute_core_clauses, canonical_selection_state, explain_rejection,
+    get_selection_options, resolve_from_selection, ApplySelectionRequest, ApplySelectionResult,
+    ConstraintFacet, ConstraintKind, CoreClause, DeclaredConstraint,
+    ExplainRejectionRequest, ExplainRejectionResult, GetSelectionOptionsRequest,
+    GetSelectionOptionsResult, RejectionReason, ResolveFromSelectionRequest, ResolveResult,
+    SelectionState, UnsatCore,
     E_LOADER_INDEX_INVALID, E_LOADER_UNSUPPORTED_SCHEMA_VERSION, E_RESOLVE_SOLVER_MODEL_UNAVAILABLE,
     E_SELECTION_ENGINE_DIVERGENCE, E_SELECTION_SOLVER_MODEL_UNAVAILABLE, E_SELECTION_STATE_INVALID,
     E_SELECTION_UNSATISFIABLE,
@@ -61,10 +62,10 @@ use compiler::product_api::{
     Diagnostic, DiagnosticSeverity, DiagnosticsReport, OperationStatus, PRODUCT_SCHEMA_VERSION,
 };
 use solver::{
-    CoreConstraintKind, CuddBackend, LabeledAtom, LabeledConstraint, LabeledCore,
+    ConstraintRef, CoreConstraintKind, CuddBackend, LabeledAtom, LabeledConstraint, LabeledCore,
     RejectionExplanation, Session,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 /// A single diagnostic in the given selection-family code, wrapped in the
@@ -242,11 +243,29 @@ pub fn options(request: GetSelectionOptionsRequest) -> GetSelectionOptionsResult
         }
     };
 
-    // Pruned reasons are a legacy-only convenience; when requested, take the
-    // legacy envelope and override only the valid_options decision with the
-    // solver's (byte-identical by construction — belt and braces).
+    // Pruned reasons are a legacy-only convenience. Override `valid_options` with
+    // the solver's decision as usual, but the legacy `pruned_options` list is the
+    // compiler's `domain − compiler_valid_set`, and the compiler UNDER-reports an
+    // override-gated facet (configflux-z1hj: on S1 `cooling_model` under
+    // `cooling_brand=hydra` the compiler narrows to `["x200"]` while the solver
+    // holds the authoritative `["a9","x200"]`). Emitting it verbatim would report
+    // an option as BOTH valid and pruned — a self-contradictory `--format json`
+    // envelope (configflux-zdf1). Recompute `pruned_options` against the solver's
+    // valid set (drop options the solver holds valid): the solver is the authority
+    // this path already defers to (ADR-0017 §4 / ADR-0030), staying inside the one
+    // seam allowed to consult both engines (ADR-0003 §2) — no solver logic rebuilt
+    // in the compiler. Genuinely-pruned reasons/order are untouched (byte-stable).
     if request.include_pruned_reasons {
-        let legacy = get_selection_options(request);
+        let mut legacy = get_selection_options(request);
+        if let Some(reasons) = legacy.pruned_options.take() {
+            let solver_valid: BTreeSet<&str> = valid_options.iter().map(String::as_str).collect();
+            legacy.pruned_options = Some(
+                reasons
+                    .into_iter()
+                    .filter(|pruned| !solver_valid.contains(pruned.option.as_str()))
+                    .collect(),
+            );
+        }
         return GetSelectionOptionsResult {
             valid_options,
             ..legacy
@@ -635,6 +654,11 @@ pub fn explain(request: ExplainRejectionRequest) -> ExplainRejectionResult {
         }
     };
 
+    // The declared-constraint roster the artifact itself carries (ADR-0054
+    // §5.4). Read from the loaded `.ccm`, not from the model sources, so the
+    // ids named in a core are the ids of the artifact that produced it.
+    let roster = session.ccm().constraint_roster();
+
     match session.explain_rejection(&facet, &option) {
         // Genuine conflict: the solver produced a labeled MUS. Map it onto the
         // compiler `UnsatCore` and report the successful query (ADR-0031 D2/D3).
@@ -646,7 +670,7 @@ pub fn explain(request: ExplainRejectionRequest) -> ExplainRejectionResult {
             request.scope,
             facet,
             option,
-            labeled_core_to_unsat_core(core),
+            labeled_core_to_unsat_core(core, &roster),
         ),
         // Defensive: a conflict with no core is an internal inconsistency (the
         // core is present iff the code is a genuine conflict, ADR-0031 D3). Fail
@@ -689,14 +713,40 @@ pub fn explain(request: ExplainRejectionRequest) -> ExplainRejectionResult {
 /// here. Every atom is already a symbol-table label (an unmappable variable is a
 /// solver-side fail-closed `Err`, never reaching here), so no raw BDD/batsat
 /// index can appear in the output — the D3 schema invariant.
-fn labeled_core_to_unsat_core(core: LabeledCore) -> UnsatCore {
+///
+/// `roster` is the model's declared-constraint roster from the top-level
+/// `ccm.manifest.json` (ADR-0054 §5.4). It is what gives the core clause
+/// identity the BDD root cannot: `attribute_core_clauses` names the authored
+/// constraint each model clause violates, and reports a core that reduces to
+/// synthesized cardinality as the model being over-constrained rather than
+/// borrowing a constraint id it did not earn.
+///
+/// **Public because it is the ONE conversion (configflux-ykae).** The runtime
+/// binary's `explain-rejection` composes its own {parameter, value} envelope but
+/// must carry the same core inside it as `cfx` and the interpreter do. It used
+/// to convert the labeled MUS with a private copy of this function, which drifted
+/// — the copy glossed a model clause `blocked by model rule over ...` where this
+/// one says `blocked by constraint <id>: <condition>`, and it could not attribute
+/// at all because it never read the roster. Both surfaces now call this; there is
+/// no second implementation to drift.
+pub fn labeled_core_to_unsat_core(core: LabeledCore, roster: &[ConstraintRef]) -> UnsatCore {
+    let clauses: Vec<CoreClause> = core
+        .conflicting_constraints
+        .iter()
+        .map(constraint_to_core_clause)
+        .collect();
+    let declared: Vec<DeclaredConstraint> = roster
+        .iter()
+        .map(|entry| DeclaredConstraint {
+            id: entry.id.clone(),
+            condition: entry.condition.clone(),
+            root_index: entry.root_index,
+        })
+        .collect();
+    let rejected = atom_to_facet(&core.rejected);
     UnsatCore {
-        rejected: atom_to_facet(&core.rejected),
-        conflicting_constraints: core
-            .conflicting_constraints
-            .iter()
-            .map(constraint_to_conflicting)
-            .collect(),
+        conflicting_constraints: attribute_core_clauses(&clauses, &rejected, &declared),
+        rejected,
         minimal: core.minimal,
         // Fixed advisory string acknowledging non-uniqueness (ADR-0031 D3): MUS
         // extraction returns *a* minimal explanation, not *the* canonical one.
@@ -704,15 +754,26 @@ fn labeled_core_to_unsat_core(core: LabeledCore) -> UnsatCore {
     }
 }
 
-/// Convert one solver `LabeledConstraint` into the compiler-side
-/// `ConflictingConstraint`, synthesizing the advisory `summary` gloss (ADR-0031
-/// D3: advisory text, not a parsed field). The JSON→text presentation renderer
-/// is a separate, layered concern (configflux-9d28 / ADR-0031 D5).
-fn constraint_to_conflicting(constraint: &LabeledConstraint) -> ConflictingConstraint {
-    ConflictingConstraint {
+/// Convert one solver `LabeledConstraint` into the solver-agnostic
+/// `CoreClause` the compiler-side attribution consumes, carrying the signed
+/// forbidden assignment (`LabeledConstraint::forbidden`) that makes the
+/// ADR-0054 §5.4 mapping possible.
+///
+/// The `summary` here is the caller's advisory gloss (ADR-0031 D3: advisory
+/// text, not a parsed field) and survives only for a `Selection`; a
+/// `ModelRule`'s gloss is derived by the attribution from the declared
+/// constraint it names. The JSON→text presentation renderer is a separate,
+/// layered concern (configflux-9d28 / ADR-0031 D5).
+fn constraint_to_core_clause(constraint: &LabeledConstraint) -> CoreClause {
+    CoreClause {
         kind: kind_to_constraint_kind(constraint.kind),
         facets: constraint.atoms.iter().map(atom_to_facet).collect(),
         summary: summarize_constraint(constraint),
+        forbidden: constraint
+            .forbidden
+            .iter()
+            .map(|literal| (atom_to_facet(&literal.atom), literal.asserted))
+            .collect(),
     }
 }
 
@@ -730,9 +791,12 @@ fn summarize_constraint(constraint: &LabeledConstraint) -> String {
         CoreConstraintKind::Selection => {
             format!("blocked by your earlier choice: {}", atoms.join(", "))
         }
-        CoreConstraintKind::ModelRule => {
-            format!("blocked by model rule relating: {}", atoms.join(", "))
-        }
+        // A model clause's gloss is replaced by `attribute_core_clauses` with
+        // either the declared constraint's condition text or the
+        // model-over-constrained sentence, so this is a fallback only. It no
+        // longer embeds "blocked by model rule", which the renderer already
+        // prefixes — that duplication was configflux-hdgn.
+        CoreConstraintKind::ModelRule => format!("relating {}", atoms.join(", ")),
     }
 }
 

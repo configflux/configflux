@@ -1,5 +1,5 @@
 {
-  "format_version": 2,
+  "format_version": 3,
   "chunk_count": 2,
   "source_ids": [
     "scenarios/s5_building_hvac/smoke/chunks/00_definitions.toml",

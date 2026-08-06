@@ -1,6 +1,28 @@
 
 # cargo-vet audits file
 
+[[audits.alloca]]
+criteria = "safe-to-deploy"
+version = "0.4.0"
+notes = """
+Reviewed under configflux-xowl.7 (converting the blanket safe-to-deploy exemption
+to a real audit; raw-alloc/pointer cluster). Purpose: mostly-safe stack allocation
+via the standard alloca-trampoline pattern. The bundled C shim was read in full
+(alloca.c, 15 lines): c_with_alloca(size, callback, data) allocates via a C99 VLA
+(uint8_t buffer[size]) on non-MSVC or _alloca on MSVC and invokes the callback with
+that stack pointer, so the memory is valid only for the callback's duration — which
+the Rust API enforces through the closure boundary. build.rs only cc-compiles that
+shim (no network, no codegen, no downloads). The FFI surface is one function over
+the "C-unwind" ABI (the correct choice so a Rust-side panic does not cross a plain
+"C" frame as UB). Rust unsafe is limited to the FFI decl, slice::from_raw_parts_mut
+over the correctly-sized region, ManuallyDrop::take of the closure, and alignment
+fixup in alloca<T>. Documented misuse caveats (allocating more than the thread stack
+size faults; the pointer must not escape the closure) are inherent properties of
+alloca, not defects. MIT, single maintainer (playXE/alloca-rs). This certification
+covers supply-chain safety and the correctness/minimality of the unsafe+FFI, not
+immunity to caller misuse.
+"""
+
 [[audits.anyhow]]
 criteria = "safe-to-deploy"
 version = "1.0.101"
@@ -37,6 +59,44 @@ notes = "Reviewed in dep-audit-v0.3.0.md Section 4.1 #10. Verdict: KEEP. rust-la
 criteria = "safe-to-deploy"
 version = "0.4.3"
 notes = "Reviewed in dep-audit-v0.3.0.md Section 4.1 #3. Verdict: KEEP. Tiny surface area, stable for years. 0 CVEs."
+
+[[audits.hugealloc]]
+criteria = "safe-to-deploy"
+version = "0.1.1"
+notes = """
+Reviewed under configflux-xowl.7 (raw-alloc/pointer cluster). Hugepage-aware
+allocator from the OxiDD project (MIT OR Apache-2.0). No build.rs, no bundled C or
+asm; 263 lines, fully reviewed. It implements allocator_api2::alloc::Allocator by
+delegating to the global allocator (alloc / alloc_zeroed / dealloc / realloc) and,
+on unix for sufficiently large allocations, issuing a single
+libc::madvise(_, _, MADV_HUGEPAGE) hint whose return value is intentionally ignored
+(a hint cannot corrupt memory). Dependencies are all already trusted (allocator-api2,
+sptr, libc — default-features off). The crate sets #![deny(unsafe_op_in_unsafe_fn)];
+its unsafe is standard Allocator-trait-contract code plus NonNull::new_unchecked over
+global-alloc results and write_bytes zeroing of grown tails — no FFI beyond the
+madvise hint and no ambient authority. 0.1.1, single-project provenance (OxiDD) noted.
+"""
+
+[[audits.libsqlite3-sys]]
+criteria = "safe-to-deploy"
+version = "0.37.0"
+notes = """
+Reviewed under configflux-xowl.7 (SQLite FFI cluster reaching the native relay;
+rusqlite 0.39 pins this with features=["bundled"]). Bounded audit with scope stated
+explicitly. build.rs (824 lines) reviewed: with the `bundled` feature it cc-compiles
+the vendored upstream SQLite amalgamation (sqlite3/sqlite3.c) and copies the
+PRE-GENERATED bindgen bindings (bindgen_bundled_version.rs) into OUT_DIR; without it,
+it locates a system library via pkg-config/vcpkg. It reads standard build knobs from
+the environment (SQLITE_MAX_*, LIBSQLITE3_FLAGS, link prefs) and performs NO network
+access and NO untrusted codegen — buildtime_bindgen (runtime bindgen) is off by
+default and unused here. The Rust FFI is mechanical, pre-generated bindgen (extern "C"
+declarations), not hand-written unsafe logic. The vendored sqlite3.c is the canonical
+upstream SQLite amalgamation; it is trusted by ubiquity, covered by the enforced
+cargo-deny advisory check, and is explicitly NOT line-audited here — the safe-to-deploy
+verdict rests on rusqlite-org stewardship (multi-contributor, 0 CVEs on the sys crate),
+the mechanical bindgen FFI, and the reviewed build script. The sibling sqlcipher
+amalgamation is not enabled by our feature set.
+"""
 
 [[audits.nom-kconfig]]
 criteria = "safe-to-deploy"
@@ -86,7 +146,43 @@ criteria = "safe-to-deploy"
 version = "0.10.9"
 notes = "Reviewed in dep-audit-v0.3.0.md Section 4.1 #7. Verdict: PIN at 0.10.x. RustCrypto working group. 0 CVEs. Version ceiling tracked in FU-5."
 
+[[audits.sptr]]
+criteria = "safe-to-deploy"
+version = "0.3.2"
+notes = """
+Reviewed under configflux-xowl.7 (raw-alloc/pointer cluster). sptr is the strict
+provenance polyfill by Aria Beingessner (Gankra); its API (addr / with_addr /
+map_addr / without_provenance, expose / from_exposed) is the reference design that
+was subsequently stabilized into the standard library. MIT OR Apache-2.0, no-std
+(core only), ZERO dependencies, no build.rs. ~1200 lines, fully reviewed: the only
+unsafe is core::mem::transmute / transmute_copy for pointer<->integer and fn-pointer
+conversions, each carrying a SAFETY comment and deliberately using transmute over
+casts so Miri can track provenance. No FFI, no asm, no ambient capabilities. Among
+the safest crates in the ecosystem to certify.
+"""
+
 [[audits.toml]]
 criteria = "safe-to-deploy"
 version = "0.9.12+spec-1.1.0"
 notes = "Reviewed in dep-audit-v0.3.0.md Section 4.1 #8. Verdict: PIN at 0.9.x. Multi-contributor org. 0 CVEs. Version ceiling tracked in FU-6."
+
+[[audits.zmij]]
+criteria = "safe-to-deploy"
+version = "1.0.21"
+notes = """
+Reviewed under configflux-xowl.7 (priority-1: the serde_json float path). The blanket
+exemption is converted to a real audit specifically because zmij is a dtolnay crate
+first published Dec 2025 that sits under the most-used serialization path — recency
+plus criticality warrant a documented review rather than a rubber stamp. zmij is a
+double-to-string formatter (Schubfach/yy algorithm; its tests compare against ryu),
+MIT, no-std / no-alloc, authored by David Tolnay (github.com/dtolnay/zmij). build.rs
+reviewed: it only runs `rustc --version` to detect the compiler minor version and
+emits cfg / check-cfg flags (the standard dtolnay/autocfg pattern) — no network, no fs
+writes, no arbitrary exec. The crate sets #![deny(unsafe_op_in_unsafe_fn)]; its unsafe
+is entirely self-contained numeric work: bounds-guaranteed lookups into internal static
+tables, raw *mut u8 digit writes into a caller buffer sized by the algorithm's
+max-digit bound, same-size SIMD transmutes (const _mm_set_* helpers), and EMPTY asm!
+blocks used purely as optimization barriers (no memory operands, no side effects). No
+FFI to external libraries and no ambient capabilities; the only optional dependency is
+no-panic (dtolnay's compile-time panic-freedom checker). Clean safe-to-deploy.
+"""

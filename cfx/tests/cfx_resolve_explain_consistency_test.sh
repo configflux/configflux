@@ -35,7 +35,8 @@ require_var() {
 
 for v in \
   COMPILER_RLOCATION CFX_RLOCATION \
-  S1_DEFS_RLOCATION S1_COMPONENTS_RLOCATION; do
+  S1_DEFS_RLOCATION S1_COMPONENTS_RLOCATION \
+  HERO_DEFS_RLOCATION HERO_COMPONENTS_RLOCATION; do
   require_var "${v}"
 done
 
@@ -43,6 +44,8 @@ export COMPILER="$(resolve "${COMPILER_RLOCATION}")"
 export CFX="$(resolve "${CFX_RLOCATION}")"
 export S1_DEFS="$(resolve "${S1_DEFS_RLOCATION}")"
 export S1_COMPONENTS="$(resolve "${S1_COMPONENTS_RLOCATION}")"
+export HERO_DEFS="$(resolve "${HERO_DEFS_RLOCATION}")"
+export HERO_COMPONENTS="$(resolve "${HERO_COMPONENTS_RLOCATION}")"
 
 HELPER="$(resolve "cfx/tests/cfx_resolve_explain_consistency.py")"
 exec python3 -u "${HELPER}"

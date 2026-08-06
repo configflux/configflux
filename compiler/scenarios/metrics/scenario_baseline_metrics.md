@@ -1,6 +1,6 @@
-# Loop 0 Baseline Metrics (S1 Smoke)
+# Scenario Baseline Metrics (S1 Smoke)
 
-These baseline numbers are recorded from the Loop 0 smoke closed-loop command path.
+These baseline numbers are recorded from the scenario smoke closed-loop command path.
 
 ## Command
 - `bazel test //compiler:scenario_smoke_test`
@@ -13,7 +13,7 @@ These baseline numbers are recorded from the Loop 0 smoke closed-loop command pa
 
 ## Metrics
 - Bazel elapsed wall-clock: `0.334s` (Invocation `3bd1fe96-63db-4283-bcd7-f06f9c91f8ec`).
-- Closed-loop phase timings (from `loop0_s1_smoke_closed_loop_matches_goldens`):
+- Closed-loop phase timings (from `baseline_s1_smoke_closed_loop_matches_goldens`):
   - `ingest_us=916`
   - `verify_us=127`
   - `resolve_us=130`
@@ -21,4 +21,4 @@ These baseline numbers are recorded from the Loop 0 smoke closed-loop command pa
 - Process memory snapshot:
   - `rss_kib=6272`
 
-These are the Loop 0 baseline values for future smoke-regression tracking.
+These are the scenario baseline values for future smoke-regression tracking.

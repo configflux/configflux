@@ -1,0 +1,80 @@
+[
+  {
+    "schema_version": 4,
+    "status": "ok",
+    "model_hash": "a3486458bf58f77d5eb9f7b562aab9d8eaffcacdac1cbe1218c8aa0d4196c57f",
+    "scope": "all",
+    "facet": "cooling_brand",
+    "valid_options": [
+      "aeroflux",
+      "hydra"
+    ],
+    "selection_state_hash": "da6ced4bb46e22ce7b18e70e2590eefc18aa77e88ab630954f746b3247c2d406",
+    "error_count": 0,
+    "warning_count": 0,
+    "diagnostics": {
+      "schema_version": 4,
+      "diagnostics": [],
+      "error_count": 0,
+      "warning_count": 0
+    }
+  },
+  {
+    "schema_version": 4,
+    "status": "ok",
+    "model_hash": "a3486458bf58f77d5eb9f7b562aab9d8eaffcacdac1cbe1218c8aa0d4196c57f",
+    "scope": "all",
+    "facet": "cooling_model",
+    "valid_options": [
+      "a9",
+      "x200"
+    ],
+    "selection_state_hash": "da6ced4bb46e22ce7b18e70e2590eefc18aa77e88ab630954f746b3247c2d406",
+    "error_count": 0,
+    "warning_count": 0,
+    "diagnostics": {
+      "schema_version": 4,
+      "diagnostics": [],
+      "error_count": 0,
+      "warning_count": 0
+    }
+  },
+  {
+    "schema_version": 4,
+    "status": "ok",
+    "model_hash": "a3486458bf58f77d5eb9f7b562aab9d8eaffcacdac1cbe1218c8aa0d4196c57f",
+    "scope": "all",
+    "facet": "pump_type",
+    "valid_options": [
+      "dual"
+    ],
+    "selection_state_hash": "da6ced4bb46e22ce7b18e70e2590eefc18aa77e88ab630954f746b3247c2d406",
+    "error_count": 0,
+    "warning_count": 0,
+    "diagnostics": {
+      "schema_version": 4,
+      "diagnostics": [],
+      "error_count": 0,
+      "warning_count": 0
+    }
+  },
+  {
+    "schema_version": 4,
+    "status": "ok",
+    "model_hash": "a3486458bf58f77d5eb9f7b562aab9d8eaffcacdac1cbe1218c8aa0d4196c57f",
+    "scope": "all",
+    "facet": "region",
+    "valid_options": [
+      "eu"
+    ],
+    "selection_state_hash": "da6ced4bb46e22ce7b18e70e2590eefc18aa77e88ab630954f746b3247c2d406",
+    "error_count": 0,
+    "warning_count": 0,
+    "diagnostics": {
+      "schema_version": 4,
+      "diagnostics": [],
+      "error_count": 0,
+      "warning_count": 0
+    }
+  }
+]

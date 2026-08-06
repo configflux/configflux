@@ -19,6 +19,13 @@
 # satisfiable. `--format json` emits the existing `ResolveResult` schema (the
 # resolve failure envelope), and repeated runs are byte-identical.
 #
+# The same agreement is asserted one level up, on the REMEDIATION PATH
+# (configflux-0qk2): the "run: cfx explain ..." command `cfx resolve` prints on a
+# rejection must reproduce the selection it just refused. When part of that
+# selection arrives via `--selection-file`, a hint rebuilt from the `--select`
+# flags alone describes a different selection, so the two verbs contradict each
+# other through the pointer even though each is individually correct.
+#
 # Drives the REAL compiler / cfx binaries. Binaries and fixtures come from env
 # rlocations resolved by the sh_test wrapper. Standard library only.
 
@@ -39,6 +46,44 @@ UNSAT_SELECTS = [
 SAT_SELECTS = UNSAT_SELECTS + [("region", "eu")]
 # The tag the S1 `eu_label` condition references and this selection leaves unbound.
 UNBOUND_TAG = "region"
+
+# configflux-0qk2. Each case splits a rejected selection across the two input
+# channels — part in the --selection-file, part in --select flags — so a hint
+# rebuilt from the flags alone NECESSARILY describes a different selection. The
+# two cases cover the two ways that goes wrong, and `expect` is the token the
+# suggested command must produce to prove it explained the same rejection.
+HINT_CASES = (
+    {
+        # Hero example. The file carries a CHOICE; the model's prod_forbids_debug
+        # rule needs both halves, so dropping the file leaves a satisfiable
+        # selection and the bad hint answers "nothing to explain".
+        "label": "hero/policy-constraint",
+        "model": "hero",
+        "scope": "all",
+        "context_tags": {},
+        "choices": {"log_level": "debug"},
+        "selects": [("environment", "prod")],
+        "expect": "prod_forbids_debug",
+    },
+    {
+        # S1. The file carries the SCOPE and immutable CONTEXT TAGS, which no
+        # --select pair can express. Dropping it does not make the selection
+        # satisfiable — it makes the model fail for an unrelated reason, so the
+        # bad hint confidently explains the WRONG failure.
+        "label": "s1/immutable-context-tag",
+        "model": "s1",
+        "scope": "component:thermal_control",
+        "context_tags": {
+            "cooling_brand": "hydra",
+            "cooling_model": "x200",
+            "pump_type": "dual",
+            "region": "us",
+        },
+        "choices": {},
+        "selects": [("region", "eu")],
+        "expect": "immutable",
+    },
+)
 
 EXIT_OK = 0
 EXIT_UNSAT = 3
@@ -170,6 +215,110 @@ def check_json_and_determinism(cfx, manifest):
     print("[cfx-consistency] unsat json: OK (ResolveResult schema, deterministic)")
 
 
+def write_selection_file(path, case):
+    """A SelectionState JSON carrying the case's scope, context tags and base
+    choices. cfx re-derives the hashes, so those fields are placeholders."""
+    with open(path, "w") as handle:
+        json.dump(
+            {
+                "schema_version": 4,
+                "model_hash": "",
+                "scope": case["scope"],
+                "context_tags": case["context_tags"],
+                "choices": case["choices"],
+                "selection_state_hash": "",
+            },
+            handle,
+        )
+
+
+def suggested_command(stderr):
+    """Extract the argv from the unsat guidance line's `run: ...` suffix."""
+    for line in stderr.splitlines():
+        if not line.startswith("selection is unsatisfiable"):
+            continue
+        _, marker, command = line.partition("run: ")
+        if marker:
+            return command.strip().split()
+    return None
+
+
+def check_hint_reproduces_selection(cfx, manifests, work, case):
+    """configflux-0qk2: resolve's "run: cfx explain ..." pointer must reproduce
+    the selection it just refused.
+
+    This is the resolve/explain agreement the checks above assert, at the level
+    of the REMEDIATION PATH: resolve is entitled to refuse a selection, but the
+    command it hands the user must not ask about a different one. Asserted on
+    BEHAVIOR, not on flag spelling — the suggested command is parsed out of
+    stderr and run verbatim, so any hint that reproduces the refused selection
+    passes, whichever way it encodes it."""
+    label = case["label"]
+    print(f"[cfx-consistency] hint {label}: suggested command must explain the same selection")
+
+    sel_path = os.path.join(work, f"hint_{case['model']}_selection.json")
+    write_selection_file(sel_path, case)
+    cmd = [
+        cfx,
+        "resolve",
+        "--model",
+        manifests[case["model"]],
+        "--selection-file",
+        sel_path,
+        "--out",
+        os.path.join(work, f"hint_{case['model']}_out"),
+    ]
+    for facet, option in case["selects"]:
+        cmd += ["--select", f"{facet}={option}"]
+    resolve = subprocess.run(cmd, capture_output=True, text=True)
+
+    if resolve.returncode != EXIT_UNSAT:
+        fail(
+            f"hint {label}: cfx resolve exited {resolve.returncode}, want {EXIT_UNSAT}\n"
+            f"stdout={resolve.stdout!r}\nstderr={resolve.stderr!r}"
+        )
+    if case["expect"] not in resolve.stderr:
+        fail(
+            f"hint {label}: cfx resolve must name '{case['expect']}' as the reason; "
+            f"got {resolve.stderr!r}"
+        )
+
+    argv = suggested_command(resolve.stderr)
+    if not argv:
+        fail(f"hint {label}: unsat stderr carried no `run: ...` guidance line: {resolve.stderr!r}")
+    if argv[0] != "cfx":
+        fail(f"hint {label}: guidance line must suggest a cfx command; got {argv!r}")
+    # The printed `cfx` is the user's PATH binary; run the one under test.
+    argv[0] = cfx
+
+    suggested = subprocess.run(argv, capture_output=True, text=True)
+    combined = suggested.stdout + suggested.stderr
+    printed = " ".join(argv)
+    if "nothing to explain" in combined or "selection is satisfiable" in combined:
+        fail(
+            f"hint {label}: the suggested command describes a DIFFERENT selection than the "
+            "one resolve refused — run verbatim it reports that selection satisfiable.\n"
+            f"suggested: {printed}\nstdout={suggested.stdout!r}\nstderr={suggested.stderr!r}"
+        )
+    if suggested.returncode == EXIT_UNSAT:
+        fail(
+            f"hint {label}: the suggested command exited {EXIT_UNSAT} (satisfiable; nothing "
+            f"to explain) — it does not explain the refused selection.\nsuggested: {printed}\n"
+            f"stdout={suggested.stdout!r}\nstderr={suggested.stderr!r}"
+        )
+    # The strongest form of "explains the SAME selection": it must name the very
+    # reason resolve gave, not some other unsatisfiability the model has once
+    # the selection file is dropped.
+    if case["expect"] not in combined:
+        fail(
+            f"hint {label}: the suggested command explains a different failure — resolve "
+            f"gave '{case['expect']}' as the reason but the explanation never mentions it.\n"
+            f"resolve stderr={resolve.stderr!r}\nsuggested: {printed}\n"
+            f"stdout={suggested.stdout!r}\nstderr={suggested.stderr!r}"
+        )
+    print(f"[cfx-consistency] hint {label}: OK (explains the refused selection)")
+
+
 def main():
     compiler = env_path("COMPILER")
     cfx = env_path("CFX")
@@ -182,6 +331,18 @@ def main():
     check_unsat_agreement(cfx, manifest, workroot)
     check_sat_agreement(cfx, manifest, workroot)
     check_json_and_determinism(cfx, manifest)
+
+    manifests = {
+        "s1": manifest,
+        "hero": compile_scenario(
+            compiler,
+            env_path("HERO_DEFS"),
+            env_path("HERO_COMPONENTS"),
+            os.path.join(workroot, "hero_cmp"),
+        ),
+    }
+    for case in HINT_CASES:
+        check_hint_reproduces_selection(cfx, manifests, workroot, case)
 
     print("[cfx-consistency] ALL CHECKS PASSED")
 

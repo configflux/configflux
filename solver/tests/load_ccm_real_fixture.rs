@@ -222,17 +222,10 @@ fn write_future_schema_top_manifest(
 
 /// Create a unique tempdir under the system temp dir for one test
 /// invocation. We avoid the `tempfile` crate because it is not in the
-/// solver's Bazel dep set today; PID + test name is unique enough for
-/// the small integration test surface here.
+/// solver's Bazel dep set today; see `fixture_v2::unique_temp_dir` for why
+/// the discriminator is an atomic counter and not the pid or the clock.
 fn tempdir_for(test_name: &str) -> PathBuf {
-    let base = std::env::temp_dir().join(format!(
-        "configflux-solver-{}-{}",
-        test_name,
-        std::process::id()
-    ));
-    let _ = fs::remove_dir_all(&base);
-    fs::create_dir_all(&base).expect("mkdir tempdir");
-    base
+    fixture_v2::unique_temp_dir("configflux-solver", test_name)
 }
 
 #[test]

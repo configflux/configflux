@@ -62,8 +62,8 @@ use crate::ccm_format::{BddNode, TERMINAL_FALSE, TERMINAL_TRUE, TERMINAL_VAR_IND
 use crate::sat_backend::{SatBackend, SatLit, SatOutcome, SatVar};
 use crate::sat_backend_batsat::BatsatBackend;
 use crate::session::{
-    CoreConstraintKind, Error, LabeledAtom, LabeledConstraint, LabeledCore, RejectionExplanation,
-    Session,
+    CoreConstraintKind, Error, LabeledAtom, LabeledConstraint, LabeledCore, LabeledLiteral,
+    RejectionExplanation, Session,
 };
 
 /// Upper bound on BDD falsifying paths enumerated per partition before the
@@ -635,16 +635,29 @@ fn label_indexed_core<B: SolverBackend>(
     let mut constraints: Vec<LabeledConstraint> = Vec::with_capacity(indexed.clauses.len());
     for clause in &indexed.clauses {
         let mut atoms: Vec<LabeledAtom> = Vec::with_capacity(clause.literals.len());
-        for &(global, _positive) in &clause.literals {
+        // The signed partial assignment the clause forbids. A clause literal is
+        // the NEGATION of the path's assignment (`clause_from_assignment`), so
+        // `positive == false` (the literal `¬v`) means the path asserted `v`.
+        // Downstream constraint attribution (ADR-0054 §5.4) needs that sign;
+        // `atoms` below deliberately drops it.
+        let mut forbidden: Vec<LabeledLiteral> = Vec::with_capacity(clause.literals.len());
+        for &(global, positive) in &clause.literals {
             let name = symbol_index.name_of(global).ok_or(Error::Backend(
                 BackendError::Invariant(
                     "explain: MUS clause variable index has no symbol-table label",
                 ),
             ))?;
-            atoms.push(atom_from_symbol(name)?);
+            let atom = atom_from_symbol(name)?;
+            forbidden.push(LabeledLiteral {
+                atom: atom.clone(),
+                asserted: !positive,
+            });
+            atoms.push(atom);
         }
         atoms.sort();
         atoms.dedup();
+        forbidden.sort();
+        forbidden.dedup();
 
         // Classification (recorded design decision, bounded for v0.4.0): a
         // single-atom clause whose atom is a currently-pinned selection is a
@@ -662,16 +675,24 @@ fn label_indexed_core<B: SolverBackend>(
             CoreConstraintKind::ModelRule
         };
 
-        constraints.push(LabeledConstraint { kind, atoms });
+        constraints.push(LabeledConstraint {
+            kind,
+            atoms,
+            forbidden,
+        });
     }
 
     // Deterministic ordering of the conflicting constraints so the labeled
     // output shape is stable for a given MUS witness: by kind (Selection
-    // before ModelRule) then by the atom list.
+    // before ModelRule), then by the atom list, then by the signed forbidden
+    // assignment — two clauses can share an atom set while forbidding
+    // different polarities (`a ∧ b` vs `¬a ∧ ¬b`), and the sign must not be
+    // dropped by an ordering that cannot see it.
     constraints.sort_by(|a, b| {
         kind_rank(a.kind)
             .cmp(&kind_rank(b.kind))
             .then_with(|| a.atoms.cmp(&b.atoms))
+            .then_with(|| a.forbidden.cmp(&b.forbidden))
     });
     constraints.dedup();
 

@@ -9,13 +9,14 @@ use crate::loader_api::{
     GENERATED_CONFIG_BUILD_FLAGS_PATH, GENERATED_CONFIG_HPP_PATH,
 };
 use crate::product_api::{OperationStatus, PRODUCT_SCHEMA_VERSION};
+use crate::scenario_test_support::unique_temp_path;
 use crate::Compiler;
 use anyhow::{Context, Result};
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 const S1_SOURCE_DEFS: &str = "scenarios/s1_water_pump/smoke/chunks/00_definitions.toml";
 const S1_SOURCE_COMPONENTS: &str = "scenarios/s1_water_pump/smoke/chunks/10_components.toml";
@@ -57,16 +58,7 @@ const S5_GOLDEN_CONFIG_ARTIFACT_MANIFEST: &str =
     include_str!("../scenarios/s5_building_hvac/smoke/golden/export.config_artifact_manifest.json");
 
 fn emitted_cmp_dir(chunks: &[(&str, &str)], label: &str) -> Result<(PathBuf, ir::IrIndex)> {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .context("Failed to compute unique timestamp")?
-        .as_nanos();
-    let temp_dir = std::env::temp_dir().join(format!(
-        "configflux-loop5-export-{}-{}-{}",
-        label,
-        std::process::id(),
-        unique
-    ));
+    let temp_dir = unique_temp_path("cfx-early-binding-export", label);
     std::fs::create_dir_all(&temp_dir)
         .with_context(|| format!("Failed to create temp dir '{}'", temp_dir.display()))?;
 
@@ -194,16 +186,7 @@ fn reverse_object_key_order(value: &JsonValue) -> JsonValue {
 }
 
 fn compile_generated_header(label: &str, header_contents: &str, body: &str) -> Result<()> {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .context("Failed to compute unique timestamp")?
-        .as_nanos();
-    let temp_dir = std::env::temp_dir().join(format!(
-        "configflux-loop5-cpp-check-{}-{}-{}",
-        label,
-        std::process::id(),
-        unique
-    ));
+    let temp_dir = unique_temp_path("cfx-early-binding-cpp-check", label);
     let generated_dir = temp_dir.join("generated");
     std::fs::create_dir_all(&generated_dir).with_context(|| {
         format!(
@@ -256,7 +239,7 @@ fn read_vm_rss_kib() -> Option<u64> {
 }
 
 #[test]
-fn loop5_contract_s1_export_result_envelope_has_required_fields() -> Result<()> {
+fn early_binding_contract_s1_export_result_envelope_has_required_fields() -> Result<()> {
     let (temp_dir, index) = emitted_cmp_dir(
         &[
             (S1_SOURCE_DEFS, S1_CHUNK_DEFS),
@@ -305,7 +288,7 @@ fn loop5_contract_s1_export_result_envelope_has_required_fields() -> Result<()> 
 }
 
 #[test]
-fn loop5_golden_s1_generated_outputs_match() -> Result<()> {
+fn early_binding_golden_s1_generated_outputs_match() -> Result<()> {
     let (temp_dir, _index) = emitted_cmp_dir(
         &[
             (S1_SOURCE_DEFS, S1_CHUNK_DEFS),
@@ -347,7 +330,7 @@ fn loop5_golden_s1_generated_outputs_match() -> Result<()> {
 }
 
 #[test]
-fn loop5_golden_s4_generated_outputs_match() -> Result<()> {
+fn early_binding_golden_s4_generated_outputs_match() -> Result<()> {
     let (temp_dir, _index) = emitted_cmp_dir(
         &[
             (S4_SOURCE_DEFS, S4_CHUNK_DEFS),
@@ -389,7 +372,7 @@ fn loop5_golden_s4_generated_outputs_match() -> Result<()> {
 }
 
 #[test]
-fn loop5_golden_s5_generated_outputs_match() -> Result<()> {
+fn early_binding_golden_s5_generated_outputs_match() -> Result<()> {
     let (temp_dir, _index) = emitted_cmp_dir(
         &[
             (S5_SOURCE_DEFS, S5_CHUNK_DEFS),
@@ -431,7 +414,7 @@ fn loop5_golden_s5_generated_outputs_match() -> Result<()> {
 }
 
 #[test]
-fn loop5_mutation_invalid_artifact_reference_and_profile_are_rejected() -> Result<()> {
+fn early_binding_mutation_invalid_artifact_reference_and_profile_are_rejected() -> Result<()> {
     let (temp_dir, _index) = emitted_cmp_dir(
         &[
             (S1_SOURCE_DEFS, S1_CHUNK_DEFS),
@@ -475,7 +458,7 @@ fn loop5_mutation_invalid_artifact_reference_and_profile_are_rejected() -> Resul
 }
 
 #[test]
-fn loop5_mutation_illegal_identifier_is_normalized_deterministically() -> Result<()> {
+fn early_binding_mutation_illegal_identifier_is_normalized_deterministically() -> Result<()> {
     let (temp_dir, _index) = emitted_cmp_dir(
         &[
             (S1_SOURCE_DEFS, S1_CHUNK_DEFS),
@@ -533,7 +516,7 @@ fn loop5_mutation_illegal_identifier_is_normalized_deterministically() -> Result
 }
 
 #[test]
-fn loop5_lifecycle_leakage_startup_and_runtime_values_are_not_emitted() -> Result<()> {
+fn early_binding_lifecycle_leakage_startup_and_runtime_values_are_not_emitted() -> Result<()> {
     let (temp_dir, _index) = emitted_cmp_dir(
         &[
             (S1_SOURCE_DEFS, S1_CHUNK_DEFS),
@@ -560,7 +543,7 @@ fn loop5_lifecycle_leakage_startup_and_runtime_values_are_not_emitted() -> Resul
 }
 
 #[test]
-fn loop5_determinism_identical_calls_stable_hash_and_artifacts() -> Result<()> {
+fn early_binding_determinism_identical_calls_stable_hash_and_artifacts() -> Result<()> {
     let (temp_dir, _index) = emitted_cmp_dir(
         &[
             (S1_SOURCE_DEFS, S1_CHUNK_DEFS),
@@ -584,7 +567,7 @@ fn loop5_determinism_identical_calls_stable_hash_and_artifacts() -> Result<()> {
 }
 
 #[test]
-fn loop5_determinism_equivalent_key_order_payload_stable_hash_and_artifacts() -> Result<()> {
+fn early_binding_determinism_equivalent_key_order_payload_stable_hash_and_artifacts() -> Result<()> {
     let (temp_dir, _index) = emitted_cmp_dir(
         &[
             (S1_SOURCE_DEFS, S1_CHUNK_DEFS),
@@ -618,7 +601,7 @@ fn loop5_determinism_equivalent_key_order_payload_stable_hash_and_artifacts() ->
 }
 
 #[test]
-fn loop5_integration_generated_s1_and_s4_headers_compile() -> Result<()> {
+fn early_binding_integration_generated_s1_and_s4_headers_compile() -> Result<()> {
     let (s1_dir, _index) = emitted_cmp_dir(
         &[
             (S1_SOURCE_DEFS, S1_CHUNK_DEFS),
@@ -666,7 +649,7 @@ fn loop5_integration_generated_s1_and_s4_headers_compile() -> Result<()> {
 }
 
 #[test]
-fn loop5_generator_metrics_snapshot() -> Result<()> {
+fn early_binding_generator_metrics_snapshot() -> Result<()> {
     let (temp_dir, _index) = emitted_cmp_dir(
         &[
             (S1_SOURCE_DEFS, S1_CHUNK_DEFS),
@@ -685,7 +668,7 @@ fn loop5_generator_metrics_snapshot() -> Result<()> {
 
     assert_eq!(export_result.status, OperationStatus::Ok);
     eprintln!(
-        "loop5_generator_metrics export_us={} rss_kib={}",
+        "early_binding_generator_metrics export_us={} rss_kib={}",
         export_us,
         read_vm_rss_kib().unwrap_or(0)
     );

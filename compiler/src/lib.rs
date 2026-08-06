@@ -51,29 +51,33 @@ pub mod telemetry_sink;
 #[cfg(test)]
 mod lib_tests;
 #[cfg(test)]
+mod model_identity_tests;
+#[cfg(test)]
+mod source_digest_tests;
+#[cfg(test)]
 mod scenario_test_support;
 #[cfg(test)]
-mod scenario_loop0_tests;
-#[cfg(test)]
-mod scenario_loop10_tests;
-#[cfg(test)]
-mod scenario_loop3_tests;
-#[cfg(test)]
-mod scenario_loop4_tests;
-#[cfg(test)]
-mod scenario_loop5_tests;
-#[cfg(test)]
-mod scenario_loop6_tests;
-#[cfg(test)]
-mod scenario_loop7_tests;
-#[cfg(test)]
-mod scenario_loop9_tests;
-#[cfg(test)]
-mod scenario_resource_budget_tests;
+mod scenario_baseline_tests;
 #[cfg(test)]
 mod scenario_byte_stability_tests;
 #[cfg(test)]
 mod scenario_diamond_tests;
+#[cfg(test)]
+mod scenario_early_binding_tests;
+#[cfg(test)]
+mod scenario_inspect_tests;
+#[cfg(test)]
+mod scenario_resolve_tests;
+#[cfg(test)]
+mod scenario_resource_budget_tests;
+#[cfg(test)]
+mod scenario_runtime_tests;
+#[cfg(test)]
+mod scenario_scale_tests;
+#[cfg(test)]
+mod scenario_selection_tests;
+#[cfg(test)]
+mod scenario_software_bom_tests;
 pub mod schema;
 
 pub use compiler_core::{verify_ir_dir, Compiler};

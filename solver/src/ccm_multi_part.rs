@@ -35,8 +35,8 @@ use std::path::Path;
 
 use crate::ccm_format::{
     compute_top_level_ccm_hash, decode_hex32, load_ccm_from_dir, parse_manifest, BddPayload,
-    Manifest, ParseError, Symbols, CCM_MANIFEST_SCHEMA_MAX, CCM_MANIFEST_SCHEMA_MIN,
-    RECOGNIZED_ALGORITHMS,
+    ConstraintRosterEntry, Manifest, ParseError, Symbols, CCM_MANIFEST_SCHEMA_MAX,
+    CCM_MANIFEST_SCHEMA_MIN, RECOGNIZED_ALGORITHMS,
 };
 use crate::partition_manifest::{PartitionManifest, PARTITION_MANIFEST_SCHEMA_MAX};
 
@@ -68,6 +68,10 @@ pub(crate) struct MultiPartCcm {
     pub(crate) bound_model_hash: [u8; 32],
     /// Top-level manifest schema version (currently always 2).
     pub(crate) schema_version: u32,
+    /// ADR-0054 §5.4 constraint roster, verbatim from the TOP-LEVEL
+    /// manifest (per-partition manifests never carry it — `parse_manifest`
+    /// rejects one that does). Empty when the model declares no constraint.
+    pub(crate) constraints: Vec<ConstraintRosterEntry>,
     /// One entry per cluster, in emission order.
     pub(crate) clusters: Vec<PartitionCcm>,
     /// Optional bridge partition, present iff `has_bridge` in the
@@ -221,6 +225,9 @@ pub(crate) fn load_multi_part(dir: &Path) -> Result<MultiPartCcm, ParseError> {
         top_level_ccm_hash: claimed_top,
         bound_model_hash,
         schema_version: top_manifest.schema_version,
+        // ADR-0054 §5.4: the roster is model-global and top-level only. Moved
+        // (not cloned) out of the manifest, which is dead after this point.
+        constraints: top_manifest.constraints,
         clusters,
         bridge,
     })
@@ -276,19 +283,27 @@ pub(crate) fn looks_like_multi_part_dir(dir: &Path) -> bool {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    /// Per-process monotonic discriminator for temp-dir names (configflux-rvpb).
+    /// `fetch_add` hands out a value at most once per process, so two names built
+    /// from it can never be equal; `nanos` is a triage aid only.
+    static TEMP_DIR_SEQ: AtomicU64 = AtomicU64::new(0);
+
+    /// The leaf is created with `create_dir`, not `create_dir_all`, so a
+    /// residual collision fails loudly instead of silently sharing a tree.
     fn tempdir_for(label: &str) -> PathBuf {
+        let seq = TEMP_DIR_SEQ.fetch_add(1, Ordering::Relaxed);
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .expect("system clock after epoch")
-            .as_nanos();
+            .map(|since_epoch| since_epoch.as_nanos())
+            .unwrap_or(0);
         let base = std::env::temp_dir().join(format!(
-            "configflux-mwyp-unit-{label}-{}-{nanos}",
+            "configflux-mwyp-unit-{label}-{}-{seq}-{nanos}",
             std::process::id()
         ));
-        let _ = fs::remove_dir_all(&base);
-        fs::create_dir_all(&base).expect("mkdir tempdir");
+        fs::create_dir(&base).expect("mkdir tempdir");
         base
     }
 
@@ -337,6 +352,7 @@ mod tests {
             top_level_ccm_hash: [0u8; 32],
             bound_model_hash: [0u8; 32],
             schema_version: 2,
+            constraints: Vec::new(),
             clusters: vec![p.clone()],
             bridge: None,
         };
@@ -345,6 +361,7 @@ mod tests {
             top_level_ccm_hash: [0u8; 32],
             bound_model_hash: [0u8; 32],
             schema_version: 2,
+            constraints: Vec::new(),
             clusters: vec![p.clone(), p.clone()],
             bridge: Some(p),
         };

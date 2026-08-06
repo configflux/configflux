@@ -1,14 +1,14 @@
-# Loop 7 Scale Baseline Metrics (Medium + Large)
+# Scale Baseline Metrics (Medium + Large)
 
-These baseline numbers are recorded from the Loop 7 medium/large closed-loop path:
+These baseline numbers are recorded from the medium/large closed-loop path:
 `verify -> compile -> selection -> resolve -> export -> software BOM`.
 
 ## Commands
 - `bazel test //compiler:scenario_smoke_test`
 - `bazel test //compiler:scenario_medium_test`
 - `bazel test //compiler:scenario_large_test`
-- `bazel test //compiler:compiler_test --test_output=all --test_arg=loop7_medium_performance_thresholds_and_metrics_snapshot --test_arg=--nocapture`
-- `bazel test //compiler:compiler_test --test_output=all --test_arg=loop7_large_performance_thresholds_and_metrics_snapshot --test_arg=--nocapture`
+- `bazel test //compiler:compiler_test --test_output=all --test_arg=scale_medium_performance_thresholds_and_metrics_snapshot --test_arg=--nocapture`
+- `bazel test //compiler:compiler_test --test_output=all --test_arg=scale_large_performance_thresholds_and_metrics_snapshot --test_arg=--nocapture`
 
 ## Baseline Capture
 - Date: 2026-02-09
@@ -18,7 +18,7 @@ These baseline numbers are recorded from the Loop 7 medium/large closed-loop pat
 - Host: devcontainer (x86_64 Linux)
 
 ## Metrics
-- Medium scale timings (from `loop7_scale_metrics_medium`):
+- Medium scale timings (from `scale_metrics_medium`):
   - `medium_s2_verify_us=1198`
   - `medium_s2_compile_us=1845`
   - `medium_s2_selection_us=2158`
@@ -32,7 +32,7 @@ These baseline numbers are recorded from the Loop 7 medium/large closed-loop pat
   - `medium_s4_export_us=431`
   - `medium_s4_bom_us=1220`
   - `rss_kib=7552`
-- Large scale timings (from `loop7_scale_metrics_large`):
+- Large scale timings (from `scale_metrics_large`):
   - `large_s3_verify_us=132237`
   - `large_s3_compile_us=133538`
   - `large_s3_selection_us=198800`
@@ -48,7 +48,7 @@ These baseline numbers are recorded from the Loop 7 medium/large closed-loop pat
   - `rss_kib=15844`
 
 ## Threshold Policy
-Guardrail assertions are encoded in `compiler/src/scenario_loop7_tests.rs`:
+Guardrail assertions are encoded in `compiler/src/scenario_scale_tests.rs`:
 - Medium thresholds:
   - `verify_us <= 750000`
   - `compile_us <= 1200000`

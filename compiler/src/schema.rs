@@ -139,6 +139,40 @@ pub struct Config {
     // per facet — undeclared facets keep the legacy condition-inferred domain.
     #[serde(default)]
     pub facets: HashMap<String, Facet>,
+    // Fifth top-level namespace: authored policy assertions (ADR-0054 §1). A
+    // constraint is a NAMED propositional formula over facet values; the one
+    // rule is "every declared constraint must hold in every resolved
+    // configuration". Pack-global — no inheritance, no gap-fill, no merge —
+    // exactly like `facets`.
+    #[serde(default)]
+    pub constraints: HashMap<String, Constraint>,
+}
+
+// ============================================================================
+// 6b. Constraints (ADR-0054)
+// ============================================================================
+
+/// An authored policy assertion: a named propositional formula over facet
+/// values, written in the EXISTING condition grammar (`conditions::
+/// parse_condition_expr` -> `ConditionExpr`). ADR-0054 §1 introduces no new
+/// expression language, operator, or evaluator.
+///
+/// A constraint is categorically distinct from a `condition` on a component,
+/// parameter, or override (ADR-0054 §3): those are inclusion *selectors* that
+/// decide what a configuration contains, and nothing else. A constraint decides
+/// what a user is allowed to pick. The two are never merged.
+///
+/// Data shape only. The invariants live in `link_verify::validate_constraints`
+/// (ADR-0021 "CUE authors, Rust re-validates"), where an expression that does
+/// not parse is a hard ingest ERROR — unlike a selector condition, which widens
+/// no facet on a parse failure. A policy that cannot be understood must never be
+/// silently dropped.
+#[derive(Debug, Deserialize, Serialize, PartialEq, Clone)]
+pub struct Constraint {
+    /// A Boolean expression over facet values, in the existing condition
+    /// grammar. MUST parse.
+    pub condition: String,
+    pub doc: Option<String>,
 }
 
 // ============================================================================

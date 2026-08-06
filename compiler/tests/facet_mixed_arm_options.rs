@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BUSL-1.1
+
 //! ADR-0047 §4/§6 — mixed-arm regression (configflux-5zqr).
 //!
 //! Coverage gap left by `facet_symbol_synthesis.rs`, whose fixtures are
@@ -28,7 +30,6 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use compiler::loader_api::{
     initialize_selection_state, open_model, GetSelectionOptionsRequest,
@@ -187,15 +188,11 @@ fn multi_guard_closed_facet_has_non_empty_domain() {
     fs::remove_dir_all(&compiled.output_dir).ok();
 }
 
+// Collision-proof temp-dir naming shared across the compiler integration
+// tests; see `temp_dirs.rs` (configflux-rvpb).
+#[path = "temp_dirs.rs"]
+mod temp_dirs;
+
 fn tempdir_for(test_name: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock after epoch")
-        .as_nanos();
-    let base = std::env::temp_dir().join(format!(
-        "configflux-compiler-{test_name}-{}-{nanos}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&base).expect("create temp dir");
-    base
+    temp_dirs::unique_temp_dir("configflux-compiler", test_name)
 }

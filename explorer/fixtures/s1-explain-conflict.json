@@ -1,0 +1,59 @@
+{
+  "schema_version": 4,
+  "status": "ok",
+  "model_hash": "82fd23528e1b1d33b8e423d7a37c8a3d0027e270c9dd8fbc52ec05dab535aa88",
+  "scope": "all",
+  "facet": "cooling_model",
+  "option": "x200",
+  "rejection": {
+    "code": "E_SELECTION_UNSATISFIABLE",
+    "message": "Selection 'cooling_model'='x200' is unsatisfiable under current constraints",
+    "blocking_choices": {
+      "cooling_brand": "aeroflux"
+    },
+    "hint": "Use get_selection_options to choose a compatible option first",
+    "unsat_core": {
+      "rejected": {
+        "facet": "cooling_model",
+        "option": "x200"
+      },
+      "conflicting_constraints": [
+        {
+          "kind": "selection",
+          "facets": [
+            {
+              "facet": "cooling_brand",
+              "option": "aeroflux"
+            }
+          ],
+          "summary": "blocked by your earlier choice: cooling_brand.aeroflux"
+        },
+        {
+          "kind": "model_rule",
+          "facets": [
+            {
+              "facet": "cooling_brand",
+              "option": "aeroflux"
+            },
+            {
+              "facet": "cooling_model",
+              "option": "x200"
+            }
+          ],
+          "summary": "cooling_brand != 'aeroflux' || cooling_model != 'x200'",
+          "constraint_id": "aeroflux_excludes_x200"
+        }
+      ],
+      "minimal": true,
+      "note": "one minimal explanation; other minimal cores may exist"
+    }
+  },
+  "error_count": 0,
+  "warning_count": 0,
+  "diagnostics": {
+    "schema_version": 4,
+    "diagnostics": [],
+    "error_count": 0,
+    "warning_count": 0
+  }
+}

@@ -1,0 +1,53 @@
+{
+  "package": "service_multi_env",
+  "version": "1.0.0",
+  "definitions": {
+    "request_timeout_ms": {
+      "type": "integer",
+      "unit": "ms",
+      "lifecycle": "startup",
+      "access": "integrator",
+      "doc": "Inbound HTTP request timeout in milliseconds"
+    },
+    "deploy_tier": {
+      "type": "string",
+      "lifecycle": "startup",
+      "access": "integrator",
+      "doc": "Deployment tier label surfaced to the running service"
+    },
+    "health_check_path": {
+      "type": "string",
+      "lifecycle": "startup",
+      "access": "integrator",
+      "doc": "HTTP path the platform probes for liveness"
+    }
+  },
+  "facets": {
+    "environment": {
+      "values": ["dev", "staging", "prod"],
+      "default": "dev",
+      "doc": "Deployment target. prod tightens the request timeout and flips the tier label."
+    },
+    "log_level": {
+      "values": ["info", "debug"],
+      "default": "info",
+      "doc": "Log verbosity. debug is disallowed in prod (see the prod_forbids_debug constraint)."
+    },
+    "replica_class": {
+      "values": ["single", "scaled"],
+      "default": "single",
+      "doc": "Sizing selection recorded for the environment; consumed downstream to pick a replica count."
+    },
+    "beta_dashboard": {
+      "values": ["off", "on"],
+      "default": "off",
+      "doc": "Feature toggle for the beta dashboard UI, recorded per environment."
+    }
+  },
+  "constraints": {
+    "prod_forbids_debug": {
+      "condition": "environment != 'prod' || log_level != 'debug'",
+      "doc": "Debug logging is not permitted in production."
+    }
+  }
+}

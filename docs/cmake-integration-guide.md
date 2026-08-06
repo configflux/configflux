@@ -117,7 +117,7 @@ Example (from the S1 water pump scenario):
   "model_hash": "<model_hash>",
   "profile": "cpp_early_binding_v1",
   "resolve_hash": "<resolve_hash>",
-  "schema_version": 1
+  "schema_version": 4
 }
 ```
 
@@ -271,7 +271,7 @@ fi
 
 # --- Step 2: Open the CMP with the interpreter ---
 jq -n --arg cmp "${WORK_DIR}/cmp/cmp.manifest.json" \
-  '{schema_version: 1, cmp_manifest_ref: $cmp}' \
+  '{schema_version: 4, cmp_manifest_ref: $cmp}' \
   > "${WORK_DIR}/open.request.json"
 
 "${INTERPRETER}" open \
@@ -283,7 +283,7 @@ jq -n \
   --slurpfile open "${WORK_DIR}/open.result.json" \
   --arg scope "${SCOPE}" \
   '{
-    schema_version: 1,
+    schema_version: 4,
     model_handle: $open[0].model_handle,
     scope: $scope,
     context_tags: {}
@@ -309,7 +309,7 @@ SELECTION_STATE="${WORK_DIR}/init-selection-state.result.json"
 #       --argjson delta "${DELTA}" \
 #       --arg scope "${SCOPE}" \
 #       '{
-#         schema_version: 1,
+#         schema_version: 4,
 #         model_handle: $open[0].model_handle,
 #         scope: $scope,
 #         selection_state: $state[0],
@@ -329,7 +329,7 @@ jq -n \
   --slurpfile state <(jq '.selection_state' "${SELECTION_STATE}") \
   --arg scope "${SCOPE}" \
   '{
-    schema_version: 1,
+    schema_version: 4,
     model_handle: $open[0].model_handle,
     scope: $scope,
     selection_state: $state[0]
@@ -347,7 +347,7 @@ echo "Resolve hash: ${RESOLVE_HASH}"
 jq -n \
   --slurpfile rr "${WORK_DIR}/resolve.result.json" \
   '{
-    schema_version: 1,
+    schema_version: 4,
     resolve_result: $rr[0],
     profile: "cpp_early_binding_v1"
   }' \

@@ -25,6 +25,10 @@ use std::path::{Path, PathBuf};
 
 include!("contracts.rs");
 include!("operations.rs");
+// ADR-0054 §5.4 (configflux-p571.8): maps an unsat-core clause back to the
+// authored constraint that forbids it, using the top-level manifest roster.
+// Pure data in, pure data out — no solver type crosses the ADR-0003 §2 line.
+include!("unsat_attribution.rs");
 
 #[cfg(test)]
 mod tests;

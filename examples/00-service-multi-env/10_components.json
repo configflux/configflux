@@ -1,0 +1,48 @@
+{
+  "package": "service_multi_env",
+  "version": "1.0.0",
+  "components": {
+    "webapp": {
+      "type": "service",
+      "params": {
+        "request_timeout_ms": {
+          "inherits": "request_timeout_ms",
+          "type": "integer",
+          "unit": "ms",
+          "lifecycle": "startup",
+          "access": "integrator",
+          "doc": "Inbound HTTP request timeout in milliseconds",
+          "value": 30000,
+          "overrides": [
+            {
+              "condition": "environment == 'prod'",
+              "value": 5000
+            }
+          ]
+        },
+        "deploy_tier": {
+          "inherits": "deploy_tier",
+          "type": "string",
+          "lifecycle": "startup",
+          "access": "integrator",
+          "doc": "Deployment tier label surfaced to the running service",
+          "value": "nonprod",
+          "overrides": [
+            {
+              "condition": "environment == 'prod'",
+              "value": "production"
+            }
+          ]
+        },
+        "health_check_path": {
+          "inherits": "health_check_path",
+          "type": "string",
+          "lifecycle": "startup",
+          "access": "integrator",
+          "doc": "HTTP path the platform probes for liveness",
+          "value": "/healthz"
+        }
+      }
+    }
+  }
+}

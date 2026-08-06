@@ -16,7 +16,7 @@
 // wildcard "allow" arm, promote-to-base is allow-listed to the owner tier only,
 // and an unrecognized / unspecified role parses to a denial. No I/O, no
 // network, no state mutation happens here — the actual recording of a raised
-// review item is the ledger's job (`ledger::review`); this module only DECIDES
+// review item is the recording consumer's job downstream; this module only DECIDES
 // (allow/deny + whether a review item must be raised) and MINTS the neutral
 // review-item payload when an act is allowed.
 //
@@ -36,7 +36,8 @@
 /// Fixed, generic denial code for an authority check. Topology-neutral and
 /// payload-free: it names only the failure category (a role was not authorized
 /// for an action), never the role, the unit, or any value. Matches the
-/// `E_*`-prefixed fail-closed taxonomy used across the runtime and ledger.
+/// `E_*`-prefixed fail-closed taxonomy used across the runtime surface.
+/// registry: cause = the acting role is not authorized for the requested action, or the role itself was not recognized and the check failed closed; remedy = perform the action under a role that holds the required authority; the denial deliberately carries no detail about the role, unit, or value involved
 pub const E_AUTHORITY_ROLE_DENIED: &str = "E_AUTHORITY_ROLE_DENIED";
 
 /// The authority tier of an actor (ADR-0037 Decision 5, design doc sec 7). This
@@ -172,8 +173,9 @@ impl AuthorityDecision {
 ///
 /// A review item is minted ONLY for an allowed act (see
 /// [`local_commit_review_item`]); a denied action produces no review item,
-/// because it never happened. The ledger (`ledger::review`) is the home that
-/// records these; this struct is the shared contract carried across that seam.
+/// because it never happened. A downstream recording consumer is the home
+/// that records these; this struct is the shared contract carried across that
+/// seam.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RaisedReviewItem {
     /// Who performed the act (operator identity: technician or developer).

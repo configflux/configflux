@@ -25,8 +25,7 @@ flate2 = "1.1.0"
 #
 # configflux-4jmc: gated behind the default-off `cudd` feature (below) so the
 # lean default build links no CUDD C backend. This keeps the heavy native link
-# off resource-constrained consumers — notably the solver-free edge agent
-# (//agent:agent, ADR-0036 sec3), which uses the compiler only for runtime op
+# off resource-constrained consumers that use the compiler only for runtime op
 # handlers and never the BDD construction path. `optional = true` makes the
 # crate pull `cudd-sys` in only when the `cudd` feature is enabled.
 #

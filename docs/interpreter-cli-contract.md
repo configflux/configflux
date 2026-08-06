@@ -38,7 +38,7 @@ Determinism rules:
 - object/list ordering follows existing frozen loader/runtime contract behavior
 
 ### 3.1 Operator/Developer Command Examples (`configflux-interpreter`)
-Examples below use `schema_version = 3` (the current `PRODUCT_SCHEMA_VERSION`; `2 → 3` per ADR-0047) and JSON envelopes from
+Examples below use `schema_version = 4` (the current `PRODUCT_SCHEMA_VERSION`; `2 → 3` per ADR-0047, `3 → 4` per ADR-0054). A request carrying an older version is rejected with `E_UNSUPPORTED_SCHEMA_VERSION`; there is no compatibility mode. JSON envelopes are from
 `docs/interface-contracts.md`.
 Use `docs/canonical-worked-example.md` for the canonical end-to-end operator
 flow, including the shipped helper for initial `selection_state` generation.
@@ -46,7 +46,7 @@ flow, including the shipped helper for initial `selection_state` generation.
 1. `open` (stdin/stdout mode):
 ```bash
 echo '{
-  "schema_version": 3,
+  "schema_version": 4,
   "cmp_manifest_ref": "out/cmp/cmp.manifest.json"
 }' | configflux-interpreter open > out/open.result.json
 ```
@@ -60,7 +60,7 @@ configflux-interpreter init-selection-state \
 `requests/init-selection-state.request.json`:
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "model_handle": {
     "model_hash": "<model_hash>",
     "cmp_manifest_ref": "out/cmp/cmp.manifest.json",
@@ -83,7 +83,7 @@ configflux-interpreter options \
 `requests/options.request.json`:
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "model_handle": {
     "model_hash": "<model_hash>",
     "cmp_manifest_ref": "out/cmp/cmp.manifest.json",
@@ -92,7 +92,7 @@ configflux-interpreter options \
   },
   "scope": "component:thermal_control",
   "selection_state": {
-    "schema_version": 3,
+    "schema_version": 4,
     "model_hash": "<model_hash>",
     "scope": "component:thermal_control",
     "context_tags": {
@@ -115,7 +115,7 @@ configflux-interpreter select \
 `requests/select.request.json`:
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "model_handle": {
     "model_hash": "<model_hash>",
     "cmp_manifest_ref": "out/cmp/cmp.manifest.json",
@@ -124,7 +124,7 @@ configflux-interpreter select \
   },
   "scope": "component:thermal_control",
   "selection_state": {
-    "schema_version": 3,
+    "schema_version": 4,
     "model_hash": "<model_hash>",
     "scope": "component:thermal_control",
     "context_tags": {
@@ -149,7 +149,7 @@ configflux-interpreter explain \
 `requests/explain.request.json`:
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "model_handle": {
     "model_hash": "<model_hash>",
     "cmp_manifest_ref": "out/cmp/cmp.manifest.json",
@@ -158,7 +158,7 @@ configflux-interpreter explain \
   },
   "scope": "component:thermal_control",
   "selection_state": {
-    "schema_version": 3,
+    "schema_version": 4,
     "model_hash": "<model_hash>",
     "scope": "component:thermal_control",
     "context_tags": {
@@ -185,7 +185,7 @@ configflux-interpreter resolve \
 `requests/resolve.request.json`:
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "model_handle": {
     "model_hash": "<model_hash>",
     "cmp_manifest_ref": "out/cmp/cmp.manifest.json",
@@ -194,7 +194,7 @@ configflux-interpreter resolve \
   },
   "scope": "component:thermal_control",
   "selection_state": {
-    "schema_version": 3,
+    "schema_version": 4,
     "model_hash": "<model_hash>",
     "scope": "component:thermal_control",
     "context_tags": {
@@ -210,10 +210,28 @@ configflux-interpreter resolve \
 }
 ```
 
+`resolve` FAILS CLOSED on a selection that violates a declared constraint
+(ADR-0054 §2/§6). Every constraint the model declares is evaluated against the
+TOTAL post-default assignment — the choices and context tags merged, then filled
+out with each declared facet's default (ADR-0047 §5) — and any constraint that
+is false under that assignment rejects the request. A constraint left undecided
+because nothing binds a facet it names is NOT a violation.
+
+The rejection uses the existing contract, unchanged: exit `2` (command error),
+`status: error`, and one `E_SELECTION_CONFLICT` diagnostic per violated
+constraint, in constraint-id-ascending order. No new code and no new field are
+introduced. Each diagnostic carries `entity_path: constraints/<id>` — the
+discriminator that separates a policy violation from the other
+`E_SELECTION_CONFLICT` causes — a `message` naming the constraint and quoting
+its condition verbatim, `source_id` set to the chunk that declared it, and a
+`hint` pointing at `explain` for the same selection. A rejected `resolve`
+carries no `resolve_hash` and no `resolved_output`, so there is nothing for a
+downstream `export-resolved` / `export-software-bom` to consume.
+
 7. `export-resolved`:
 ```bash
 jq -n --slurpfile rr out/resolve.result.json '{
-  schema_version: 3,
+  schema_version: 4,
   resolve_result: $rr[0],
   profile: "cpp_early_binding_v1"
 }' > requests/export-resolved.request.json
@@ -226,7 +244,7 @@ configflux-interpreter export-resolved \
 8. `export-software-bom`:
 ```bash
 jq -n --slurpfile rr out/resolve.result.json '{
-  schema_version: 3,
+  schema_version: 4,
   resolve_result: $rr[0],
   profile: "full_audit"
 }' > requests/export-software-bom.request.json
@@ -295,7 +313,9 @@ validation/error semantics:
 1. `open` -> `E_LOADER_*`
 2. `init-selection-state` -> `E_LOADER_*`, `E_SELECTION_STATE_INVALID`
 3. `options`, `select`, `explain` -> `E_SELECTION_*`
-4. `resolve` -> `E_RESOLVE_*`
+4. `resolve` -> `E_RESOLVE_*`, plus `E_SELECTION_CONFLICT` for a selection that
+   violates a declared constraint (ADR-0054 §6 reuses the existing selection
+   code rather than adding a resolve-side one)
 5. `export-resolved` -> `E_EXPORT_*`
 6. `export-software-bom` -> `E_SBOM_*`
 

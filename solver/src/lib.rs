@@ -120,7 +120,7 @@ pub use backend::{
 };
 pub use backend_cudd::CuddBackend;
 pub use backend_oxidd::OxiddBackend;
-pub use ccm::{Bdd, Ccm, CcmError, Symbols, CCM_SCHEMA_VERSION_V1};
+pub use ccm::{Bdd, Ccm, CcmError, ConstraintRef, Symbols, CCM_SCHEMA_VERSION_V1};
 // `BddNode` is public because it appears in `SolverBackend::deserialize_bdd`'s
 // signature; external backends (a future BuDDy wrapper) need it to
 // implement the trait. It is intentionally `pub` but the on-disk layout
@@ -140,8 +140,8 @@ pub use sat_backend_batsat::BatsatBackend;
 // compiler type and no raw BDD/batsat index ever appears in them (ADR-0003
 // §2 / ADR-0031 D3).
 pub use session::{
-    CoreConstraintKind, Error, LabeledAtom, LabeledConstraint, LabeledCore, RejectionExplanation,
-    Session, StateHash, ValidOptions,
+    CoreConstraintKind, Error, LabeledAtom, LabeledConstraint, LabeledCore, LabeledLiteral,
+    RejectionExplanation, Session, StateHash, ValidOptions,
 };
 pub use snapshot::{Snapshot, SNAPSHOT_SCHEMA_VERSION_V1};
 

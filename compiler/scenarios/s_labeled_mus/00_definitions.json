@@ -23,5 +23,36 @@
             "safety": "q_m",
             "access": "technician"
         }
+    },
+    "facets": {
+        "cpu": {
+            "values": ["standard", "highperf"],
+            "default": "standard",
+            "doc": "CPU performance tier."
+        },
+        "cooling": {
+            "values": ["liquid", "air"],
+            "default": "liquid",
+            "doc": "Cooling solution."
+        },
+        "psu": {
+            "values": ["gold", "bronze"],
+            "default": "gold",
+            "doc": "Power-supply tier."
+        }
+    },
+    "constraints": {
+        "facet_option_domains": {
+            "condition": "cpu == 'standard' || cooling == 'liquid' || psu == 'gold'",
+            "doc": "Retained verbatim from the pre-ADR-0054 component form. Logically redundant given the two highperf_* rules over these closed two-value domains; its original job was introducing the standard/liquid/gold symbols, which the facets above now do."
+        },
+        "highperf_requires_gold": {
+            "condition": "cpu != 'highperf' || psu != 'bronze'",
+            "doc": "A highperf CPU may not be paired with a bronze power supply."
+        },
+        "highperf_requires_liquid": {
+            "condition": "cpu != 'highperf' || cooling != 'air'",
+            "doc": "A highperf CPU may not be paired with air cooling."
+        }
     }
 }

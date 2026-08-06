@@ -45,7 +45,7 @@ Interpreter program out-of-scope (explicit):
 
 ## 2) Shared Contract Rules
 
-- Product/loader API `schema_version` is frozen at `3` (`1 → 2` ADR-0038, `2 → 3` ADR-0047).
+- Product/loader API `schema_version` is frozen at `4` (`1 → 2` ADR-0038, `2 → 3` ADR-0047, `3 → 4` ADR-0054).
 - Operation status values are `ok` and `error`.
 - All result envelopes include:
   - `schema_version`
@@ -79,6 +79,11 @@ Deterministic identity hashes in v1:
 - `resolve_hash`
 - `generator_hash`
 - `bom_hash`
+
+Deterministic but NOT an identity:
+- `source_digest` — covers the request `source_manifest` contents and nothing
+  else. It is reported by `inspect_model` (§3.3), which emits no package, so it
+  never denotes a compiled model the way `model_hash` does (ADR-0056 §9).
 
 ## 3) Application 1: Compiler Product API
 
@@ -129,7 +134,7 @@ Result (`compile_result`):
 
 Current v1 behavior:
 - when `output_dir` is provided and emission succeeds, `compile_result.model_hash` is set to emitted index `config_hash` (CMP model identity).
-- this can differ from `verify_report.model_hash` because verify hash is source-manifest-derived.
+- this can differ from `verify_report.model_hash` because the verify hash is source-manifest-derived: it covers the `inline_content` of every source and nothing else, never a `source_id`, so it is reproducible from the content alone but is not the CMP model identity.
 - when `output_dir` is provided and emission succeeds, a deterministic,
   NON-hashed `provenance.json` sidecar is written next to each file-writing
   artifact set — the CMP directory (`<out>/provenance.json`) and its sibling
@@ -155,7 +160,9 @@ Request:
 Result (`inspection_result`):
 - `schema_version: u32`
 - `status: ok | error`
-- `model_hash: string`
+- `source_digest: string` — a digest of the request `source_manifest` contents.
+  Deliberately not named `model_hash`: `inspect_model` emits no package, so it
+  never carries the CMP model identity that name denotes in §3.2.
 - `query`
 - `summary: { source_count, definition_count, component_count, artifact_count, definition_ids, component_ids, artifact_ids }`
 - `item?: inspection_item`
@@ -196,7 +203,7 @@ Emitted CMP contents:
 `cmp.manifest.json` shape (`CmpManifest`):
 - `schema_version: 1`
 - `model_hash: string`
-- `ir_format_version: 1`
+- `ir_format_version: 3`
 - `index_ref: string` (default `index.cfir.json`)
 - `chunk_set_ref: string` (default `.`)
 - `config_hash: string`
@@ -225,11 +232,25 @@ Result:
 - `schema_version: u32`
 - `status: ok | error`
 - `model_hash?: string`
-- `model_handle?: { model_hash, cmp_manifest_ref, index_ref, chunk_set_ref }`
+- `model_handle?: { model_hash, cmp_manifest_ref, index_ref, chunk_set_ref, ccm_ref }`
 - `error_count: u32`
 - `warning_count: u32`
 - `diagnostics_ref?: string`
 - `diagnostics: diagnostics_report`
+
+`model_handle.ccm_ref` (additive optional; ADR-0030) — path to the sibling
+`.ccm` solver-model artifact emitted alongside the CMP package, resolved as
+`<cmp_manifest_dir>/ccm`, mirroring how `index_ref` and `chunk_set_ref` resolve
+relative to the manifest directory. It is how downstream callers locate the
+`.ccm` the solver loads, and a usable `.ccm` is a hard precondition for the
+selection, resolution, and runtime-open paths — see
+`E_SELECTION_SOLVER_MODEL_UNAVAILABLE` (§5.2),
+`E_RESOLVE_SOLVER_MODEL_UNAVAILABLE` (§5.3), and
+`E_RUNTIME_OPEN_SOLVER_MODEL_UNAVAILABLE` (§5.6). `open_model` advertises the
+path unconditionally, so a populated `ccm_ref` is not by itself evidence that
+the artifact exists or is loadable; those consumers verify it and fail closed.
+The field is optional on the wire: it is absent from handles produced before it
+existed, and an empty value means "no sibling `.ccm` advertised".
 
 Open-model diagnostic codes (frozen):
 - `E_LOADER_UNSUPPORTED_SCHEMA_VERSION`
@@ -428,11 +449,12 @@ Selection diagnostic codes (frozen):
 
 `resolve_hash` canonicalization:
 - sha256 over canonical JSON payload:
-  - `schema_version` (= 3)
+  - `schema_version` (= 4)
   - `model_hash`
   - `scope`
   - canonical `selection_state` tuple
   - canonicalized `resolved_output` (object keys sorted lexicographically at every depth)
+  - `defaulted_choices` (auto-bound default provenance; appended last, omitted when empty — ADR-0047 §5)
 
 Resolution diagnostic codes (frozen):
 - `E_RESOLVE_SCOPE_INVALID`

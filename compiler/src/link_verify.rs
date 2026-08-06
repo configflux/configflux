@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 use crate::conditions;
-use crate::schema::{Component, Facet, Parameter};
+use crate::schema::{Component, Constraint, Facet, Parameter};
 use anyhow::{bail, Context, Result};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -248,12 +248,146 @@ pub(crate) fn validate_facets(
     Ok(())
 }
 
+/// Validate the pack's `constraints` declarations over the fully merged model
+/// (ADR-0054 §4). Three rules, checked in constraint-id-ascending order so the
+/// first surfaced diagnostic is deterministic:
+///
+///   1. **Every constraint expression parses.** This is the one place where a
+///      constraint and a selector `condition` are treated differently at
+///      ingest, and the difference is deliberate: an unparseable *selector*
+///      widens no facet domain and is skipped (see `validate_facets`), because
+///      the worst case is a filter that includes too much. An unparseable
+///      *constraint* is a policy nobody can evaluate — silently dropping it
+///      would fail OPEN on the surface whose whole job is to say "no". So it is
+///      a hard ingest ERROR (ADR-0054 §1).
+///   2. **Every facet it names is DECLARED** (ADR-0047), not merely mentioned
+///      by some selector condition (configflux-6j91). A constraint asserts over
+///      a domain; it does not create one, and a condition-inferred domain is an
+///      artifact of what conditions happened to mention rather than something
+///      the author wrote down. The rule is not stylistic — it is what keeps the
+///      three surfaces in agreement. ADR-0054 §5.2 synthesizes intra-facet
+///      cardinality for DECLARED facets only, so a constraint over an inferred
+///      facet gets no at-most-one clauses: a positive equality
+///      (`arch == 'x86'`) leaves `root ∧ arch.x86 ∧ arch.arm` satisfiable over
+///      independent variables, so `options`/`select` keep offering `arm` while
+///      `resolve`, which evaluates the constraint concretely under a total
+///      assignment, rejects it. Failing the compile closes that fail-open
+///      corner from the validation side; §5.2's refusal to synthesize over an
+///      inferred domain closes it from the other.
+///
+///      Note this rule needs no parseable/unparseable carve-out: unlike
+///      `validate_facets`, it never consults conditions at all, so a selector
+///      cannot widen a constraint's legal name set whether it parses or not.
+///   3. **Every value it names is a member of a closed facet's declared
+///      domain** — the existing `E_FACET_VALUE_UNDECLARED` rule, now applied to
+///      constraints too. Unlike `validate_facets`, BOTH operators are checked,
+///      not just `==`: `validate_facets` checks only `==` because only `==`
+///      widens an inferred domain, but ADR-0054 §4 says every value a
+///      constraint *names*, and against a closed domain a mistyped
+///      `environment != 'prod0'` is not a harmless no-op — it is a tautology
+///      that silently voids the policy. Open and undeclared facets are not
+///      gated here, exactly as in `validate_facets`.
+///
+/// Takes no components or definitions on purpose: the legal name set is exactly
+/// `facets.keys()`, and a function that cannot see the model's conditions cannot
+/// regress into unioning them back in (configflux-6j91).
+pub(crate) fn validate_constraints(
+    constraints: &HashMap<String, Constraint>,
+    facets: &HashMap<String, Facet>,
+) -> Result<()> {
+    if constraints.is_empty() {
+        return Ok(());
+    }
+
+    let mut constraint_ids: Vec<&String> = constraints.keys().collect();
+    constraint_ids.sort();
+
+    for id in constraint_ids {
+        let text = constraints[id].condition.trim();
+        let expr = conditions::parse_condition_expr(text).with_context(|| {
+            format!(
+                "Constraint '{}' expression does not parse: '{}'",
+                id, text
+            )
+        })?;
+
+        // First violation in AST order wins, so the reported diagnostic is a
+        // deterministic function of the authored text.
+        let mut violation: Option<ConstraintViolation> = None;
+        conditions::for_each_predicate_symbol(&expr, |tag, value| {
+            if violation.is_some() {
+                return;
+            }
+            let Some(facet) = facets.get(tag) else {
+                violation = Some(ConstraintViolation::UndeclaredFacet(tag.to_string()));
+                return;
+            };
+            if !facet.open && !facet.values.iter().any(|v| v == value) {
+                violation = Some(ConstraintViolation::UndeclaredValue(
+                    tag.to_string(),
+                    value.to_string(),
+                ));
+            }
+        });
+
+        match violation {
+            // Deliberately NOT "unknown facet": the facet a model most often
+            // trips this rule with is one the author can see all over their own
+            // conditions, and calling it unknown would be false. The offending
+            // name and the remedy both have to be in the message, because
+            // "declare it" is the only fix that keeps the policy.
+            //
+            // "is not declared under `facets`" is also the phrase
+            // `product_api::map_graph_error` keys on to code this
+            // E_FACET_VALUE_UNDECLARED, so it is load-bearing, not decorative
+            // (configflux-6j91). Rewording it without the matching arm demotes
+            // the diagnostic to the generic ingest bucket;
+            // //compiler:constraint_facet_diagnostic_test is what catches that.
+            Some(ConstraintViolation::UndeclaredFacet(tag)) => bail!(
+                "Constraint '{}' references facet '{}', which is not declared under `facets`: \
+                 declare the facet with its value domain, or remove it from the constraint",
+                id,
+                tag
+            ),
+            Some(ConstraintViolation::UndeclaredValue(tag, value)) => {
+                let facet = &facets[&tag];
+                // Phrasing carries "closed facet", which
+                // `product_api::map_graph_error` maps to E_FACET_VALUE_UNDECLARED.
+                bail!(
+                    "Constraint '{}' value '{}' is not in the closed facet '{}' domain [{}]",
+                    id,
+                    value,
+                    tag,
+                    facet.values.join(", ")
+                );
+            }
+            None => {}
+        }
+    }
+
+    Ok(())
+}
+
+/// The first rule a constraint's predicate walk broke. Carried out of the
+/// `for_each_predicate_symbol` closure so the `bail!` happens outside it.
+enum ConstraintViolation {
+    UndeclaredFacet(String),
+    UndeclaredValue(String, String),
+}
+
 /// Collect every authored `condition` string from the merged model in a stable,
 /// id-sorted order: definition override chains first, then each component's own
 /// activation condition and its params' override chains. Mirrors
 /// `compiler_core::collect_ccm_clauses`'s harvest (that method walks the raw
 /// chunks; this one walks the merged repository) so the closed-domain check
 /// sees exactly the conditions the selection model will.
+///
+/// This check is deliberately **kind-agnostic** (configflux-9xxq / ADR-0054
+/// §5.1): `collect_ccm_clauses` now lowers a component condition and a
+/// parameter-override condition differently — assertion vs. symbol-only branch
+/// selector — but naming a value outside a closed facet's declared domain is an
+/// authoring error under either one, and both still contribute that value's
+/// symbol. So the harvest stays flat here.
 fn collect_model_conditions(
     components: &HashMap<String, Component>,
     definitions: &HashMap<String, Parameter>,
@@ -530,5 +664,172 @@ mod facet_tests {
         let comps = component_with_condition("this is not <> a condition");
         assert!(validate_facets(&f, &comps, &HashMap::new()).is_ok());
     }
+}
+
+#[cfg(test)]
+mod constraint_tests {
+    use super::*;
+    use crate::schema::{Constraint, Facet};
+
+    fn facet(values: &[&str], open: bool) -> Facet {
+        Facet {
+            values: values.iter().map(|s| s.to_string()).collect(),
+            default: None,
+            open,
+            doc: None,
+        }
+    }
+
+    fn facets(pairs: Vec<(&str, Facet)>) -> HashMap<String, Facet> {
+        pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect()
+    }
+
+    fn constraints(pairs: Vec<(&str, &str)>) -> HashMap<String, Constraint> {
+        pairs
+            .into_iter()
+            .map(|(id, condition)| {
+                (
+                    id.to_string(),
+                    Constraint {
+                        condition: condition.to_string(),
+                        doc: None,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_model_with_no_constraints_is_accepted() {
+        assert!(validate_constraints(&HashMap::new(), &HashMap::new()).is_ok());
+    }
+
+    #[test]
+    fn unparseable_constraint_is_an_ingest_error() {
+        // THE asymmetry with a selector condition (ADR-0054 §1): an
+        // unparseable selector is skipped, an unparseable CONSTRAINT is fatal.
+        // A policy nobody can evaluate must never be silently dropped.
+        let f = facets(vec![("region", facet(&["eu", "us"], false))]);
+        let c = constraints(vec![("bogus", "this is not <> a condition")]);
+        let err = validate_constraints(&c, &f).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("Constraint 'bogus'"), "err: {msg}");
+        assert!(msg.contains("does not parse"), "err: {msg}");
+    }
+
+    #[test]
+    fn constraint_over_a_declared_facet_is_accepted() {
+        let f = facets(vec![
+            ("environment", facet(&["dev", "staging", "prod"], false)),
+            ("log_level", facet(&["info", "debug"], false)),
+        ]);
+        let c = constraints(vec![(
+            "prod_forbids_debug",
+            "environment != 'prod' || log_level != 'debug'",
+        )]);
+        assert!(validate_constraints(&c, &f).is_ok());
+    }
+
+    #[test]
+    fn constraint_over_an_undeclared_facet_is_rejected() {
+        // configflux-6j91. Undeclared is undeclared: this function cannot see
+        // the model's conditions, so a facet some selector mentions and a facet
+        // nothing mentions are the same input here and take the same diagnostic
+        // — which is the point of dropping the union. The two shapes are told
+        // apart where whole models exist:
+        // `compiler_core_tests::a_constraint_over_a_condition_inferred_facet_
+        // fails_before_anything_is_emitted` pins the condition-inferred one.
+        let f = facets(vec![("region", facet(&["eu", "us"], false))]);
+        let c = constraints(vec![("ghost", "tls_mode == 'strict'")]);
+        let err = validate_constraints(&c, &f).unwrap_err();
+        let msg = format!("{err}");
+        // Constraint id, offending facet, and the remedy all have to be here:
+        // "declare it" is the only fix that keeps the policy.
+        assert!(msg.contains("Constraint 'ghost'"), "err: {msg}");
+        assert!(msg.contains("facet 'tls_mode'"), "err: {msg}");
+        assert!(msg.contains("not declared"), "err: {msg}");
+        assert!(msg.contains("declare the facet"), "err: {msg}");
+        // Both rules carry E_FACET_VALUE_UNDECLARED, but this one is not a
+        // closed-domain violation — `tls_mode` has no domain at all — so
+        // borrowing the sibling's phrasing would make the message false.
+        assert!(!msg.contains("closed facet"), "err: {msg}");
+    }
+
+    #[test]
+    fn the_offending_facet_is_named_even_when_a_later_predicate_is_declared() {
+        // The walk must report the first illegal facet in AST order, not fall
+        // through because some other predicate in the same expression is fine.
+        let f = facets(vec![("environment", facet(&["dev", "prod"], false))]);
+        let c = constraints(vec![("mixed", "arch == 'x86' || environment != 'prod'")]);
+        let err = validate_constraints(&c, &f).unwrap_err();
+        assert!(format!("{err}").contains("facet 'arch'"), "err: {err}");
+    }
+
+    #[test]
+    fn closed_facet_undeclared_eq_value_is_rejected() {
+        let f = facets(vec![("region", facet(&["eu", "us"], false))]);
+        let c = constraints(vec![("bad", "region == 'mars'")]);
+        let err = validate_constraints(&c, &f).unwrap_err();
+        // Carries the phrase product_api maps to E_FACET_VALUE_UNDECLARED, and
+        // names the constraint so the author knows which policy is wrong.
+        let msg = format!("{err}");
+        assert!(msg.contains("Constraint 'bad'"), "err: {msg}");
+        assert!(msg.contains("closed facet 'region'"), "err: {msg}");
+        assert!(msg.contains("eu, us"), "err: {msg}");
+    }
+
+    #[test]
+    fn closed_facet_undeclared_ne_value_is_also_rejected() {
+        // Deliberately STRICTER than `validate_facets`, which checks `==` only.
+        // Against a closed domain `region != 'mars'` is a tautology, so a typo
+        // here does not merely fail to filter — it silently voids the policy.
+        let f = facets(vec![("region", facet(&["eu", "us"], false))]);
+        let c = constraints(vec![("typo", "region != 'marz'")]);
+        let err = validate_constraints(&c, &f).unwrap_err();
+        assert!(
+            format!("{err}").contains("closed facet 'region'"),
+            "err: {err}"
+        );
+    }
+
+    #[test]
+    fn open_facet_accepts_a_value_outside_its_declared_domain() {
+        // An open domain is extensible (ADR-0047 §3), so the closed-domain rule
+        // does not apply — same carve-out `validate_facets` makes.
+        let f = facets(vec![("region", facet(&["eu"], true))]);
+        let c = constraints(vec![("ok", "region != 'mars'")]);
+        assert!(validate_constraints(&c, &f).is_ok());
+    }
+
+    #[test]
+    fn disjunctive_and_negated_constraints_are_supported_verbatim() {
+        // The whole point of the construct: a policy is an arbitrary
+        // `ConditionExpr`, not a pure conjunction. Nothing here may filter on
+        // shape (ADR-0054 §2).
+        let f = facets(vec![
+            ("environment", facet(&["dev", "prod"], false)),
+            ("log_level", facet(&["info", "debug"], false)),
+        ]);
+        let c = constraints(vec![
+            ("disjunction", "environment != 'prod' || log_level != 'debug'"),
+            ("negation", "!(environment == 'prod')"),
+            ("cardinality", "exactly_one_of(log_level == 'info', log_level == 'debug')"),
+        ]);
+        assert!(validate_constraints(&c, &f).is_ok());
+    }
+
+    #[test]
+    fn the_first_reported_violation_is_id_ascending() {
+        // Two broken constraints; the diagnostic must be a deterministic
+        // function of the model, not of HashMap iteration order.
+        let f = facets(vec![("region", facet(&["eu", "us"], false))]);
+        let c = constraints(vec![
+            ("zeta", "region == 'pluto'"),
+            ("alpha", "region == 'mars'"),
+        ]);
+        let err = validate_constraints(&c, &f).unwrap_err();
+        assert!(format!("{err}").contains("Constraint 'alpha'"), "err: {err}");
+    }
+
 }
 

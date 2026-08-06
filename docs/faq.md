@@ -90,6 +90,11 @@ whose payload is the reason the selection cannot be satisfied, and it is one
 minimal witness of the conflict. This lets a caller show precisely which choices
 collide. (For the scale at which this holds, see the scale answer above.)
 
+Other failures are reported as a stable diagnostic code — `E_RESOLVE_FACET_UNBOUND`
+and its siblings — that does not change when a message is reworded, so it is safe
+to branch on and log. [`diagnostics.md`](diagnostics.md) lists every code the
+compiler, interpreter, and runtime can emit, with its cause and remedy.
+
 ## What is the default value of a facet, and can I resolve without choosing?
 
 Yes, if the facet declares a default. A facet's domain can be declared
@@ -103,6 +108,130 @@ default under `defaulted_choices`, and `cfx options` surfaces the default arm.
 A facet that is declared with **no** default and that an active condition needs
 is reported precisely (`E_RESOLVE_FACET_UNBOUND`, naming the facet and its
 domain) rather than as a generic "unsatisfiable".
+
+## How do I express a rule like "no debug logging in production"?
+
+Declare it as a **constraint**. A constraint is a named policy rule over facet
+values, written in the same expression grammar conditions use, and declared in a
+model's `constraints` namespace next to the facets it talks about:
+
+```cue
+constraints: {
+    prod_forbids_debug: {
+        condition: "environment != 'prod' || log_level != 'debug'"
+        doc:       "Debug logging is not permitted in production."
+    }
+}
+```
+
+Giving the rule an id is the point: it is addressable, documented, and does not
+have to be smuggled into the model as a component that exists only to carry the
+condition string. The rule a constraint expresses is a single sentence — every
+declared constraint must hold in every resolved configuration — and it is
+deliberately different from what a `condition` on a component or a parameter
+override means. A condition is an *inclusion selector*: it decides whether that
+component or that value is part of the resolved configuration. A constraint
+decides what a user is allowed to pick in the first place.
+
+Constraints are validated at compile time: the expression must parse (an
+unparseable constraint is a compile error, never a silently dropped rule), every
+facet it names must be declared under `facets`, and every value it names must be
+in a closed facet's declared domain. Declaring the facet is required rather than
+merely recommended: only a declared facet gets the mutual-exclusion clauses that
+let `cfx options` and `cfx select` enforce the rule the same way `cfx resolve`
+does, so a constraint over an undeclared facet is refused instead of being
+half-enforced. A declared constraint is then compiled into the model, so
+`cfx options` stops offering a value that no valid configuration can hold and
+`cfx explain` reports the rule when it blocks a selection. See
+[glossary](glossary.md#constraint) and
+[model-spec.md](model-spec.md) for the full specification.
+
+All three surfaces agree, including the one that produces output. `cfx resolve`
+evaluates every declared constraint against the finished assignment — your
+choices and context tags, with each unbound facet filled in from its declared
+default — and **refuses** a selection that breaks one: exit `3`, naming the
+constraint and quoting its condition, and no snapshot is written. That last part
+is the point. A policy you can route around by skipping the guided walk and
+calling `resolve` directly is not a policy, so a violating configuration never
+becomes a file, a hash, or something a service can load. A constraint that no
+choice decides — because nothing binds a facet it names — is not a violation:
+nothing was chosen, so nothing was broken.
+
+## I have a model compiled with an earlier release — do I need to recompile?
+
+Yes. The product schema version is `4` in this release, and inputs authored
+against version 3 are rejected with `E_UNSUPPORTED_SCHEMA_VERSION` and a message
+naming the required version. A compiled model package produced by an earlier
+release is likewise rejected on load rather than read under the current shape.
+There is no migration tool and no compatibility mode, and that is deliberate: it
+guarantees there is no window in which the same bytes mean two different things.
+Recompile your sources with this release's compiler, and set `schema_version` to
+`4` in any request you send to the loader or interpreter.
+
+Recompiling produces new hashes. The `constraints` namespace is part of a
+model's content address, so the same sources compile to a different `model_hash`
+than they did before — and every hash derived from it (`selection_state_hash`,
+`resolve_hash`, and the software BOM hash) changes with it. Any hash pinned in a
+deployment check or a provenance record has to be re-recorded after the
+recompile.
+
+### The one migration the version check cannot catch for you
+
+Read this before recompiling if any of your sources predate this release.
+
+The version checks described above cover the request you send to the loader and
+the compiled model package you load. They do **not** cover your authored
+sources: a `.cue` file or an exported `.json` chunk carries no version marker,
+so the compiler cannot tell whether a source was written against this release or
+an earlier one.
+
+That matters for exactly one shape. In earlier releases a `condition` on a
+component was, in effect, also enforced as a rule about the whole
+configuration, so it was possible — and common — to express a policy by adding
+a component that had a `condition` and nothing else:
+
+```cue
+// A policy written the old way. Under this release it no longer enforces
+// anything.
+components: {
+    prod_forbids_debug: {
+        type:      "policy_module"
+        condition: "environment != 'prod' || log_level != 'debug'"
+    }
+}
+```
+
+A `condition` now means one thing only: it selects whether that component is
+part of the resolved configuration. Such a model **recompiles under this
+release without an error, and the rule it used to enforce is silently no longer
+enforced.** Nothing fails, no diagnostic is emitted, and `options` and `resolve`
+will simply start accepting combinations the rule used to forbid.
+
+Migrate every component of that shape to a `constraints:` entry:
+
+```cue
+constraints: {
+    prod_forbids_debug: {
+        condition: "environment != 'prod' || log_level != 'debug'"
+        doc:       "Debug logging is not permitted in production."
+    }
+}
+```
+
+The condition text moves across unchanged; delete the component that carried
+it. If the facets the rule names were never declared under `facets`, declare
+them as part of the move — a constraint asserts over a domain and never creates
+one, so a facet that previously existed only because that condition mentioned it
+has to be written down. The compiler enforces this: a constraint naming an
+undeclared facet fails the compile, pointing at the constraint and the facet, so
+a half-finished migration cannot ship a rule the tools would only partly apply.
+
+To find the candidates, review every component that has a `condition` and ask
+what it is for. If the condition decides whether the component is included, it
+is a selector and is already correct — leave it alone. If it was written to
+forbid a combination, it is a policy and must move. Component conditions that
+select, and parameter-override conditions that pick a value, both need no
+change.
 
 ## How does ConfigFlux relate to feature flags?
 

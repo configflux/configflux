@@ -66,10 +66,64 @@ pub(crate) const CCM_HASH_DOMAIN_TAG: &[u8] = b"configflux.ccm.v2\n";
 /// file did not exist at v1 (ADR-0005 Amendment 1 §13).
 pub(crate) const CCM_PARTITION_MANIFEST_SCHEMA_VERSION: u32 = 2;
 
+/// The emitter's input: everything that determines the compiled BDD root.
+///
+/// ADR-0054 §5.1 splits the input by ROLE, and the split is the point. The
+/// defect class configflux-9xxq belongs to happened because a *branch selector*
+/// reached the BDD root as a *global assertion*. Naming the channels apart is
+/// what makes the invariant reviewable: a future change that wants to assert a
+/// new policy has to add it to a field whose name says `constraints`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConditionModel {
     pub bound_model_hash: String,
+    /// Symbol-universe contributors.
+    ///
+    /// The compiler's producer (`compiler_core::collect_ccm_clauses`) emits
+    /// **only** symbol-introducing tautologies here (`f == 'v' || f != 'v'`),
+    /// which `compile_expr` lowers to the canonical `TRUE` terminal — so the
+    /// AND-fold is the identity `and(root, TRUE) = root` and an authored
+    /// `condition` has no path to the root. Selector conditions and declared
+    /// facet values both arrive through this channel (ADR-0047 §4 Amendment 1,
+    /// ADR-0054 §5.1); it exists so their symbols reach the variable order and
+    /// `ccm.symbols.json` without constraining anything.
+    ///
+    /// The channel itself stays general: the FAMA/SPLOT fixture generators feed
+    /// externally-authored feature-model clauses through it, where the fold is
+    /// their whole semantics. Only the compiler's producer guarantees
+    /// tautologies, and `compiler_core_tests` pins that guarantee.
     pub clauses: Vec<String>,
+    /// Authored root conjuncts: `(constraint_id, condition_text)`, id-ascending.
+    ///
+    /// The ONLY channel that carries authored policy into the root, and the
+    /// only one that appears in the §5.4 manifest roster. Folded after
+    /// [`Self::clauses`], in the order given.
+    pub constraints: Vec<(String, String)>,
+    /// Synthesized intra-facet cardinality conjuncts (ADR-0054 §5.2).
+    ///
+    /// Folded AFTER every authored constraint, in facet-name-ascending then
+    /// declared-value order. Asserted exactly like a constraint but deliberately
+    /// NOT rostered (§5.4): a core that reduces to a cardinality clause means the
+    /// *model* is over-constrained, not that a user violated a named policy.
+    pub cardinality: Vec<String>,
+}
+
+impl ConditionModel {
+    /// A model whose entire content is symbol-universe clauses: no authored
+    /// constraints, no synthesized cardinality.
+    ///
+    /// This is the shape the FAMA/SPLOT/synthetic fixture generators build —
+    /// externally authored feature models that have no ConfigFlux
+    /// `constraints` namespace, and whose clauses are their whole semantics.
+    /// A real product compile goes through `compiler_core`, which populates
+    /// every field explicitly.
+    pub fn from_clauses(bound_model_hash: String, clauses: Vec<String>) -> Self {
+        Self {
+            bound_model_hash,
+            clauses,
+            constraints: Vec::new(),
+            cardinality: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -495,7 +549,28 @@ fn parse_heuristic_tag(tag: &str) -> Result<VarOrderHeuristic> {
 /// surface.
 pub(crate) fn parse_condition_model(model: &ConditionModel) -> Result<Vec<ConditionExpr>> {
     validate_hash(&model.bound_model_hash)?;
-    parse_clauses(&model.clauses)
+    // ADR-0054 §5.1/§5.2 fold order, and it is load-bearing for the §5.4
+    // roster: symbol-universe clauses first (each lowers to `TRUE`, so the
+    // fold is the identity), then the authored constraints in the
+    // id-ascending order the caller supplied, then the synthesized
+    // cardinality conjuncts. A constraint's `root_index` in the manifest
+    // roster is its position in `model.constraints`, so the constraint block
+    // must stay contiguous and in caller order.
+    let mut exprs = parse_clauses(&model.clauses)?;
+    exprs.reserve(model.constraints.len() + model.cardinality.len());
+    for (id, condition) in &model.constraints {
+        exprs.push(
+            parse_condition_expr(condition)
+                .with_context(|| format!("constraint '{id}': {condition}"))?,
+        );
+    }
+    for clause in &model.cardinality {
+        exprs.push(
+            parse_condition_expr(clause)
+                .with_context(|| format!("synthesized cardinality clause: {clause}"))?,
+        );
+    }
+    Ok(exprs)
 }
 
 pub(crate) fn parse_clauses(clauses: &[String]) -> Result<Vec<ConditionExpr>> {

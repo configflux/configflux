@@ -1,8 +1,8 @@
 # Contributing to ConfigFlux
 
-Thank you for your interest in contributing to ConfigFlux. This document
-explains how to set up a development environment, make changes, and submit
-them for review.
+Thank you for your interest in ConfigFlux. This document explains what the
+project is looking for, how to report what you find, and how to build it from
+source.
 
 ## License
 
@@ -13,16 +13,74 @@ contribution you agree that you license your contribution to the Licensor
 Change License named in `LICENSE`, and under configflux's commercial license
 terms. See `NOTICE` for a plain-English summary of the license.
 
-## Getting Started
+## How to Contribute
+
+The most useful thing you can send this project is what you learned by using
+it: what broke, what confused you, what was missing, what you expected to
+happen instead. Reports and ideas are read and acted on directly, and they
+shape what gets built next.
+
+One thing up front, so you do not spend a weekend on something that cannot
+land: **ConfigFlux does not accept code contributions.** Pull requests opened
+against this repository are not merged, and there is no route by which an
+outside patch becomes part of a release. That is a decision about how the
+project is maintained, not a judgement about your change — and it is not a
+reason to stay quiet. If you found a bug, describe it. If you know the fix, say
+what it is in the issue. The reasoning travels even when the patch cannot.
+
+### What is welcome
+
+- **Bug reports** — especially with a reproduction. These are the single
+  highest-value thing you can file.
+- **Feature requests and use cases** — describe the problem you are trying to
+  solve, not only the feature you have in mind. The underlying use case is what
+  gets designed against.
+- **Design feedback and questions** — if a model, a schema, or a command-line
+  surface does not fit how you actually work, that is worth knowing before it
+  hardens.
+- **Documentation gaps** — if something was wrong, missing, or misleading, say
+  which page and what you expected to find instead.
+
+The [issue tracker](https://github.com/configflux/configflux/issues) is the
+place for all of it. There are templates for bug reports, feature requests, and
+questions.
+
+### What makes a good bug report
+
+The bug template asks for these, and they are what turn a report into a fix:
+
+- **A minimal reproduction** — the smallest input and the exact command that
+  triggers the problem. This is worth more than everything else combined.
+- **What you expected**, and what happened instead.
+- **The version** you ran (a release tag or `--version` output), and how you
+  installed it.
+- **The output** — error text, diagnostic codes, or a stack trace, pasted
+  rather than paraphrased.
+
+A report that lets a maintainer reproduce the problem in one command gets fixed
+quickly. A report that cannot be reproduced usually cannot be acted on at all,
+however well it is written.
+
+## Why the Project Works This Way
+
+ConfigFlux keeps one source of truth. This repository is the published form of
+the project rather than the tree where day-to-day development happens: each
+release replaces the contents here in a single commit, so what you clone always
+corresponds exactly to a released, tested version.
+
+That has a direct consequence. Anything committed here — including a merged
+pull request — would be overwritten by the next release. Merging one would
+promise something the project cannot keep, and running a review process whose
+results quietly disappear would waste your time and ours. So the project says
+plainly that the inbound path is issues, and puts its attention there instead.
+
+## Building from Source
+
+You do not need to build ConfigFlux to file a good issue — a release binary is
+enough for most reports. But building is the surest way to pin down a
+reproduction, and the source is here to be read.
 
 ### Prerequisites
-
-ConfigFlux is developed inside a dev container. The recommended workflow is to
-open the repository in a dev-container-aware editor (for example VS Code with
-the Dev Containers extension). The container image ships Bazel, Rust, and the
-C++ toolchain preconfigured.
-
-Alternatively, install the following manually:
 
 - **Bazel** (via Bazelisk)
 - **Rust** (stable toolchain)
@@ -38,78 +96,8 @@ bazel build //...
 bazel test //...
 ```
 
-## Development Workflow
-
-### 1. Find or Create an Issue
-
-All non-trivial changes should be tracked in an issue. Before starting work,
-check for an existing issue that covers your change. If none exists, create
-one.
-
-### 2. Branch
-
-Create a feature branch from `main`:
-
-```bash
-git checkout -b work/<short-description> main
-```
-
-Keep commits focused and atomic. Use conventional commit messages (for example
-`feat(compiler): add chunk deduplication`).
-
-### 3. Build and Test
-
-ConfigFlux uses Bazel exclusively for builds and tests. Do not use `cargo test`
-or `cargo check` directly.
-
-```bash
-# Build everything
-bazel build //...
-
-# Run the full test suite
-bazel test //...
-```
-
-All tests must pass before a change can be merged.
-
-### 4. Submit a Pull Request
-
-Push your branch and open a pull request against `main`. Include:
-
-- A clear title and description of the change.
-- The issue the change addresses (if applicable).
-- Evidence that tests pass.
-
-## Coding Standards
-
-### Rust
-
-- Follow standard Rust idioms.
-- `unsafe` blocks require a `// SAFETY:` comment explaining why the invariants
-  hold.
-- All public items must have doc comments.
-
-### C++
-
-- Minimum standard is C++20.
-- Follow Google C++ style (root `.clang-format`).
-- Use `clang`/`clang++` for compilation.
-- SDK code lives in `sdk/cpp/` and `sdk/ros2/`; runtime code stays in
-  `runtime/`.
-- See `docs/cpp-engineering-standards.md` for detailed rules.
-
-### General
-
-- Snake case for all configuration definitions and keys.
-- Keep parsing logic out of schema files; business logic belongs in resolvers.
-- Significant architectural decisions should be documented.
-
-## Testing
-
-- Write tests for every non-trivial change.
-- Use Bazel test targets. If a needed target does not exist, create it.
-- The project enforces requirement traceability; see
-  `docs/requirement-test-matrix.tsv`.
+ConfigFlux uses Bazel exclusively for builds and tests; `cargo test` and
+`cargo check` are not supported entry points.
 
 ## Security
 
@@ -118,5 +106,5 @@ Follow the reporting instructions in `SECURITY.md`.
 
 ## Questions
 
-If you have questions about contributing, open a discussion on the repository
-or email the maintainers at [hello@configflux.dev](mailto:hello@configflux.dev).
+If you have questions about ConfigFlux, open a question issue or email the
+maintainers at [hello@configflux.dev](mailto:hello@configflux.dev).

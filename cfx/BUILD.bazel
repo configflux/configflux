@@ -40,6 +40,9 @@ CFX_SRCS = [
     "src/options.rs",
     "src/pipeline.rs",
     "src/render.rs",
+    # `#[cfg(test)] mod tests` — compiled only into `cfx_unit_test`, but listed
+    # here because `rust_binary` and `rust_test` share this src list.
+    "src/tests.rs",
 ]
 
 rust_binary(
@@ -50,7 +53,7 @@ rust_binary(
     # ADR-0002 §5: feeds CARGO_PKG_VERSION so `#[command(version)]` resolves
     # `--version` to the workspace release version. Mirror /VERSION
     # (lint_repo.py enforces this).
-    version = "0.2.0",
+    version = "0.3.0",
     deps = CFX_DEPS,
 )
 
@@ -154,8 +157,16 @@ sh_test(
 # tag, exit 0), not claim the selection is satisfiable. A control selection that
 # binds `region` must have both verbs agree it is satisfiable. Also pins the
 # `--format json` resolve-context envelope (existing ResolveResult schema) and
-# double-run determinism. Drives the REAL compiler / cfx binaries. E2E impact:
-# smoke.
+# double-run determinism.
+#
+# Same agreement on the REMEDIATION PATH (configflux-0qk2): the "run: cfx explain
+# ..." command resolve prints on a rejection must reproduce the selection it just
+# refused. Uses the hero example, whose `prod_forbids_debug` constraint can be
+# split across the two input channels (log_level=debug via --selection-file,
+# environment=prod via --select) — the case where a hint rebuilt from the flags
+# alone names a different, satisfiable selection.
+#
+# Drives the REAL compiler / cfx binaries. E2E impact: smoke.
 sh_test(
     name = "cfx_resolve_explain_consistency_test",
     size = "medium",
@@ -167,12 +178,16 @@ sh_test(
         "//compiler:compiler",
         "//compiler:scenarios/s1_water_pump/smoke/cue/00_definitions.json",
         "//compiler:scenarios/s1_water_pump/smoke/cue/10_components.json",
+        "//examples:00-service-multi-env/00_definitions.json",
+        "//examples:00-service-multi-env/10_components.json",
     ],
     env = {
         "COMPILER_RLOCATION": "$(rootpath //compiler:compiler)",
         "CFX_RLOCATION": "$(rootpath :cfx)",
         "S1_DEFS_RLOCATION": "$(rootpath //compiler:scenarios/s1_water_pump/smoke/cue/00_definitions.json)",
         "S1_COMPONENTS_RLOCATION": "$(rootpath //compiler:scenarios/s1_water_pump/smoke/cue/10_components.json)",
+        "HERO_DEFS_RLOCATION": "$(rootpath //examples:00-service-multi-env/00_definitions.json)",
+        "HERO_COMPONENTS_RLOCATION": "$(rootpath //examples:00-service-multi-env/10_components.json)",
     },
     tags = [
         "cfx",

@@ -223,6 +223,10 @@ pub fn resolve_scoped(
             components: scoped_components,
             artifacts: raw.artifacts.clone(),
             facets: Default::default(),
+            // Empty for the same reason `facets` is: this is a per-scope slice
+            // built to drive resolution, not an authored model. Declarations are
+            // pack-global and the resolver never reads them.
+            constraints: Default::default(),
         };
         let resolved = resolve(scoped, context)?;
         outputs.insert(root, resolved);
@@ -633,6 +637,7 @@ mod tests {
             components,
             artifacts: HashMap::new(),
             facets: Default::default(),
+            constraints: Default::default(),
         }
     }
 
@@ -827,6 +832,7 @@ mod tests {
             components,
             artifacts: HashMap::new(),
             facets: Default::default(),
+            constraints: Default::default(),
         };
 
         let err = resolve(
@@ -917,6 +923,7 @@ mod tests {
             components,
             artifacts: HashMap::new(),
             facets: Default::default(),
+            constraints: Default::default(),
         };
 
         let ctx = ResolutionContext {
@@ -968,6 +975,7 @@ mod tests {
             components,
             artifacts: HashMap::new(),
             facets: Default::default(),
+            constraints: Default::default(),
         };
 
         let ctx = ResolutionContext {
@@ -1018,6 +1026,7 @@ mod tests {
             },
             artifacts,
             facets: Default::default(),
+            constraints: Default::default(),
         };
 
         let resolved = resolve(
@@ -1056,6 +1065,7 @@ mod tests {
             },
             artifacts: HashMap::new(),
             facets: Default::default(),
+            constraints: Default::default(),
         };
 
         let err = resolve(
@@ -1098,6 +1108,7 @@ mod tests {
             },
             artifacts: HashMap::new(),
             facets: Default::default(),
+            constraints: Default::default(),
         };
 
         let err = resolve(

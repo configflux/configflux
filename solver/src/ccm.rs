@@ -233,6 +233,25 @@ impl Symbols {
     }
 }
 
+/// One declared constraint carried by the top-level `ccm.manifest.json`
+/// roster (ADR-0054 §5.4). Public projection so a consumer can map an
+/// unsat-core clause back to the **authored** constraint that forbids it —
+/// the BDD root itself has no notion of clause identity.
+///
+/// Synthesized intra-facet cardinality conjuncts are deliberately absent
+/// from the roster: they are not authored policy, and naming them in a
+/// user-facing core would be noise (ADR-0054 §5.4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConstraintRef {
+    /// The authored `constraints:` entry id, e.g. `prod_forbids_debug`.
+    pub id: String,
+    /// The authored condition text, verbatim.
+    pub condition: String,
+    /// Position in the root AND-fold among the authored conjuncts. Gives the
+    /// roster a total, emission-stable order that consumers report in.
+    pub root_index: u32,
+}
+
 /// Public projection of `ccm.bdd.bin` per ADR-0005 §4. The node-table
 /// field stays `pub(crate)` so that backend-specific code in
 /// `backend_oxidd.rs` and `session.rs` can walk it without exposing
@@ -389,6 +408,30 @@ impl Ccm {
     #[allow(dead_code)]
     pub(crate) fn bridge_partition(&self) -> Option<&PartitionCcm> {
         self.payload.as_ref().and_then(|p| p.bridge.as_ref())
+    }
+
+    /// The declared-constraint roster from the top-level manifest
+    /// (ADR-0054 §5.4), in `root_index`-ascending order. Empty for the
+    /// empty-Ccm stub and for any model that declares no constraint.
+    ///
+    /// The order is the emitter's root AND-fold order, already `root_index`
+    /// ascending on disk; it is re-sorted here so a hand-fabricated or
+    /// future-reordered artifact still yields a deterministic report.
+    pub fn constraint_roster(&self) -> Vec<ConstraintRef> {
+        let Some(payload) = self.payload.as_ref() else {
+            return Vec::new();
+        };
+        let mut roster: Vec<ConstraintRef> = payload
+            .constraints
+            .iter()
+            .map(|entry| ConstraintRef {
+                id: entry.id.clone(),
+                condition: entry.condition.clone(),
+                root_index: entry.root_index,
+            })
+            .collect();
+        roster.sort_by(|a, b| a.root_index.cmp(&b.root_index).then_with(|| a.id.cmp(&b.id)));
+        roster
     }
 
     /// Content-address of the loaded artifact. Recorded in

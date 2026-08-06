@@ -131,14 +131,14 @@ RWORK="${WORK}/resolve"
 mkdir -p "${RWORK}"
 
 python3 -c 'import json,sys
-json.dump({"schema_version":3,"cmp_manifest_ref":sys.argv[1]},open(sys.argv[2],"w"))' \
+json.dump({"schema_version":4,"cmp_manifest_ref":sys.argv[1]},open(sys.argv[2],"w"))' \
   "${CMP}" "${RWORK}/open.req.json"
 "${INTERPRETER}" open --request-file "${RWORK}/open.req.json" --response-file "${RWORK}/open.res.json"
 
 python3 -c 'import json,sys
 o=json.load(open(sys.argv[1])); m=json.load(open(sys.argv[2]))
 env=m["environments"][sys.argv[4]]
-json.dump({"schema_version":3,"model_handle":o["model_handle"],"scope":sys.argv[3],
+json.dump({"schema_version":4,"model_handle":o["model_handle"],"scope":sys.argv[3],
           "context_tags":env.get("context_tags",{})},open(sys.argv[5],"w"))' \
   "${RWORK}/open.res.json" "${MANIFEST}" "${SCOPE}" "${ENV_NAME}" "${RWORK}/init.req.json"
 "${INTERPRETER}" init-selection-state \
@@ -155,7 +155,7 @@ for facet in ${facets}; do
   python3 -c 'import json,sys
 o=json.load(open(sys.argv[1])); s=json.load(open(sys.argv[2])); m=json.load(open(sys.argv[3]))
 opt=m["environments"][sys.argv[5]]["choices"][sys.argv[6]]
-json.dump({"schema_version":3,"model_handle":o["model_handle"],"scope":sys.argv[4],
+json.dump({"schema_version":4,"model_handle":o["model_handle"],"scope":sys.argv[4],
           "selection_state":s["selection_state"],
           "selection_delta":{"facet":sys.argv[6],"option":opt}},open(sys.argv[7],"w"))' \
     "${RWORK}/open.res.json" "${prev}" "${MANIFEST}" "${SCOPE}" "${ENV_NAME}" "${facet}" \
@@ -168,7 +168,7 @@ done
 
 python3 -c 'import json,sys
 o=json.load(open(sys.argv[1])); s=json.load(open(sys.argv[2]))
-json.dump({"schema_version":3,"model_handle":o["model_handle"],"scope":sys.argv[3],
+json.dump({"schema_version":4,"model_handle":o["model_handle"],"scope":sys.argv[3],
           "selection_state":s["selection_state"]},open(sys.argv[4],"w"))' \
   "${RWORK}/open.res.json" "${prev}" "${SCOPE}" "${RWORK}/resolve.req.json"
 

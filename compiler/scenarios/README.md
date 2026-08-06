@@ -1,6 +1,6 @@
 # ConfigFlux Scenario Pack
 
-This folder is the Loop 0 verification harness baseline for V1.
+This folder is the scenario verification harness baseline for V1.
 
 ## Naming Convention
 - Scenario folder: `s<id>_<domain>` in snake_case (examples: `s1_water_pump`, `s4_mobile_robot`).
@@ -30,10 +30,10 @@ scenarios/
   metrics/
 ```
 
-## Golden Artifact Format (Loop 0 Baseline)
+## Golden Artifact Format (Scenario Baseline)
 Each smoke scenario uses these baseline golden outputs:
 - `golden/verify_report.ok.json`: expected verification report shape and check results.
 - `golden/resolved_output.json`: resolved 100% payload for the default smoke context.
 - `golden/emitted_manifest.json`: deterministic summary of emitted IR contents.
 
-Loop 0 keeps this minimal and deterministic so CI can run fast and fail loudly.
+The baseline harness keeps this minimal and deterministic so CI can run fast and fail loudly.

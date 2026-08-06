@@ -8,7 +8,10 @@
 
 use std::io::Write;
 
-use compiler::loader_api::{ExplainRejectionResult, GetSelectionOptionsResult, ResolveResult};
+use compiler::loader_api::{
+    ExplainRejectionResult, GetSelectionOptionsResult, ResolveResult,
+    CONSTRAINT_ENTITY_PATH_PREFIX,
+};
 
 use crate::explain::ResolveContextConflict;
 use crate::options::OptionsOutcome;
@@ -151,22 +154,42 @@ pub fn render_resolve_context<W: Write>(
 }
 
 /// Render a resolve-context unsatisfiability as human text (configflux-sc69):
-/// the same "unsatisfiable" verdict `cfx resolve` reaches, but EXPLAINED — name
-/// the tag(s) an active condition needs that no choice or context tag binds, and
-/// echo the resolve diagnostic (which carries the failing condition) and its
-/// hint. Determinism-safe: no hashes, no timestamps, no absolute paths.
+/// the same "unsatisfiable" verdict `cfx resolve` reaches, but EXPLAINED — echo
+/// the resolve diagnostic (which carries the failing condition) and its hint.
+/// Determinism-safe: no hashes, no timestamps, no absolute paths.
+///
+/// Two causes reach this renderer and they need different headlines. The
+/// original one is an active condition naming a tag nothing binds, which is
+/// what `unbound_tags` describes. The second arrived with ADR-0054: resolve now
+/// also fails closed when the total post-default assignment violates a declared
+/// constraint (configflux-4sjk). That case has no unbound tag at all — every
+/// facet IS bound, and that is precisely why the policy could be decided — so
+/// the original headline would be a false statement. The `constraints/` prefix
+/// ADR-0054 §6 puts on `entity_path` is the discriminator.
 pub fn render_resolve_context_text<W: Write>(
     conflict: &ResolveContextConflict,
     out: &mut W,
 ) -> std::io::Result<()> {
-    writeln!(
-        out,
-        "selection is unsatisfiable: an active model condition references a tag that no selection binds"
-    )?;
-    if !conflict.unbound_tags.is_empty() {
-        writeln!(out, "  unbound tag(s): {}", conflict.unbound_tags.join(", "))?;
+    let first = conflict.resolve_result.diagnostics.diagnostics.first();
+    let constraint_violation = first
+        .and_then(|diag| diag.entity_path.as_deref())
+        .is_some_and(|path| path.starts_with(CONSTRAINT_ENTITY_PATH_PREFIX));
+
+    if constraint_violation {
+        writeln!(
+            out,
+            "selection is unsatisfiable: it violates a constraint the model declares"
+        )?;
+    } else {
+        writeln!(
+            out,
+            "selection is unsatisfiable: an active model condition references a tag that no selection binds"
+        )?;
+        if !conflict.unbound_tags.is_empty() {
+            writeln!(out, "  unbound tag(s): {}", conflict.unbound_tags.join(", "))?;
+        }
     }
-    if let Some(diag) = conflict.resolve_result.diagnostics.diagnostics.first() {
+    if let Some(diag) = first {
         writeln!(out, "  {}", diag.message)?;
         if let Some(hint) = &diag.hint {
             writeln!(out, "  hint: {hint}")?;
@@ -444,6 +467,42 @@ mod tests {
         assert!(text.contains("unbound tag(s): region"), "{text}");
         assert!(text.contains("region == 'eu'"), "{text}");
         assert!(text.contains("hint:"), "{text}");
+    }
+
+    #[test]
+    fn resolve_context_text_does_not_blame_an_unbound_tag_for_a_policy_violation() {
+        // ADR-0054 §6 / configflux-4sjk: a constraint violation reaches this
+        // renderer with every facet BOUND (that is why the policy could be
+        // decided at all), so the unbound-tag headline would be a false
+        // statement. The `constraints/` entity_path prefix is the discriminator.
+        let mut conflict = context_conflict();
+        let diag = &mut conflict.resolve_result.diagnostics.diagnostics[0];
+        diag.code = "E_SELECTION_CONFLICT".to_string();
+        diag.message =
+            "Selection violates constraint 'prod_forbids_debug': 'environment != 'prod' || log_level != 'debug''"
+                .to_string();
+        diag.entity_path = Some("constraints/prod_forbids_debug".to_string());
+        diag.hint = Some(
+            "Run 'cfx explain' with the same selection to see the minimal conflicting set."
+                .to_string(),
+        );
+
+        let mut buf = Vec::new();
+        render_resolve_context_text(&conflict, &mut buf).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+
+        assert!(text.contains("unsatisfiable"), "{text}");
+        assert!(
+            text.contains("violates a constraint the model declares"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("unbound tag"),
+            "a bound-facet policy violation must not be reported as an unbound tag: {text}"
+        );
+        // Still explains: names the constraint, quotes it, and keeps the hint.
+        assert!(text.contains("prod_forbids_debug"), "{text}");
+        assert!(text.contains("cfx explain"), "{text}");
     }
 
     #[test]

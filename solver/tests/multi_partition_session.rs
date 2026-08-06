@@ -36,7 +36,6 @@
 // the `Session` boundary, this file would no longer compile.
 
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -132,14 +131,7 @@ fn build_region_symbols_json() -> Vec<u8> {
 }
 
 fn tempdir_for(test_name: &str) -> PathBuf {
-    let base = std::env::temp_dir().join(format!(
-        "configflux-solver-multi-part-{}-{}",
-        test_name,
-        std::process::id()
-    ));
-    let _ = fs::remove_dir_all(&base);
-    fs::create_dir_all(&base).expect("mkdir tempdir");
-    base
+    fixture_v2::unique_temp_dir("configflux-solver-multi-part", test_name)
 }
 
 /// Lay down the 2-partition cluster + bridge fixture used by every

@@ -23,7 +23,6 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use compiler::ccm_emitter::{emit_ccm_dir_with_heuristic, ConditionModel};
 use solver::{OxiddBackend, Session};
@@ -52,10 +51,10 @@ const HEURISTIC_CLAUSE_DFS: &str = "clause-grouped-dfs";
 /// That's a real risk: if a future refactor flattens clauses or
 /// re-sorts them, this fixture must move with it.
 fn small_model_with_cross_tree() -> ConditionModel {
-    ConditionModel {
+    ConditionModel::from_clauses(
         // 32-byte hex digest required by `validate_hash`.
-        bound_model_hash: "33".repeat(32),
-        clauses: vec![
+        "33".repeat(32),
+        vec![
             // Cross-tree implications FIRST so DFS first-sight order
             // diverges from alphabetical. `!A || B` ≡ `A -> B`. Each
             // pair connects non-adjacent letters in the alphabet.
@@ -77,7 +76,7 @@ fn small_model_with_cross_tree() -> ConditionModel {
             "k == 'on'".to_string(),
             "l == 'on'".to_string(),
         ],
-    }
+    )
 }
 
 /// All 12 facet tags appearing in the test model. Order does not
@@ -151,16 +150,11 @@ fn load_session(dir: &PathBuf) -> Session<OxiddBackend> {
     Session::<OxiddBackend>::new(ccm).expect("deserialize emitted BDD")
 }
 
+// Collision-proof temp-dir naming shared across the compiler integration
+// tests; see `temp_dirs.rs` (configflux-rvpb).
+#[path = "temp_dirs.rs"]
+mod temp_dirs;
+
 fn tempdir_for(test_name: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock after epoch")
-        .as_nanos();
-    let base = std::env::temp_dir().join(format!(
-        "configflux-compiler-{test_name}-{}-{nanos}",
-        std::process::id()
-    ));
-    let _ = fs::remove_dir_all(&base);
-    fs::create_dir_all(&base).expect("mkdir tempdir");
-    base
+    temp_dirs::unique_temp_dir("configflux-compiler", test_name)
 }

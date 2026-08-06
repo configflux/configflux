@@ -145,6 +145,13 @@ fn first_message(diagnostics: &DiagnosticsReport) -> String {
 /// (exit `3`, ADR-0042 §3 — the "run cfx explain" case); everything else
 /// (unknown facet, invalid option, loader/schema faults) is a usage error
 /// (exit `2`).
+///
+/// BOTH branches carry `code: message`. The unsatisfiable branch used to drop
+/// them and let `emit_error` print the "run cfx explain" guidance alone, which
+/// left the user with a verdict and no reason. ADR-0054 §6 makes that
+/// untenable: a resolve rejected by a declared policy carries the constraint's
+/// id and its condition text in exactly this payload (configflux-4sjk), and a
+/// surface that discards it cannot tell the user WHICH policy they broke.
 pub(crate) fn classify(diagnostics: &DiagnosticsReport) -> PipelineError {
     let code = first_code(diagnostics);
     let message = first_message(diagnostics);
@@ -152,7 +159,7 @@ pub(crate) fn classify(diagnostics: &DiagnosticsReport) -> PipelineError {
         code,
         E_SELECTION_CONFLICT | E_SELECTION_UNSATISFIABLE | E_RESOLVE_CONTEXT_UNSATISFIED
     ) {
-        PipelineError::unsat(message)
+        PipelineError::unsat(format!("{code}: {message}"))
     } else {
         PipelineError::usage(format!("{code}: {message}"))
     }

@@ -9,7 +9,7 @@
 //! `resolve_hash`, and `bom_hash` match a checked-in baseline fixture byte
 //! for byte.
 //!
-//! Unlike `scenario_loop7_tests`, which only proves hashes are stable within
+//! Unlike `scenario_scale_tests`, which only proves hashes are stable within
 //! a single process run, this test pins the values so any change to
 //! canonicalization, HashMap iteration, or the hashing pipeline fails loudly
 //! even if the new hashes are internally consistent.
@@ -112,7 +112,7 @@ struct ScenarioSpec {
     chunks: &'static [(&'static str, &'static str)],
     /// Context tags (from profile.toml `default_context`) used to build the
     /// canonical selection state. Choices are left empty — this is the
-    /// context-only resolution path exercised by scenario_loop5.
+    /// context-only resolution path exercised by scenario_early_binding_tests.
     context: &'static [(&'static str, &'static str)],
 }
 

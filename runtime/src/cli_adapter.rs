@@ -2,12 +2,19 @@
 
 pub(crate) use clap::{error::ErrorKind, Args, Parser, Subcommand};
 pub(crate) use compiler::product_api::OperationStatus;
+// The three write commands are NOT imported here: `commit_configuration`,
+// `set_parameter` and `set_parameters_atomically` are reached through the
+// `crate::write_enforcement::*_with_solver_validation` wrappers, which run the
+// compiler operation and then enforce the model's declared constraints over the
+// resulting assignment (configflux-jraj, ADR-0017 amendment D1). The wrappers
+// live in `write_enforcement` rather than here because the C ABI staticlib must
+// call them too and its crate root excludes this clap-based shell.
 pub(crate) use compiler::runtime_api::{
-    check_for_updates, commit_configuration, export_pending_sync_bundle, get_auto_reset_policy,
+    check_for_updates, export_pending_sync_bundle, get_auto_reset_policy,
     get_configuration_identity, get_dirty_metadata, get_parameter, get_scope_metadata,
     get_sync_status, list_dirty_parameters, list_parameters, pull_updates, push_audit_events,
-    rollback_dirty, set_auto_reset_policy, set_parameter,
-    set_parameters_atomically, subscribe_events, CheckForUpdatesRequest, CheckForUpdatesResult,
+    rollback_dirty, set_auto_reset_policy,
+    subscribe_events, CheckForUpdatesRequest, CheckForUpdatesResult,
     CommitConfigurationRequest, CommitConfigurationResult, ExportPendingSyncBundleRequest,
     ExportPendingSyncBundleResult, GetAutoResetPolicyRequest, GetAutoResetPolicyResult,
     GetConfigurationIdentityRequest, GetConfigurationIdentityResult, GetDirtyMetadataRequest,
@@ -266,7 +273,7 @@ where
             stdin,
             stdout,
             stderr,
-            set_parameter_with_solver_validation,
+            crate::write_enforcement::set_parameter_with_solver_validation,
         ),
         Commands::SetParametersAtomically(io) => execute_json_command::<
             SetParametersAtomicallyRequest,
@@ -281,7 +288,7 @@ where
             stdin,
             stdout,
             stderr,
-            set_parameters_atomically_with_solver_validation,
+            crate::write_enforcement::set_parameters_atomically_with_solver_validation,
         ),
         Commands::ExplainRejection(io) => execute_json_command::<
             RuntimeExplainRejectionRequest,
@@ -356,7 +363,7 @@ where
             stdin,
             stdout,
             stderr,
-            commit_configuration,
+            crate::write_enforcement::commit_configuration_with_solver_validation,
         ),
         Commands::GetConfigurationIdentity(io) => execute_json_command::<
             GetConfigurationIdentityRequest,
@@ -637,15 +644,55 @@ pub(crate) fn parse_request_payload<Req: DeserializeOwned>(
     command_name: &str,
     payload: &[u8],
 ) -> Result<Req, TransportError> {
-    serde_json::from_slice(payload).map_err(|_| {
+    serde_json::from_slice(payload).map_err(|err| {
         TransportError::new(
             E_RUNTIME_CLI_REQUEST_INVALID,
-            format!(
-                "Malformed JSON request envelope for '{}' command",
-                command_name
-            ),
+            describe_request_parse_error(command_name, &err),
         )
     })
+}
+
+/// Build an `E_RUNTIME_CLI_REQUEST_INVALID` diagnostic that names the offending
+/// request field when serde can identify one, without ever echoing a field
+/// *value* (`docs/runtime-cli-contract.md` section 7, non-leaky stderr policy).
+/// serde embeds the value inline for type/shape errors (e.g.
+/// `invalid type: string "..."`), so those are reported by failure category and
+/// location only; a missing required field carries no value, so its schema
+/// field name is surfaced verbatim to tell the caller what to add.
+pub(crate) fn describe_request_parse_error(command_name: &str, err: &serde_json::Error) -> String {
+    let location = format!("line {}, column {}", err.line(), err.column());
+
+    // serde's canonical "missing field `<name>`" text carries only the schema
+    // field name (never a user-supplied value), so it is safe to surface.
+    if let Some(field) = missing_field_name(&err.to_string()) {
+        return format!(
+            "Request for '{command_name}' command is missing required field '{field}' ({location})"
+        );
+    }
+
+    // Any other error may embed the offending value in serde's own message, so
+    // report the failure category and location only — never serde's text.
+    let category = if err.is_syntax() {
+        "malformed JSON syntax"
+    } else if err.is_eof() {
+        "truncated or empty JSON request"
+    } else if err.is_io() {
+        "request I/O error"
+    } else {
+        // Data error: a field has the wrong type or shape.
+        "a request field has an invalid type or value"
+    };
+    format!("Request for '{command_name}' command is invalid: {category} ({location})")
+}
+
+/// Extract the field name from serde's canonical "missing field `<name>`"
+/// message, returning `None` for any other error text. That wording is defined
+/// by `serde::de::Error::missing_field` and is stable across serde versions; the
+/// captured name is a compile-time struct field, never user input.
+fn missing_field_name(message: &str) -> Option<&str> {
+    let rest = message.strip_prefix("missing field `")?;
+    let end = rest.find('`')?;
+    Some(&rest[..end])
 }
 
 pub(crate) fn write_response_payload<Res: Serialize, W: Write>(
@@ -703,104 +750,6 @@ pub(crate) fn io_error_class(err: &std::io::Error) -> &'static str {
         ErrorKind::WouldBlock => "would_block",
         ErrorKind::TimedOut => "timed_out",
         _ => "io_error",
-    }
-}
-
-/// `set_parameter` with the solver option-validity pre-check (ADR-0017 §3,
-/// §5; configflux-g3f.3). The check runs before the compiler write so a
-/// constraint-violating selection is rejected with the `E_SELECTION_*`
-/// family and the snapshot is returned **unchanged** (matching the existing
-/// "session state left unchanged on conflict" contract). Writes that do not
-/// map to a solver facet (free-form scalars) fall straight through to the
-/// existing validation, unchanged. After ADR-0030 D2, every opened snapshot
-/// carries a usable `.ccm`, so the availability skip is gone.
-pub(crate) fn set_parameter_with_solver_validation(
-    request: SetParameterRequest,
-) -> SetParameterResult {
-    if let Some(rejection) = crate::solver_validation::validate_set_parameter(
-        &request.runtime_snapshot,
-        &request.path,
-        &request.value,
-    ) {
-        return solver_rejected_set_parameter(&request, rejection);
-    }
-    set_parameter(request)
-}
-
-/// `set_parameters_atomically` with the solver option-validity pre-check.
-/// Every write is validated up front; the whole transaction is rejected
-/// (atomic, snapshot unchanged) on the first constraint violation, before
-/// any dirty write is applied.
-pub(crate) fn set_parameters_atomically_with_solver_validation(
-    request: SetParametersAtomicallyRequest,
-) -> SetParametersAtomicallyResult {
-    for write in &request.writes {
-        if let Some(rejection) = crate::solver_validation::validate_set_parameter(
-            &request.runtime_snapshot,
-            &write.path,
-            &write.value,
-        ) {
-            return solver_rejected_set_parameters_atomically(&request, &write.path, rejection);
-        }
-    }
-    set_parameters_atomically(request)
-}
-
-fn solver_rejection_report(
-    rejection: &crate::solver_validation::SolverRejection,
-    write_path: &str,
-) -> compiler::product_api::DiagnosticsReport {
-    compiler::product_api::DiagnosticsReport {
-        schema_version: compiler::product_api::PRODUCT_SCHEMA_VERSION,
-        diagnostics: vec![rejection.to_diagnostic(write_path)],
-        error_count: 1,
-        warning_count: 0,
-    }
-}
-
-fn solver_rejected_set_parameter(
-    request: &SetParameterRequest,
-    rejection: crate::solver_validation::SolverRejection,
-) -> SetParameterResult {
-    let snapshot = &request.runtime_snapshot;
-    let diagnostics = solver_rejection_report(&rejection, &request.path);
-    SetParameterResult {
-        schema_version: compiler::product_api::PRODUCT_SCHEMA_VERSION,
-        status: OperationStatus::Error,
-        model_hash: snapshot.model_hash.clone(),
-        resolve_hash: snapshot.resolve_hash.clone(),
-        scope: snapshot.scope.clone(),
-        path: request.path.clone(),
-        runtime_snapshot: None,
-        parameter: None,
-        error_count: diagnostics.error_count,
-        warning_count: diagnostics.warning_count,
-        diagnostics_ref: None,
-        diagnostics,
-    }
-}
-
-fn solver_rejected_set_parameters_atomically(
-    request: &SetParametersAtomicallyRequest,
-    write_path: &str,
-    rejection: crate::solver_validation::SolverRejection,
-) -> SetParametersAtomicallyResult {
-    let snapshot = &request.runtime_snapshot;
-    let diagnostics = solver_rejection_report(&rejection, write_path);
-    SetParametersAtomicallyResult {
-        schema_version: compiler::product_api::PRODUCT_SCHEMA_VERSION,
-        status: OperationStatus::Error,
-        model_hash: snapshot.model_hash.clone(),
-        resolve_hash: snapshot.resolve_hash.clone(),
-        scope: snapshot.scope.clone(),
-        runtime_snapshot: None,
-        applied_count: 0,
-        rejected_paths: vec![write_path.to_string()],
-        dirty_generation_max: 0,
-        error_count: diagnostics.error_count,
-        warning_count: diagnostics.warning_count,
-        diagnostics_ref: None,
-        diagnostics,
     }
 }
 

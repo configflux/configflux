@@ -1,21 +1,36 @@
 # ConfigFlux Architecture
 
-This document captures the architecture of the configuration compiler and resolver pipeline,
-including incremental compilation, scoped resolution, output generation, and runtime handoff.
+This document captures the architecture of the configuration compiler, constraint solver, and
+resolution pipeline: CUE authoring, incremental compilation, compiled constraint models,
+solver-decided selection, scoped resolution, output generation, and runtime handoff.
 
 ## Terminology
+- Authoring Front End: CUE. Source chunks are authored in CUE and exported to JSON for ingestion; CUE resolves inheritance and pack-level merge before export.
 - Configuration Compiler: application for model ingestion, merge, link/verify, and compiled artifact emission.
-- Model Parser/Loader: separate application that runs after compiler stage to load compiled model artifacts and resolve concrete outputs.
-- Target Runtime Daemon: target-side central configuration service for efficient CRUD access.
+- Compiled Model Package (CMP): the compiler's data output — manifest, global index, and per-chunk IR.
+- Compiled Constraint Model (CCM): the compiler's *logic* output, emitted alongside the CMP — a symbol table mapping facet and option names to solver variables plus a reduced ordered binary decision diagram (BDD) encoding the model's constraints.
+- Constraint Solver: the decision engine. Queries the CCM to answer which options remain valid, whether a selection is satisfiable, and why a rejected selection is impossible.
+- Model Parser/Loader: separate application that runs after the compiler stage to load compiled model artifacts and resolve concrete outputs.
+- Target Runtime Daemon: target-side central configuration service for efficient CRUD access. Deferred — see the deferred-surfaces note below.
 - Code Compiler: language toolchains (for example rustc/clang) that consume generated outputs.
-- Wrappers: optional integration layers (for example C++/ROS2), not the product core.
+- Wrappers: optional integration layers (for example C++/ROS 2), not the product core.
+
+The division of authority across the pipeline is one sentence:
+
+> **The solver decides. The compiler composes.**
+
+The solver adjudicates every selection decision over a modeled facet; the
+compiler builds the envelope around that verdict and renders the diagnostics.
+Neither substitutes for the other, and neither silently takes over the other's
+job when an artifact is missing.
 
 ## Goals
 - Ingest & Infer: Ingest many decentralized chunks (authored in CUE, exported to JSON) to infer the global "150% model". The configuration model is not an input, but an aggregate graph derived from these chunks.
 - Incremental Compilation: Compile source chunks into a hashed Incremental IR (Chunks + Global Index) to support sub-second incremental builds and delta updates.
+- Compiled Decision Logic: Compile the model's conditions into a solver-queryable constraint model (the CCM) so selection questions — which options are still valid, is this selection satisfiable, why was it rejected — are answered by a decision procedure rather than by re-interpreting condition strings at query time.
 - Scoped Resolution: Support resolving the 100% model for a specific Target Scope (e.g., a single component or subsystem) rather than forcing a monolithic platform resolution. This enables component-level builds, unit testing, and parallel processing.
 - Artifact as Config: Treat "Artifacts" (binaries, drivers, blobs) as first-class configuration parameters. The system validates the logic of artifact selection, leaving physical retrieval to the runtime loader.
-- Stateless Resolution: The Resolver accepts the compiled 150% IR and a specific Context (i.e. BOM or scoped BOM) to produce a strict, generic "100% Data Model", without generating language-specific code directly.
+- Stateless Resolution: Resolution accepts the compiled 150% IR and a specific Context (i.e. BOM or scoped BOM) to produce a strict, generic "100% Data Model", without generating language-specific code directly. Selection state is a caller payload, not hidden session state.
 - Auditable Output: Emit software BOM and trace metadata that identify exactly what was selected/resolved.
 
 ## Product Usage Modes
@@ -25,12 +40,20 @@ including incremental compilation, scoped resolution, output generation, and run
 
 ## Product Ownership and Security Responsibilities
 - Configuration Compiler:
-  - owns model ingestion, verification, and compiled model emission.
-  - does not own post-compile answer orchestration.
+  - owns model ingestion, verification, compiled model emission, and CCM emission.
+  - owns composition of resolved envelopes and the rendering of diagnostics.
+  - does not own post-compile answer orchestration, and does not adjudicate selection decisions over modeled facets.
+- Constraint Solver:
+  - owns the selection verdict: the valid-option set for a modeled facet, the accept/reject decision on a selection, the satisfiability gate on resolve, and the unsat core behind a rejection.
+  - does not own envelope shape, output serialization, or diagnostic wording.
 - Interpreter (post-compile answer engine):
   - owns CMP-driven answer flows: open/options/select/explain/resolve/export/SBOM.
   - owns command-boundary input validation and deterministic diagnostics behavior.
   - emits evidence-friendly deterministic outputs for audit and traceability.
+- One-shot resolver CLI (`cfx`):
+  - presentation only: parses arguments, builds request envelopes, renders results.
+  - collapses open → select → resolve → export into a single operator command.
+  - holds no decision logic of its own; it reaches the solver through a shared composition seam rather than depending on it directly.
 - Runtime Surface (shipped today):
   - owns the runtime CLI/SDK surface, persisted overlay state, and runtime mutation/sync policies.
   - does not imply a target-side daemon/server protocol.
@@ -40,14 +63,17 @@ Out of scope for interpreter productization:
 - runtime persistence and promotion/sync workflows
 
 ## Constraints
-- Snake case only for definition IDs, component names, and parameter keys; enforced at ingestion.
+- Snake case only for definition IDs, component names, parameter keys, artifact IDs, and facet IDs; enforced by the CUE authoring schema.
 - Dependency edges are explicit (e.g., component `depends_on` list) and validated during Link and Verify.
-- Shipped product boundary is three application layers with shared model semantics:
+- Shipped product boundary is four application layers with shared model semantics:
   - configuration compiler
   - model parser/loader (`configflux-interpreter`)
+  - one-shot resolver CLI (`cfx`)
   - runtime CLI/SDK stack (`configflux-runtime`, `sdk/cpp`, `sdk/ros2`)
+- A usable CCM is a hard precondition for the selection path. `options`, `select`, `resolve`, and `runtime-open` fail closed with a stable diagnostic when no usable solver model is reachable — an empty reference, an unloadable artifact, or a symbol-less stub. There is no availability fallback to a legacy engine, because which engine decided must not be a function of which files happen to be on disk.
 - A target-resident daemon/server protocol remains a deferred extension rather than current shipped scope.
 - Canonical model semantics are defined in `docs/model-spec.md`.
+- Term definitions are in `docs/glossary.md`.
 - Cross-app contracts are defined in `docs/interface-contracts.md`.
 - Canonical software BOM schema is defined in `docs/software-bom-schema.md`.
 - Canonical end-to-end example is defined in `docs/canonical-worked-example.md`.
@@ -59,14 +85,23 @@ Solid edges are current shipped flows. Dashed edges point to deferred surfaces.
 ```mermaid
 flowchart LR
     subgraph authoring["Authoring and compile stage (shipped)"]
-        chunks["Source chunks<br/>CUE-exported JSON"] --> compiler["configflux-compiler<br/>ingest + link/verify + compile"] --> cmp["Compiled model package<br/>cmp.manifest.json<br/>index.cfir.json + chunk-*.cfir"]
+        cue["Authored CUE packs<br/>inheritance + merge resolved at export"] --> chunks["Source chunks<br/>CUE-exported JSON"]
+        chunks --> compiler["configflux-compiler<br/>ingest + link/verify + compile"]
+        compiler --> cmp["Compiled model package<br/>cmp.manifest.json<br/>index.cfir.json + chunk-*.cfir"]
+        compiler --> ccm["Compiled constraint model<br/>ccm/ symbol table + BDD partitions"]
     end
 
     subgraph late_binding["Late-binding and export stage (shipped)"]
         interpreter["configflux-interpreter<br/>open | init-selection-state | options | select | explain | resolve | export"] --> resolved["Resolved outputs<br/>resolve.result.json<br/>export-resolved<br/>SoftwareBomV1"]
+        cfx["cfx<br/>one-shot open + select + resolve + export"] --> resolved
+        solver["Constraint solver<br/>valid options | satisfiability | unsat core"]
     end
 
     cmp --> interpreter
+    cmp --> cfx
+    ccm --> solver
+    solver -- decides --> interpreter
+    solver -- decides --> cfx
 
     subgraph runtime_stack["Runtime and integration stage (shipped)"]
         runtime_cli["configflux-runtime<br/>runtime-open + v1/v2 operations"] <--> runtime_state["Persisted runtime state<br/>baseline snapshot<br/>committed overlay<br/>dirty overlay journal"]
@@ -75,6 +110,8 @@ flowchart LR
     end
 
     resolved --> runtime_cli
+    ccm --> runtime_cli
+    solver -- adjudicates writes --> runtime_cli
 
     subgraph consumers["Current consumers (shipped)"]
         build["Build systems and code compilers"]
@@ -84,6 +121,7 @@ flowchart LR
 
     resolved --> build
     interpreter --> operators
+    cfx --> operators
     runtime_cli --> operators
     resolved --> audit
 
@@ -93,6 +131,8 @@ flowchart LR
 
     gates -. verifies .-> compiler
     gates -. verifies .-> interpreter
+    gates -. verifies .-> cfx
+    gates -. verifies .-> solver
     gates -. verifies .-> runtime_cli
     gates -. verifies .-> sdk_cpp
     gates -. verifies .-> sdk_ros2
@@ -118,98 +158,85 @@ flowchart LR
 - Transport/protocol: intentionally open for now; selected later by efficiency constraints.
 - Sequencing: implementation is deferred until compiler and parser/loader milestones reach required maturity.
 
-### Loop 10 Runtime Delivery Contract Slice (Implemented Reference API)
-Loop 10 implements a reference in-process runtime API in `compiler/src/runtime_api/`
-while keeping transport/server protocol decisions deferred.
+### Shipped Runtime Surface (In-Process API + CLI)
+The runtime ships as an in-process API in `compiler/src/runtime_api/` and an
+executable CLI in `runtime/` layered directly over it, with a 1:1
+command-to-API mapping. Transport/server protocol decisions stay deferred;
+everything below is local and deterministic.
 
-Input envelope (`runtime_open_request`):
-- `schema_version: 1`
-- `model_hash: string`
-- `resolve_hash: string`
-- `scope: string`
-- `resolved_output: map<string, resolved_config>`
-- `resolved_component_dependencies: map<string, map<string, list<string>>>`
-- `resolved_artifacts: map<string, artifact_core>`
-- `context_tags: map<string, string>` (optional for strict hash-mismatch checks)
-- `choices: map<string, string>` (optional for strict hash-mismatch checks)
+Opening a runtime session takes a resolved snapshot plus its identity: the
+model and resolve hashes, the scope, the resolved output and its component
+dependencies and artifact bindings, the selection context that produced it
+(context tags, explicit choices, and any auto-bound facet defaults), and a
+reference to the compiled constraint model. Persisted state — committed
+overlay, dirty overlay and its journal, auto-reset policy, sync status, and
+the audit log — is carried in the same envelope so a session can be restored
+exactly. The authoritative field list lives in
+`docs/runtime-cli-contract.md` and `docs/runtime-v2-contract.md`; it is not
+duplicated here.
 
-Output/CRUD subset (Loop 10 in scope):
-- `get_scope_metadata(scope_root)`:
-  - returns deterministic scope stats `{ component_count, parameter_count, artifact_count }`.
-- `get_parameter(path)`:
-  - returns one parameter payload with metadata/value and artifact binding metadata (when applicable).
-- `list_parameters(scope_root)`:
-  - returns deterministic lexicographically ordered parameter path list.
+Read operations return deterministic scope statistics, a lexicographically
+ordered parameter path list, and individual parameter payloads with their
+metadata and artifact binding. Write operations extend to atomic multi-write,
+dirty-state inspection and rollback, commit and configuration identity,
+auto-reset policy, update check/pull and sync status, event subscription, and
+audit export.
 
 Validation boundaries:
+- a usable CCM is required at open; a snapshot whose reference is missing or unloadable is rejected rather than opened in a degraded mode.
 - runtime envelope hash/model identity mismatch is rejected.
 - unknown scope root or parameter path is rejected explicitly.
-- parameter updates (if enabled in Loop 10 write-slice) must enforce:
-  - type compatibility,
-  - lifecycle mutability policy,
-  - limits (numeric and length),
-  - artifact reference existence for `type = "artifact"`.
+- parameter writes enforce type compatibility, lifecycle mutability policy, numeric and length limits, and artifact reference existence for `type = "artifact"`.
+- a write to a constrained facet is adjudicated by the solver against the same CCM the open validated; a solver fault fails the write rather than silently permitting it.
 
-Out of scope for Loop 10:
-- transport protocol freeze,
-- auth/ARBAC enforcement,
-- remote sync/promotion workflow,
-- distributed runtime sessions,
-- persistent conflict merge policy.
-
-Verification strategy seeded for Loop 10:
-- contract tests:
-  - envelope required fields and deterministic list ordering.
-- mutation tests:
-  - unknown scope/path, type mismatch, limit violation, lifecycle write rejection.
-- determinism tests:
-  - repeated read responses are byte-stable for identical runtime state.
-- scenario tests:
-  - S1 and S3 smoke runtime read-path checks from resolved snapshots.
-
-### Loop 11 Runtime Binary Surface (Implemented)
-Loop 11 delivers an executable runtime CLI in `runtime/` over the Loop 10 API slice.
-
-Runtime command surface:
-- `runtime-open`
-- `get-scope-metadata`
-- `list-parameters`
-- `get-parameter`
-- `set-parameter`
-
-Deterministic transport behavior:
+Transport behavior:
 - stdin/stdout JSON mode plus request/response file mode.
-- stable exit-code mapping:
-  - `0` (`status=ok`)
-  - `2` (`status=error`)
-  - `1` (transport/parsing/file-I/O failure)
+- stable exit-code mapping: `0` (`status=ok`), `2` (`status=error`), `1` (transport/parsing/file-I/O failure).
 - bounded request size and fail-closed parsing.
+- transport diagnostics: `E_RUNTIME_CLI_ARGS_INVALID`, `E_RUNTIME_CLI_REQUEST_IO`, `E_RUNTIME_CLI_REQUEST_TOO_LARGE`, `E_RUNTIME_CLI_REQUEST_INVALID`, `E_RUNTIME_CLI_RESPONSE_IO`.
 
-Runtime CLI transport diagnostics:
-- `E_RUNTIME_CLI_ARGS_INVALID`
-- `E_RUNTIME_CLI_REQUEST_IO`
-- `E_RUNTIME_CLI_REQUEST_TOO_LARGE`
-- `E_RUNTIME_CLI_REQUEST_INVALID`
-- `E_RUNTIME_CLI_RESPONSE_IO`
-
-Loop 11 verification coverage:
-- RUN matrix `RUN-001` .. `RUN-020` across S1/S2/S3/S4 smoke+medium.
-- deterministic replay checks and non-leaky stderr checks.
-- full compiler -> interpreter -> runtime chain assertions with hash lineage continuity.
+Still out of scope: transport protocol freeze, auth/ARBAC enforcement,
+distributed runtime sessions, and persistent conflict merge policy.
 
 ## Core Models
 - `schema::Config` (raw, flexible): optional fields, supports partial overlays and recursive overrides.
 - `schema::Component`: `type` is optional during ingestion to permit overlays; must be present by resolution time.
-- `schema::Parameter`: optional fields, supports `inherits` and `overrides`.
+- `schema::Parameter`: optional fields, supports recursive `overrides`. It also carries an `inherits` field, but that field is resolved by CUE during whole-pack export — see the inheritance note below.
 - `schema::Artifact`: a specialized parameter type representing a binary or external resource. It includes metadata (logical name, version, hash, path) but does not contain the binary data itself.
+- `schema::Facet`: a first-class declared selection dimension — an ordered, non-empty, unique value domain with an optional default and an open/closed flag. Facet keys occupy a fourth top-level namespace alongside definitions, components, and artifacts. Declaration is opt-in per facet; an undeclared facet keeps the legacy behavior where its domain is exactly the literals some condition compares it against.
 - `resolved_models::ResolvedConfig` / `ResolvedComponent` / `ResolvedParameter`: strict output; required fields enforced (type, value, safety defaults, etc.).
+- `loader_api::contracts::SelectionState`, `GetSelectionOptionsResult`, `ResolveResult`: the cross-application contract layer. Canonical field lists are in `docs/model-spec.md` and `docs/interface-contracts.md`.
+
+**Inheritance is authored in CUE, not in TOML.** CUE dereferences `inherits`
+during whole-pack export, so the JSON a chunk ingests as already carries
+resolved parameters. A hand-written TOML chunk that declares `inherits`
+anywhere — including inside a nested `overrides` payload — is rejected at
+ingest with a diagnostic naming the offending path. The merge and graph rules
+below still describe how inheritance edges are validated, because link/verify
+continues to check them; they no longer describe an authoring surface.
 
 ## Compiler Output: The Incremental IR
 The Compiler emits an Incremental Object Graph, consisting of:
 - IR Chunks: one binary artifact per source file (CUE authored, exported to JSON for ingestion), identified by content hash (SHA256). Contains the localized schema and logic for that component.
 - Global Object Index: a manifest mapping logical components to their specific Chunk Hashes.
+- CMP Manifest: the entry point a loader opens against, binding the model identity to its index and chunk set.
 
 Benefit: This structure allows for delta processing. When a single source file changes, only its corresponding Chunk is regenerated, and the Global Index is updated. This enables fast incremental builds and delta-based deployment packages.
+
+## Compiler Output: The Compiled Constraint Model
+Alongside the CMP the compiler emits the CCM into a sibling `ccm/` directory —
+the same model's *logic*, compiled for a decision procedure rather than for
+data access:
+- Symbol table: facet and option names mapped to solver variables. A facet absent from this table is unconstrained by definition, and enumerating it stays a compiler responsibility.
+- BDD partitions: the model's constraints as reduced ordered binary decision diagrams, split across partitions with a partition manifest. Declared facet order is significant for symbol emission and diagram layout.
+- Provenance sidecar: a deterministic, non-hashed record of the producing tool and the content hashes of the artifacts it accompanies. It sits outside every hash preimage, so it never perturbs model identity.
+
+The loader advertises the CCM location on its model handle, resolved as the
+`ccm` directory beside the CMP manifest. Compiling the constraint model at
+build time is what lets selection questions be answered by a decision
+procedure at query time instead of by re-parsing condition strings per query,
+and it is what makes "why was this rejected" answerable as a minimal unsat
+core rather than a guess.
 
 ### Incremental IR Storage (Spec)
 IR Chunk (per source file):
@@ -230,6 +257,7 @@ Global Object Index:
   - `component_index`: map `component_id -> chunk_hash`.
   - `definition_index`: map `definition_id -> chunk_hash`.
   - `artifact_index`: map `artifact_id -> chunk_hash`.
+  - `facet_index`: map `facet_id -> chunk_hash` (declaration to owning chunk; enters the model identity preimage exactly as the other entity indices do).
   - `config_hash`: sha256 of sorted index content for cache identity.
 
 Rules:
@@ -239,6 +267,11 @@ Rules:
 
 ## Link and Verify Semantics (Ingestion)
 The following describes the current merge rules used during Link and Verify.
+These are cross-chunk rules. Within a single authored pack, CUE has already
+performed inheritance resolution and pack-level merge before export, and
+re-validates the invariants it enforced (see the inheritance note under Core
+Models). The principle is CUE authors, the compiler re-validates: no invariant
+is trusted merely because the authoring layer promised it.
 ```mermaid
 flowchart TD
     merge_partial --> def_check{definition id exists?}
@@ -277,10 +310,28 @@ Dependency graph:
 - Cycle checks run at compile time, before resolution (diamonds are permitted; ADR-0048).
 
 ## Resolution (Stateless and Scoped)
-The Resolver accepts three inputs:
+
+Resolution is the *composition* half of the pipeline. It does not decide which
+selections are legal — the solver already did that — it prunes the 150% model
+to the strict 100% output for a selection the solver accepted, and it fails
+closed if the selection is unsatisfiable. Selection state is a caller payload
+carrying model identity, scope, context tags, and explicit choices; there is no
+hidden session state, so the same input always produces the same output and the
+same hashes.
+
+Resolution accepts three inputs:
 - 150% IR: the Global Object Index (or a subset of it).
-- Context: the BOM/Tags (e.g., variant=heavy).
+- Context: the BOM/Tags (e.g., variant=heavy), plus explicit facet choices.
 - Target Scope: a selector defining the root of resolution (e.g., platform:all will generate one config model per top level platform, or components:motor_controller for a unit build; if no more information is provided this will generate all possible motor_controller configs).
+
+Facet defaults are bound at resolve time, not at selection time. An unbound
+declared facet that carries a default is auto-bound to it, with precedence
+explicit choice > context tag > declared default. The binding is recorded as
+first-class provenance in the resolved output and folded into the resolve
+identity, so a value that came from a default is distinguishable from the same
+value chosen explicitly. A declared facet with no default that an active
+condition needs fails resolution, naming the facet and its domain rather than
+falling back to a generic unsatisfied-context error.
 
 ### Target Scope Selector (Spec)
 Syntax (ASCII):
@@ -311,14 +362,18 @@ Process:
 - Prune and Validate: drop disabled components and validate semantic constraints on the remaining tree.
 
 Condition evaluation:
-- Uses the in-crate recursive-descent evaluator in
-  `compiler/src/conditions.rs` against tags from
+- Conditions are parsed once into a typed AST (`ConditionExpr`) and evaluated
+  over it. The module is `compiler/src/conditions/` — parser, evaluator,
+  rewriter, and implication checker — and evaluation runs against tags from
   `ResolutionContext`.
 - Grammar: Boolean combinations of `ident == '…' | ident != '…'` atoms
   with `&&`, `||`, `!`, and parenthesisation. Single- and double-quoted
   string literals are both accepted. References to missing tags surface
   a `"Failed to evaluate condition"` error except on short-circuited
   branches.
+- The same typed AST is what the CCM emitter lowers into BDD form, so the
+  compiler's condition semantics and the solver's constraint model are two
+  readings of one parse, not two independent interpretations of a string.
 
 ## Resolver Output: The Scoped 100% Model
 The Resolver is language-agnostic and emits a Configuration Fragment representing the resolved state of the requested Target Scope.
@@ -408,27 +463,29 @@ Rules:
 Goal:
 - Prove that A implies B for any edge A -> B where A and B are component conditions.
 
-Strategy:
-1) Syntactic subset check (fast path)
-   - Supported grammar: conjunctions of simple comparisons joined by `&&`.
-   - Supported atoms: `tag == "value"` and `tag != "value"` (single or double quotes).
-   - Rule: A implies B if every atom in B is present in A with the same operator/value.
-   - Any unsupported operator (`||`, `<`, `>`, functions) or mixed types exits this path.
+Strategy — one path, not a fast path plus a fallback. Both sides are parsed
+into the typed `ConditionExpr` AST and decided by an exhaustive truth-table
+search:
+- Collect every tag mentioned by an atom on either side, and for each tag the
+  set of literal values those atoms compare it against.
+- Extend each tag's value set with one fresh sentinel standing for "any other
+  value", so "some value nobody wrote down" is represented exactly once.
+- Enumerate the Cartesian product of those finite domains. Every assignment is
+  *total*, so evaluation is plainly two-valued — there is no missing-tag rung
+  to short-circuit over.
+- The check fails as soon as one assignment satisfies A while falsifying B;
+  that assignment is the counterexample.
 
-2) Eval-driven proof matrix (fallback)
-   - Build a finite tag domain from all literal values referenced in conditions,
-     unioned with the declared domain of any first-class facet whose name
-     matches the tag (ADR-0047: a declared facet's `values` are its full domain,
-     including default arms no condition references; an open facet's domain is
-     declared ∪ referenced literals).
-   - For each tag, include every value in that domain plus a sentinel "other".
-   - Evaluate A and B for every Cartesian product assignment of the domain.
-   - If any assignment yields A == true and B == false, implication fails.
-   - If evaluation cannot be performed (unknown tag, type mismatch), fail closed.
+This search is logically sound, so it accepts every edge the older syntactic
+subset shortcut accepted, plus the cross-operator implications that shortcut
+missed. Sentinel selection is deterministic, so the enumerated domains — and
+therefore the verdict — are stable for identical inputs.
 
 Notes:
-- Missing condition is treated as `true`.
-- If neither path can prove implication, the compiler errors rather than assume safety.
+- Missing condition is treated as `true`: a missing consequent is implied by anything, and a missing antecedent is the always-true precondition.
+- An unparseable condition surfaces a descriptive parse error rather than a silent verdict.
+- If implication cannot be proven, the compiler errors rather than assume safety.
+- The domain rule here is deliberately local to the dependency check. Option enumeration is a different question and uses a different domain: for a facet it is the declared domain (an open facet extends it with the literals conditions reference; an undeclared facet has only those literals), which is why a declared default arm no condition mentions is still offered as a valid option.
 
 ### Missing Value Policy (Spec)
 Rules:
@@ -441,15 +498,21 @@ Rules:
 
 ### Snake Case Enforcement (Spec)
 Scope:
-- Enforced at ingestion for definition IDs, component IDs, parameter keys, and artifact IDs.
+- Definition IDs, component IDs, parameter keys, artifact IDs, and facet IDs.
+
+Enforcement point:
+- The CUE authoring schema (`compiler/cue/schema.cue`), via the shared `#snakeId`
+  constraint applied to each namespace's key type. Authoring-layer enforcement
+  means a bad ID is a CUE error at export, before any chunk reaches the compiler.
 
 Rules:
-- Must match `^[a-z][a-z0-9_]*$`.
-- No leading underscore, no double underscores, no uppercase.
-- Error on any violation before merge/link to avoid partial state.
+- Must match `^[a-z]([a-z0-9]|_[a-z0-9])*_?$`.
+- Must start with a lowercase letter: no leading underscore, no uppercase.
+- No consecutive underscores; a single trailing underscore is permitted.
 
 Notes:
 - `package` and `version` are not snake_case constrained.
+- Because CUE closes each namespace's key type, a non-matching key is rejected as an unknown field rather than merged and flagged later.
 
 ## Error Philosophy
 - Duplicate definition IDs: error.
@@ -458,9 +521,11 @@ Notes:
 - Missing required fields at resolution (component type, parameter type/value): error.
 - Condition eval failures: error with the original condition string for debuggability.
 - Cyclic dependencies in the object graph: error during Link and Verify (diamonds are permitted; ADR-0048).
+- Authored `inherits` in a TOML chunk: error at ingest, naming the offending path.
+- No usable constraint model on the selection path: error, never a silent fall back to a different engine.
+- A solver fault on a solver-owned query: error. A fault that quietly switches engines is indistinguishable from rot, so it is surfaced rather than absorbed.
 
 ## Extension Points
 - Additional merge conflict rules (e.g., lifecycle/safety conflicts) can be enforced in `merge_params`.
-- Alternative condition evaluators can replace the in-crate evaluator
-  if richer typing or policy is needed.
+- Alternative solver backends can sit behind the constraint-model interface; the CCM's on-disk form is versioned so a backend change is a recompile, not a contract break.
 - Generators can consume the scoped 100% model to produce bindings, runtime databases, or artifact manifests.

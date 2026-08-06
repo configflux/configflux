@@ -116,25 +116,19 @@ step() { printf '\n=== %s ===\n' "$1"; }
 # ---------------------------------------------------------------------------
 # 1) compiler compile  (CMP package + sibling .ccm)
 # ---------------------------------------------------------------------------
-# The compiler derives `model_hash` from the `--source` argument STRINGS
-# (source_id = the literal path) plus file content. To make `model_hash` —
-# and therefore the cascading selection_state_hash / resolve_hash and the
-# golden — independent of where the runfiles tree lives, stage the sources
-# into the writable out dir and compile with FILENAME-ONLY source ids from
-# inside it. Verified stable across distinct working directories.
+# `model_hash` covers the CONTENT of the sources and nothing else (ADR-0056),
+# so the golden holds wherever the runfiles tree lives and the sources can be
+# compiled in place under their real paths. This step used to stage copies and
+# compile with filename-only source ids, because the hash once covered the
+# `--source` argument strings too; that scaffolding is gone. Compiling straight
+# from the runfiles paths now also witnesses the invariant — these are absolute
+# and sandbox-specific, and the golden below pins the hashes they produce.
 step "compile"
-SRC_DIR="${OUT}/src"
-mkdir -p "${SRC_DIR}"
-cp "${DEFS}" "${SRC_DIR}/00_definitions.json"
-cp "${COMPONENTS}" "${SRC_DIR}/10_components.json"
-(
-  cd "${SRC_DIR}"
-  "${COMPILER}" compile \
-    --source 00_definitions.json \
-    --source 10_components.json \
-    --out "${OUT}" \
-    > "${OUT}/compile.result.json"
-)
+"${COMPILER}" compile \
+  --source "${DEFS}" \
+  --source "${COMPONENTS}" \
+  --out "${OUT}" \
+  > "${OUT}/compile.result.json"
 assert_status_ok "${OUT}/compile.result.json" "compile"
 [[ -f "${OUT}/cmp.manifest.json" ]] || fail "compile: cmp.manifest.json missing"
 [[ -f "${OUT}/ccm/ccm.symbols.json" ]] || fail "compile: sibling .ccm not emitted"
@@ -145,7 +139,7 @@ echo "  -> CMP + .ccm produced"
 # ---------------------------------------------------------------------------
 step "open"
 python3 -c 'import json,sys
-json.dump({"schema_version":3,"cmp_manifest_ref":sys.argv[1]},open(sys.argv[2],"w"))' \
+json.dump({"schema_version":4,"cmp_manifest_ref":sys.argv[1]},open(sys.argv[2],"w"))' \
   "${OUT}/cmp.manifest.json" "${OUT}/open.req.json"
 "${INTERPRETER}" open \
   --request-file "${OUT}/open.req.json" \
@@ -163,7 +157,7 @@ step "options (motor_class)"
 # empty state first (this probe carries no context and no prior choices).
 python3 -c 'import json,sys
 o=json.load(open(sys.argv[1]))
-json.dump({"schema_version":3,"model_handle":o["model_handle"],"scope":sys.argv[3],
+json.dump({"schema_version":4,"model_handle":o["model_handle"],"scope":sys.argv[3],
           "context_tags":{}},open(sys.argv[2],"w"))' \
   "${OUT}/open.res.json" "${OUT}/options_init.req.json" "${SCOPE}"
 "${INTERPRETER}" init-selection-state \
@@ -172,7 +166,7 @@ json.dump({"schema_version":3,"model_handle":o["model_handle"],"scope":sys.argv[
 assert_status_ok "${OUT}/options_init.res.json" "options init"
 python3 -c 'import json,sys
 o=json.load(open(sys.argv[1])); s=json.load(open(sys.argv[2]))
-json.dump({"schema_version":3,"model_handle":o["model_handle"],"scope":sys.argv[4],
+json.dump({"schema_version":4,"model_handle":o["model_handle"],"scope":sys.argv[4],
           "selection_state":s["selection_state"],
           "facet":"motor_class"},open(sys.argv[3],"w"))' \
   "${OUT}/open.res.json" "${OUT}/options_init.res.json" "${OUT}/options_probe.req.json" "${SCOPE}"
@@ -200,7 +194,7 @@ echo "  -> solver valid_options(motor_class) = ${OPTS}; declared default = ${DEF
 step "init-selection-state"
 python3 -c 'import json,sys
 o=json.load(open(sys.argv[1]))
-json.dump({"schema_version":3,"model_handle":o["model_handle"],"scope":sys.argv[3],
+json.dump({"schema_version":4,"model_handle":o["model_handle"],"scope":sys.argv[3],
           "context_tags":{"encoder_type":"absolute"}},open(sys.argv[2],"w"))' \
   "${OUT}/open.res.json" "${OUT}/init.req.json" "${SCOPE}"
 "${INTERPRETER}" init-selection-state \
@@ -215,7 +209,7 @@ echo "  -> initial selection state (encoder_type=absolute pinned)"
 step "select #1 motor_class=brushed_dc"
 python3 -c 'import json,sys
 o=json.load(open(sys.argv[1])); s=json.load(open(sys.argv[2]))
-json.dump({"schema_version":3,"model_handle":o["model_handle"],"scope":sys.argv[4],
+json.dump({"schema_version":4,"model_handle":o["model_handle"],"scope":sys.argv[4],
           "selection_state":s["selection_state"],
           "selection_delta":{"facet":"motor_class","option":"brushed_dc"}},
           open(sys.argv[3],"w"))' \
@@ -232,7 +226,7 @@ echo "  -> applied motor_class=brushed_dc"
 step "select #2 power_rating=high"
 python3 -c 'import json,sys
 o=json.load(open(sys.argv[1])); s=json.load(open(sys.argv[2]))
-json.dump({"schema_version":3,"model_handle":o["model_handle"],"scope":sys.argv[4],
+json.dump({"schema_version":4,"model_handle":o["model_handle"],"scope":sys.argv[4],
           "selection_state":s["selection_state"],
           "selection_delta":{"facet":"power_rating","option":"high"}},
           open(sys.argv[3],"w"))' \
@@ -252,7 +246,7 @@ echo "  -> applied power_rating=high; choices=${CHOICES}"
 step "resolve"
 python3 -c 'import json,sys
 o=json.load(open(sys.argv[1])); s=json.load(open(sys.argv[2]))
-json.dump({"schema_version":3,"model_handle":o["model_handle"],"scope":sys.argv[4],
+json.dump({"schema_version":4,"model_handle":o["model_handle"],"scope":sys.argv[4],
           "selection_state":s["selection_state"]},open(sys.argv[3],"w"))' \
   "${OUT}/open.res.json" "${OUT}/sel2.res.json" "${OUT}/resolve.req.json" "${SCOPE}"
 "${INTERPRETER}" resolve \
@@ -285,7 +279,7 @@ echo "  -> overrides verified: control_mode=${CM}, current_limit=${CL}"
 step "runtime-open"
 python3 -c 'import json,sys
 d=json.load(open(sys.argv[1])); o=json.load(open(sys.argv[2]))
-req={"schema_version":3,"model_hash":d["model_hash"],
+req={"schema_version":4,"model_hash":d["model_hash"],
      "ccm_ref":o["model_handle"]["ccm_ref"],"resolve_hash":d["resolve_hash"],
      "scope":d["scope"],"resolved_output":d["resolved_output"],
      "resolved_component_dependencies":d.get("resolved_component_dependencies",{}),
@@ -307,7 +301,7 @@ PARAM_PATH="component.motion_controller.param.pid_gain_trim"
 step "get-parameter (initial)"
 python3 -c 'import json,sys
 ro=json.load(open(sys.argv[1]))
-json.dump({"schema_version":3,"runtime_snapshot":ro["runtime_snapshot"],
+json.dump({"schema_version":4,"runtime_snapshot":ro["runtime_snapshot"],
           "path":sys.argv[3]},open(sys.argv[2],"w"))' \
   "${OUT}/ropen.res.json" "${OUT}/get1.req.json" "${PARAM_PATH}"
 "${RUNTIME}" get-parameter \
@@ -324,7 +318,7 @@ echo "  -> initial pid_gain_trim = ${INIT_VAL}"
 step "set-parameter (pid_gain_trim=0.42)"
 python3 -c 'import json,sys
 ro=json.load(open(sys.argv[1]))
-json.dump({"schema_version":3,"runtime_snapshot":ro["runtime_snapshot"],
+json.dump({"schema_version":4,"runtime_snapshot":ro["runtime_snapshot"],
           "path":sys.argv[3],"value":0.42},open(sys.argv[2],"w"))' \
   "${OUT}/ropen.res.json" "${OUT}/set.req.json" "${PARAM_PATH}"
 "${RUNTIME}" set-parameter \
@@ -338,7 +332,7 @@ step "get-parameter (after set)"
 # Read back from the snapshot returned by set-parameter (carries the dirty write).
 python3 -c 'import json,sys
 sp=json.load(open(sys.argv[1]))
-json.dump({"schema_version":3,"runtime_snapshot":sp["runtime_snapshot"],
+json.dump({"schema_version":4,"runtime_snapshot":sp["runtime_snapshot"],
           "path":sys.argv[3]},open(sys.argv[2],"w"))' \
   "${OUT}/set.res.json" "${OUT}/get2.req.json" "${PARAM_PATH}"
 "${RUNTIME}" get-parameter \
@@ -350,19 +344,29 @@ RT_VAL="$(jget "${OUT}/get2.res.json" 'd["parameter"]["value"]')"
 echo "  -> set/get round-trip confirmed: pid_gain_trim = ${RT_VAL}"
 
 # ---------------------------------------------------------------------------
-# 10) runtime set-parameter  — constraint-violating facet write is REJECTED
+# 10) runtime set-parameter  — a write to a path that is not a parameter is
+#     REJECTED
 # ---------------------------------------------------------------------------
-# The runtime set-parameter handler runs the solver option-validity pre-check
-# (g3f.3): a write whose param_key names a real model facet is adjudicated by
-# solver::Session::valid_options before any compiler write. Writing an option
-# the facet does not admit ('nonexistent_option' for the 'power_rating' facet)
-# must be rejected with the selection/constraint error family, snapshot
-# unchanged. This is the runtime CONSTRAINT_VIOLATED path the example supports.
-step "set-parameter (constraint violation, expect rejection)"
+# 'power_rating' is declared as a FACET (00_definitions.json) and appears in
+# this model only inside component `condition` strings — motor_drive's actual
+# params are control_mode / current_limit / motor_driver / pwm_frequency. So
+# there is no such parameter to write, and the runtime reports
+# E_RUNTIME_UNKNOWN_PATH.
+#
+# This step used to claim it demonstrated constraint enforcement, and passed
+# only because the solver ran ahead of the compiler and answered about the
+# same-named facet first — which made the reported code depend on whether the
+# supplied VALUE happened to be a valid option of that facet. Since
+# configflux-jraj (ADR-0017 amendment D1) the compiler's own path validation
+# runs first, so a non-existent path is reported as one whatever value is
+# supplied. This example has no genuine runtime constraint violation to show:
+# its only lifecycle:runtime parameter is a float, and none of its
+# runtime-writable parameters is a facet (tracked as a follow-up).
+step "set-parameter (path is not a parameter, expect rejection)"
 BAD_PATH="component.motor_drive.param.power_rating"
 python3 -c 'import json,sys
 ro=json.load(open(sys.argv[1]))
-json.dump({"schema_version":3,"runtime_snapshot":ro["runtime_snapshot"],
+json.dump({"schema_version":4,"runtime_snapshot":ro["runtime_snapshot"],
           "path":sys.argv[3],"value":"nonexistent_option"},open(sys.argv[2],"w"))' \
   "${OUT}/ropen.res.json" "${OUT}/badset.req.json" "${BAD_PATH}"
 set +e
@@ -375,16 +379,12 @@ set -e
 BAD_STATUS="$(jget "${OUT}/badset.res.json" 'd["status"]')"
 [[ "${BAD_STATUS}" == "error" ]] || fail "constraint set: expected status error, got ${BAD_STATUS}"
 BAD_CODE="$(jget "${OUT}/badset.res.json" 'd["diagnostics"]["diagnostics"][0]["code"]')"
-case "${BAD_CODE}" in
-  E_SELECTION_INVALID_OPTION|E_SELECTION_CONFLICT|E_SELECTION_UNSATISFIABLE|E_SELECTION_UNKNOWN_FACET)
-    ;;
-  *)
-    echo "--- rejection response ---" >&2
-    cat "${OUT}/badset.res.json" >&2 || true
-    fail "constraint set: expected a selection/constraint error code, got ${BAD_CODE}"
-    ;;
-esac
-echo "  -> constraint-violating write rejected: ${BAD_CODE}"
+if [[ "${BAD_CODE}" != "E_RUNTIME_UNKNOWN_PATH" ]]; then
+  echo "--- rejection response ---" >&2
+  cat "${OUT}/badset.res.json" >&2 || true
+  fail "bad-path set: expected E_RUNTIME_UNKNOWN_PATH, got ${BAD_CODE}"
+fi
+echo "  -> write to a non-parameter path rejected: ${BAD_CODE}"
 
 step "DONE — full solver-path E2E green"
-echo "compile -> open -> options -> init -> select x2 -> resolve(golden) -> runtime-open -> get/set/get -> constraint-reject"
+echo "compile -> open -> options -> init -> select x2 -> resolve(golden) -> runtime-open -> get/set/get -> unknown-path-reject"

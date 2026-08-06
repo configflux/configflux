@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: BUSL-1.1 -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ConfigFlux Model Explorer</title>
+  <meta name="description" content="A static, local, read-only explorer for ConfigFlux model, resolution, and explain artifacts. No build step, no network, no backend.">
+  <link rel="stylesheet" href="css/explorer.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <!-- Screen-reader announcements for load results and errors. -->
+  <div id="live-region" class="visually-hidden" aria-live="polite" role="status"></div>
+
+  <header class="app-bar">
+    <h1>ConfigFlux Model Explorer</h1>
+    <span class="tagline">static &middot; local &middot; read-only</span>
+    <span class="spacer"></span>
+    <span id="loaded-name" aria-live="polite"></span>
+    <button id="theme-toggle" type="button" aria-pressed="false">Dark mode</button>
+  </header>
+
+  <main id="main">
+    <div id="drop-zone" class="loadbar">
+      <label class="file-label" for="file-input">
+        Open artifact JSON
+        <input id="file-input" type="file" accept="application/json,.json" aria-describedby="load-hint">
+      </label>
+      <span id="load-hint" class="hint">
+        Pick a file or drag one here — an inspect summary, <code>cfx options</code> list,
+        resolved snapshot, or explain output. Samples live in <code>explorer/fixtures/</code>.
+      </span>
+    </div>
+
+    <div id="error-region" hidden></div>
+
+    <div class="tablist" role="tablist" aria-label="Explorer views">
+      <button id="tab-model" role="tab" aria-controls="panel-model" aria-selected="true" tabindex="0">Model</button>
+      <button id="tab-resolution" role="tab" aria-controls="panel-resolution" aria-selected="false" tabindex="-1">Resolution</button>
+      <button id="tab-explain" role="tab" aria-controls="panel-explain" aria-selected="false" tabindex="-1">Explain</button>
+    </div>
+
+    <section id="panel-model" role="tabpanel" aria-labelledby="tab-model" tabindex="0">
+      <p class="placeholder">
+        Load a model summary (<code>compiler inspect … summary</code>) or a
+        facet-options list (<code>cfx options --format json</code>) to browse the
+        component / facet / option structure.
+      </p>
+    </section>
+
+    <section id="panel-resolution" role="tabpanel" aria-labelledby="tab-resolution" tabindex="0" hidden>
+      <p class="placeholder">
+        Load a resolved snapshot (<code>cfx resolve --format json</code>) to see the
+        hash lineage and the resolved parameters table.
+      </p>
+    </section>
+
+    <section id="panel-explain" role="tabpanel" aria-labelledby="tab-explain" tabindex="0" hidden>
+      <p class="placeholder">
+        Load an explain output (<code>cfx explain --format json</code>) to see the
+        minimal conflicting-constraint set behind a rejected selection.
+      </p>
+    </section>
+  </main>
+
+  <footer class="app-foot">
+    <p>
+      Renders ConfigFlux canonical JSON artifacts only. It never runs ConfigFlux,
+      makes no network requests, and writes nothing. Works from <code>file://</code>
+      (Firefox / Safari) or any static file server.
+    </p>
+  </footer>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>

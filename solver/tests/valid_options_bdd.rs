@@ -11,7 +11,6 @@
 // acceptance paths. Never imports `oxidd::*` (ADR-0003 §2/§3).
 
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -132,14 +131,7 @@ fn materialize_ccm_dir(
 }
 
 fn tempdir_for(test_name: &str) -> PathBuf {
-    let base = std::env::temp_dir().join(format!(
-        "configflux-solver-valid-options-{}-{}",
-        test_name,
-        std::process::id()
-    ));
-    let _ = fs::remove_dir_all(&base);
-    fs::create_dir_all(&base).expect("mkdir tempdir");
-    base
+    fixture_v2::unique_temp_dir("configflux-solver-valid-options", test_name)
 }
 
 fn load_xor_and_auto_session(tempdir_label: &str) -> Session<OxiddBackend> {

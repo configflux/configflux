@@ -3,12 +3,13 @@
 use crate::conditions;
 use crate::product_api::PRODUCT_SCHEMA_VERSION;
 use crate::resolver::{resolve, ResolutionContext};
+use crate::scenario_test_support::unique_temp_dir;
 use crate::{verify_ir_dir, Compiler};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::{json, Value as JsonValue};
 use std::collections::{BTreeMap, HashMap};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 const S1_SOURCE_DEFS: &str = "scenarios/s1_water_pump/smoke/chunks/00_definitions.toml";
 const S1_SOURCE_COMPONENTS: &str = "scenarios/s1_water_pump/smoke/chunks/10_components.toml";
@@ -57,7 +58,7 @@ struct ScenarioProfile {
 }
 
 #[derive(Debug)]
-struct Loop0Metrics {
+struct BaselineMetrics {
     ingest_us: u128,
     verify_us: u128,
     resolve_us: u128,
@@ -70,7 +71,7 @@ struct ClosedLoopOutputs {
     verify_report: JsonValue,
     resolved_output: JsonValue,
     emitted_manifest: JsonValue,
-    metrics: Loop0Metrics,
+    metrics: BaselineMetrics,
 }
 
 fn load_profile() -> Result<ScenarioProfile> {
@@ -145,37 +146,22 @@ fn run_s1_closed_loop(extra_chunks: &[(&str, &str)]) -> Result<ClosedLoopOutputs
     let resolve_us = resolve_start.elapsed().as_micros();
 
     let emit_start = Instant::now();
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .context("Failed to compute unique timestamp")?
-        .as_nanos();
-    let temp_dir = std::env::temp_dir().join(format!(
-        "configflux-loop0-s1-smoke-{}-{}",
-        std::process::id(),
-        unique
-    ));
-    std::fs::create_dir_all(&temp_dir)
-        .with_context(|| format!("Failed to create temp dir '{}'", temp_dir.display()))?;
+    let temp_dir = unique_temp_dir("cfx-baseline", "s1-smoke")?;
 
-    compiler.emit_ir(&temp_dir)?;
-    verify_ir_dir(&temp_dir)?;
+    compiler.emit_ir(&temp_dir.path)?;
+    verify_ir_dir(&temp_dir.path)?;
 
-    let index_bytes = std::fs::read(temp_dir.join("index.cfir.json")).with_context(|| {
-        format!(
-            "Failed to read emitted IR index '{}'",
-            temp_dir.join("index.cfir.json").display()
-        )
-    })?;
+    let index_path = temp_dir.path.join("index.cfir.json");
+    let index_bytes = std::fs::read(&index_path)
+        .with_context(|| format!("Failed to read emitted IR index '{}'", index_path.display()))?;
     let emitted_manifest = summarize_emitted_manifest(&index_bytes)?;
-
-    let _ = std::fs::remove_dir_all(&temp_dir);
     let emit_us = emit_start.elapsed().as_micros();
 
     Ok(ClosedLoopOutputs {
         verify_report,
         resolved_output,
         emitted_manifest,
-        metrics: Loop0Metrics {
+        metrics: BaselineMetrics {
             ingest_us,
             verify_us,
             resolve_us,
@@ -209,37 +195,22 @@ fn run_s5_closed_loop(extra_chunks: &[(&str, &str)]) -> Result<ClosedLoopOutputs
     let resolve_us = resolve_start.elapsed().as_micros();
 
     let emit_start = Instant::now();
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .context("Failed to compute unique timestamp")?
-        .as_nanos();
-    let temp_dir = std::env::temp_dir().join(format!(
-        "configflux-loop0-s5-smoke-{}-{}",
-        std::process::id(),
-        unique
-    ));
-    std::fs::create_dir_all(&temp_dir)
-        .with_context(|| format!("Failed to create temp dir '{}'", temp_dir.display()))?;
+    let temp_dir = unique_temp_dir("cfx-baseline", "s5-smoke")?;
 
-    compiler.emit_ir(&temp_dir)?;
-    verify_ir_dir(&temp_dir)?;
+    compiler.emit_ir(&temp_dir.path)?;
+    verify_ir_dir(&temp_dir.path)?;
 
-    let index_bytes = std::fs::read(temp_dir.join("index.cfir.json")).with_context(|| {
-        format!(
-            "Failed to read emitted IR index '{}'",
-            temp_dir.join("index.cfir.json").display()
-        )
-    })?;
+    let index_path = temp_dir.path.join("index.cfir.json");
+    let index_bytes = std::fs::read(&index_path)
+        .with_context(|| format!("Failed to read emitted IR index '{}'", index_path.display()))?;
     let emitted_manifest = summarize_emitted_manifest(&index_bytes)?;
-
-    let _ = std::fs::remove_dir_all(&temp_dir);
     let emit_us = emit_start.elapsed().as_micros();
 
     Ok(ClosedLoopOutputs {
         verify_report,
         resolved_output,
         emitted_manifest,
-        metrics: Loop0Metrics {
+        metrics: BaselineMetrics {
             ingest_us,
             verify_us,
             resolve_us,
@@ -387,7 +358,7 @@ fn read_vm_rss_kib() -> Option<u64> {
 }
 
 #[test]
-fn loop0_s1_smoke_closed_loop_matches_goldens() -> Result<()> {
+fn baseline_s1_smoke_closed_loop_matches_goldens() -> Result<()> {
     let outputs = run_s1_closed_loop(&[])?;
 
     let expected_verify = load_json(S1_GOLDEN_VERIFY_OK)?;
@@ -399,7 +370,7 @@ fn loop0_s1_smoke_closed_loop_matches_goldens() -> Result<()> {
     assert_eq!(outputs.emitted_manifest, expected_manifest);
 
     eprintln!(
-        "loop0_s1_smoke_metrics ingest_us={} verify_us={} resolve_us={} emit_us={} rss_kib={}",
+        "baseline_s1_smoke_metrics ingest_us={} verify_us={} resolve_us={} emit_us={} rss_kib={}",
         outputs.metrics.ingest_us,
         outputs.metrics.verify_us,
         outputs.metrics.resolve_us,
@@ -411,7 +382,7 @@ fn loop0_s1_smoke_closed_loop_matches_goldens() -> Result<()> {
 }
 
 #[test]
-fn loop0_s5_non_robotics_smoke_closed_loop_matches_goldens() -> Result<()> {
+fn baseline_s5_non_robotics_smoke_closed_loop_matches_goldens() -> Result<()> {
     let outputs = run_s5_closed_loop(&[])?;
 
     let expected_verify = load_json(S5_GOLDEN_VERIFY_OK)?;
@@ -423,7 +394,7 @@ fn loop0_s5_non_robotics_smoke_closed_loop_matches_goldens() -> Result<()> {
     assert_eq!(outputs.emitted_manifest, expected_manifest);
 
     eprintln!(
-        "loop0_s5_smoke_metrics ingest_us={} verify_us={} resolve_us={} emit_us={} rss_kib={}",
+        "baseline_s5_smoke_metrics ingest_us={} verify_us={} resolve_us={} emit_us={} rss_kib={}",
         outputs.metrics.ingest_us,
         outputs.metrics.verify_us,
         outputs.metrics.resolve_us,
@@ -435,7 +406,7 @@ fn loop0_s5_non_robotics_smoke_closed_loop_matches_goldens() -> Result<()> {
 }
 
 #[test]
-fn loop0_mutation_unknown_dependency_fails_verify() -> Result<()> {
+fn baseline_mutation_unknown_dependency_fails_verify() -> Result<()> {
     let compiler = build_s1_compiler(&[(S1_SOURCE_MUTATION_UNKNOWN_DEP, S1_MUTATION_UNKNOWN_DEP)])?;
 
     let err = compiler
@@ -452,7 +423,7 @@ fn loop0_mutation_unknown_dependency_fails_verify() -> Result<()> {
 }
 
 #[test]
-fn loop0_mutation_unreachable_branch_warns() -> Result<()> {
+fn baseline_mutation_unreachable_branch_warns() -> Result<()> {
     let outputs = run_s1_closed_loop(&[(S1_SOURCE_MUTATION_UNREACHABLE, S1_MUTATION_UNREACHABLE)])?;
     let expected_verify = load_json(S1_GOLDEN_VERIFY_UNREACHABLE)?;
 

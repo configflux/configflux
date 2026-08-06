@@ -27,7 +27,7 @@ import subprocess
 import sys
 import tempfile
 
-# S1 selection context, matching the compiler loop3 selection tests: the
+# S1 selection context, matching the compiler guided-selection scenario tests: the
 # thermal_control scope with no immutable context tags.
 S1_SCOPE = "component:thermal_control"
 S1_CONTEXT = {}
@@ -80,7 +80,7 @@ def interp_op(interpreter, verb, request, work, tag):
 def interpreter_state(interpreter, manifest, scope, context, selects, work, tag):
     """open -> init-selection-state -> (select)* and return (handle, state)."""
     opened = interp_op(
-        interpreter, "open", {"schema_version": 3, "cmp_manifest_ref": manifest}, work, tag
+        interpreter, "open", {"schema_version": 4, "cmp_manifest_ref": manifest}, work, tag
     )
     if opened.get("status") != "ok":
         fail(f"interpreter open failed: {json.dumps(opened)}")
@@ -89,7 +89,7 @@ def interpreter_state(interpreter, manifest, scope, context, selects, work, tag)
     init = interp_op(
         interpreter,
         "init-selection-state",
-        {"schema_version": 3, "model_handle": handle, "scope": scope, "context_tags": context},
+        {"schema_version": 4, "model_handle": handle, "scope": scope, "context_tags": context},
         work,
         tag,
     )
@@ -102,7 +102,7 @@ def interpreter_state(interpreter, manifest, scope, context, selects, work, tag)
             interpreter,
             "select",
             {
-                "schema_version": 3,
+                "schema_version": 4,
                 "model_handle": handle,
                 "scope": scope,
                 "selection_state": state,
@@ -123,7 +123,7 @@ def interpreter_options(interpreter, handle, scope, state, facet, work, tag):
         interpreter,
         "options",
         {
-            "schema_version": 3,
+            "schema_version": 4,
             "model_handle": handle,
             "scope": scope,
             "selection_state": state,
@@ -141,7 +141,7 @@ def write_selection_file(path, scope, context):
     with open(path, "w") as handle:
         json.dump(
             {
-                "schema_version": 3,
+                "schema_version": 4,
                 "model_hash": "",
                 "scope": scope,
                 "context_tags": context,

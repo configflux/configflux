@@ -117,6 +117,24 @@ _paramFields: {
 	doc?:    string
 })
 
+// A named policy assertion (ADR-0054 §1). `condition` is an expression in the
+// existing condition grammar over facet values — the SAME grammar a component or
+// override `condition` uses, deliberately: ADR-0054 adds no new expression
+// language, operator, or evaluator.
+//
+// The difference from a selector `condition` is semantic, not syntactic. A
+// selector decides what a configuration CONTAINS; a constraint decides what a
+// user is ALLOWED TO PICK, under one rule — every declared constraint must hold
+// in every resolved configuration (§2). CUE cannot express that difference, so
+// it only checks the shape here; unlike a selector condition, the Rust ingest
+// REJECTS an unparseable constraint rather than dropping it
+// (`link_verify::validate_constraints`, ADR-0021 "CUE authors, Rust
+// re-validates").
+#Constraint: close({
+	condition!: string
+	doc?:       string
+})
+
 // A single authored chunk. definitions/components/artifacts are all optional
 // (serde(default)); package + version are required and shared across a pack's
 // chunks. Authored top-level IDs (definition/component/artifact keys) carry the
@@ -133,10 +151,16 @@ _paramFields: {
 	// constraint, like the other three namespaces. Facets pass through the
 	// #ResolvePack / export layer verbatim — no inheritance or gap-fill.
 	facets?: close({[#snakeId]: #Facet})
+	// Fifth top-level namespace (ADR-0054 §1). A map keyed by id, not a list:
+	// the id is the primary key, so diagnostics and unsat cores can NAME the
+	// violated policy, duplicate keys are rejected for free, and the walk order
+	// is deterministic for byte-stable emission. Pack-global; passes through the
+	// resolve layer verbatim, like facets.
+	constraints?: close({[#snakeId]: #Constraint})
 })
 
 // A resolution profile (scenario selection domains + default context). Mirrors
-// the compiler's `ScenarioProfile` (compiler/src/scenario_loop0_tests.rs):
+// the compiler's `ScenarioProfile` (compiler/src/scenario_baseline_tests.rs):
 // `selection_domains` and `default_context` are required; `profile_id` and
 // `scenario_id` are optional metadata carried by most fixtures. Profiles are
 // resolution inputs, NOT part of the 150% model (#Config) — they are validated
@@ -241,9 +265,14 @@ _paramFields: {
 	// no inheritance, gap-fill, or merge (ADR-0047 §1). Optional: a pack that
 	// declares no facet omits this input entirely.
 	_facets?: {[#snakeId]: #Facet}
+	// Constraints are pack-global policy assertions and likewise pass through
+	// the resolution layer verbatim (ADR-0054 §1) — there is nothing to gap-fill
+	// in a proposition. Optional: a pack that declares no policy omits it.
+	_constraints?: {[#snakeId]: #Constraint}
 
 	definitions: _definitions
 	if _facets != _|_ {facets: _facets}
+	if _constraints != _|_ {constraints: _constraints}
 	components: {
 		for _cid, _c in _components {
 			(_cid): _c & {

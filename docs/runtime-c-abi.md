@@ -1,7 +1,7 @@
 # Runtime C ABI (v1.1)
 
-Status: draft
-Date: 2026-02-15
+Status: Stable (v1.1)
+Date: 2026-02-15 (stabilized 2026-07-23)
 
 ## 1. Scope
 
@@ -28,6 +28,15 @@ Compatibility rule:
 4. Any returned JSON C string is heap-owned by the ABI and must be released with
    `configflux_runtime_string_free`.
 
+### 3.1 Threading
+
+A session handle is **single-threaded**: it must not be used concurrently from
+more than one thread. In particular, `configflux_runtime_session_execute_json`
+must not be called concurrently or reentrantly on the same handle — each call
+mutates the retained session snapshot in place, so overlapping execute calls on
+one handle are undefined. Distinct handles are independent and may be used from
+distinct threads without coordination.
+
 ## 4. Session Model
 
 1. `session_open` takes a serialized `RuntimeOpenRequest` JSON payload.
@@ -35,6 +44,10 @@ Compatibility rule:
 3. `session_execute_json` takes operation code + request JSON (without `runtime_snapshot`).
 4. The ABI injects the current snapshot, executes runtime-core API, returns response JSON, and
    updates session snapshot if response contains `runtime_snapshot`.
+5. `configflux_runtime_session_snapshot_json(handle, out_json)` exports the session's
+   current `runtime_snapshot` as a heap-owned JSON C string (release with
+   `configflux_runtime_string_free`). It is a read-only accessor and does not mutate
+   session state.
 
 ### 4.1 Open-time solver-model precondition (since v1.1)
 

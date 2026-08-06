@@ -28,14 +28,27 @@
 // Never imports `oxidd::*` or `batsat::*` (ADR-0003 §2/§3, ADR-0004 §4).
 
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::PathBuf;
 
 use serde::Serialize;
 
 use solver::{
-    CoreConstraintKind, Error, LabeledAtom, LabeledConstraint, OxiddBackend, Session,
+    CoreConstraintKind, Error, LabeledAtom, LabeledConstraint, LabeledLiteral, OxiddBackend,
+    Session,
 };
+
+/// One signed literal of the partial assignment a clause forbids
+/// (ADR-0054 §5.4). `asserted` mirrors the sign the BDD falsifying path had:
+/// `true` means the path took that option.
+fn literal(facet: &str, value: &str, asserted: bool) -> LabeledLiteral {
+    LabeledLiteral {
+        atom: LabeledAtom {
+            facet: facet.to_string(),
+            value: value.to_string(),
+        },
+        asserted,
+    }
+}
 
 // Re-declared ADR-0005 §4 constants, local so this test does not depend on
 // `ccm_format`'s `pub(crate)` surface; drift surfaces as a fixture that no
@@ -120,14 +133,7 @@ fn build_xor_symbols_json() -> Vec<u8> {
 // ---------------------------------------------------------------------------
 
 fn tempdir_for(test_name: &str) -> PathBuf {
-    let base = std::env::temp_dir().join(format!(
-        "configflux-solver-explain-mus-{}-{}",
-        test_name,
-        std::process::id()
-    ));
-    let _ = fs::remove_dir_all(&base);
-    fs::create_dir_all(&base).expect("mkdir tempdir");
-    base
+    fixture_v2::unique_temp_dir("configflux-solver-explain-mus", test_name)
 }
 
 fn load_xor_session(label: &str) -> Session<OxiddBackend> {
@@ -228,6 +234,9 @@ fn minimal_two_option_one_constraint_returns_the_conflicting_constraint() {
     // selection engine.v6 may also appear as a Selection constraint; the
     // acceptance bar is that the conflicting model constraint is present and
     // the core is minimal — no spurious extra model rules.)
+    // The clause is `(¬engine.v6 ∨ ¬engine.v8)`, so the assignment it forbids
+    // ASSERTS both — the polarity that lets a consumer map the clause back to
+    // the constraint it violates (ADR-0054 §5.4).
     let exclusion = LabeledConstraint {
         kind: CoreConstraintKind::ModelRule,
         atoms: vec![
@@ -239,6 +248,10 @@ fn minimal_two_option_one_constraint_returns_the_conflicting_constraint() {
                 facet: "engine".to_string(),
                 value: "v8".to_string(),
             },
+        ],
+        forbidden: vec![
+            literal("engine", "v6", true),
+            literal("engine", "v8", true),
         ],
     };
     assert!(
@@ -442,6 +455,8 @@ fn multi_partition_composite_formula_is_explained_with_labels() {
             facet: "power".to_string(),
             value: "grid".to_string(),
         }],
+        // The clause is the unit `(¬power.grid)`: it forbids ASSERTING grid.
+        forbidden: vec![literal("power", "grid", true)],
     };
     assert!(
         core.conflicting_constraints.contains(&forbid),

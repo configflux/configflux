@@ -14,6 +14,13 @@ filegroup(
 
 COMMON_DEPS = [
     "//compiler:compiler_lib",
+    # configflux-ykae: the ONE `solver::LabeledCore` -> `compiler::UnsatCore`
+    # conversion (ADR-0031 D3 + the ADR-0054 §5.4 constraint attribution) lives
+    # in the shared composition seam, so the runtime `explain-rejection`
+    # envelope carries the same core `cfx`/interpreter do. `session_compose`
+    # depends only on `//compiler:compiler_lib` and `//solver:solver`, so this
+    # edge is additive and closes no cycle.
+    "//session_compose:session_compose",
     "//solver:solver",
     "@crates//:clap",
     "@crates//:serde",
@@ -29,6 +36,10 @@ RUNTIME_BINARY_SRCS = [
     "src/explain_renderer.rs",
     "src/runtime_c_abi.rs",
     "src/solver_validation.rs",
+    # configflux-jraj (ADR-0017 amendment): write-path constraint enforcement.
+    # Shared with the staticlib below — the C ABI must enforce identically to the
+    # CLI, and the wrappers cannot live in the clap-based `cli_adapter`.
+    "src/write_enforcement.rs",
 ]
 
 RUNTIME_TEST_SRCS = RUNTIME_BINARY_SRCS + [
@@ -46,6 +57,12 @@ RUNTIME_C_ABI_STATIC_SRCS = [
     "src/c_abi_lib.rs",
     "src/runtime_c_abi.rs",
     "src/solver_validation.rs",
+    # configflux-jraj (ADR-0017 amendment D7): the ABI's three write arms now
+    # dispatch to the same wrappers the CLI uses instead of the raw
+    # `compiler::runtime_api` functions, so an SDK write can no longer bypass the
+    # constraint check. This is why the wrappers are their own module rather than
+    # part of `cli_adapter` — the staticlib must reach them without clap.
+    "src/write_enforcement.rs",
 ]
 
 SCENARIO_COMPILE_DATA = [
@@ -82,7 +99,7 @@ rust_binary(
     # src/cli_adapter.rs resolves `--version` to the workspace release
     # version. rules_rust defaults CARGO_PKG_VERSION to "0.0.0" when this
     # attr is absent, so it must mirror /VERSION (lint_repo.py enforces this).
-    version = "0.2.0",
+    version = "0.3.0",
     deps = COMMON_DEPS,
 )
 
@@ -94,6 +111,14 @@ rust_static_library(
     edition = "2021",
     deps = [
         "//compiler:compiler_lib",
+        # configflux-jraj (ADR-0017 amendment D4/D7): the write wrappers the ABI
+        # now dispatches to build their rejection envelope from the SHARED
+        # `session_compose::labeled_core_to_unsat_core`, so the ABI and the CLI
+        # name one constraint with one wording. `session_compose` depends only on
+        # `//compiler:compiler_lib` and `//solver:solver`, both already here, so
+        # the edge is additive and closes no cycle — the same reasoning
+        # COMMON_DEPS records for the binary.
+        "//session_compose:session_compose",
         "//solver:solver",
         "@crates//:serde",
         "@crates//:serde_json",
@@ -355,6 +380,63 @@ rust_test(
     deps = COMMON_DEPS,
 )
 
+# configflux-ykae — explain-surface parity. Drives the SAME conflict on the
+# committed labeled-MUS fixture through both surfaces — the runtime binary's
+# `explain-rejection` and `session_compose::explain` (what `cfx` and the
+# interpreter call) — and asserts the two carry one identical `unsat_core`: the
+# violated `constraints:` entry named by id with its condition quoted, no id
+# outside the model's declared roster (ADR-0054 §5.4), and one rendered text.
+# E2E impact: smoke.
+rust_test(
+    name = "runtime_explain_surface_parity_test",
+    size = "small",
+    timeout = "short",
+    srcs = RUNTIME_TEST_SRCS,
+    crate_root = "src/main.rs",
+    args = [
+        "--exact",
+        "tests::run_051_explain_rejection_surfaces_agree_on_the_named_constraint",
+    ],
+    compile_data = SCENARIO_COMPILE_DATA,
+    edition = "2021",
+    tags = [
+        "ci",
+        "owner:runtime",
+        "runtime",
+        "solver",
+        "system",
+    ],
+    deps = COMMON_DEPS,
+)
+
+# configflux-jraj — write-path constraint enforcement over the session's total
+# known assignment (ADR-0017 amendment 2026-08-03). One target for the whole
+# group: every case shares the `write_enforcement` name infix, so the substring
+# filter selects exactly these nine and nothing else. They cover the three write
+# commands, both transports (CLI and C ABI), D1's precondition ordering, D3's
+# partial-assignment semantics and D2's skip-on-disagreement rule, all on the
+# committed `s_labeled_mus` fixture already carried by SCENARIO_COMPILE_DATA.
+# E2E impact: regression.
+rust_test(
+    name = "runtime_write_constraint_enforcement_test",
+    size = "small",
+    timeout = "moderate",
+    srcs = RUNTIME_TEST_SRCS,
+    crate_root = "src/main.rs",
+    args = ["write_enforcement"],
+    compile_data = SCENARIO_COMPILE_DATA,
+    edition = "2021",
+    tags = [
+        "ci",
+        "owner:runtime",
+        "runtime",
+        "security",
+        "solver",
+        "system",
+    ],
+    deps = COMMON_DEPS,
+)
+
 rust_test(
     name = "runtime_v2_sync_delta_gate_test",
     size = "small",
@@ -515,5 +597,6 @@ test_suite(
         ":runtime_solver_option_validation_test",
         ":runtime_system_e2e_gate_test",
         ":runtime_v2_gate_test",
+        ":runtime_write_constraint_enforcement_test",
     ],
 )

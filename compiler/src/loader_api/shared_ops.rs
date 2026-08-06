@@ -140,6 +140,38 @@ fn load_selection_constraint_model(model_handle: &ModelHandle) -> Result<Selecti
         // accepts its values — including a default arm that no condition names.
         seed_facet_domains_from_declarations(&chunk.facets, &mut model);
 
+        // ADR-0054 §4: read the chunk's policy assertions on this same walk.
+        // A constraint that does not parse is a HARD failure here, not a silent
+        // skip like `register_condition`'s selector path — the expression was
+        // already proven parseable at ingest (`validate_constraints`), so
+        // reaching this branch means the package is corrupt or was written by
+        // an incompatible toolchain. Failing closed is mandatory: a dropped
+        // policy fails OPEN, which is the exact failure mode ADR-0054 exists to
+        // remove.
+        for (id, constraint) in &chunk.constraints {
+            let expr = parse_condition_expr(&constraint.condition).with_context(|| {
+                format!(
+                    "Constraint '{}' in chunk '{}' has an unparseable expression '{}'",
+                    id, chunk_ref.chunk_hash, constraint.condition
+                )
+            })?;
+            // Fail closed on a duplicate id for the same reason
+            // `load_resolve_model` does: constraints are pack-global, ingest
+            // already rejected duplicates, and the two readers of one package
+            // must not disagree about whether it is valid. Silently keeping
+            // both would leave `cfx explain` unable to say which policy an
+            // unsat core names.
+            if model.constraints.iter().any(|seen| &seen.id == id) {
+                anyhow::bail!("Duplicate constraint '{}' appears across chunks", id);
+            }
+            model.constraints.push(SelectionConstraint {
+                id: id.clone(),
+                condition: constraint.condition.clone(),
+                expr,
+                source_id: chunk_ref.source_id.clone(),
+            });
+        }
+
         for definition in chunk.definitions.values() {
             register_parameter_conditions(definition, &mut model);
         }
@@ -152,6 +184,11 @@ fn load_selection_constraint_model(model_handle: &ModelHandle) -> Result<Selecti
             }
         }
     }
+
+    // Per-chunk walks are already id-ascending (`IrChunk.constraints` is a
+    // `BTreeMap`), but chunks are visited in index order, so sort once here to
+    // make the id-ascending commitment hold across the whole pack.
+    model.constraints.sort_by(|a, b| a.id.cmp(&b.id));
 
     Ok(model)
 }
@@ -193,7 +230,7 @@ fn seed_facet_domains_from_declarations(
     }
 }
 
-fn load_resolve_model(model_handle: &ModelHandle) -> Result<crate::schema::Config> {
+fn load_resolve_model(model_handle: &ModelHandle) -> Result<ResolveModel> {
     let index = ir::load_index(&model_handle.index_ref)
         .with_context(|| format!("Failed to load index '{}'", model_handle.index_ref))?;
     let chunk_dir = PathBuf::from(&model_handle.chunk_set_ref);
@@ -208,6 +245,11 @@ fn load_resolve_model(model_handle: &ModelHandle) -> Result<crate::schema::Confi
     let mut components = HashMap::new();
     let mut artifacts = HashMap::new();
     let mut facets: HashMap<String, crate::schema::Facet> = HashMap::new();
+    let mut constraints: HashMap<String, crate::schema::Constraint> = HashMap::new();
+    // ADR-0054 §6 / configflux-emmg: the declaring chunk, captured here because
+    // this walk is the only place that knows it. `Config` is the authored shape
+    // and must not learn about chunks, so it rides alongside in `ResolveModel`.
+    let mut constraint_sources: BTreeMap<String, String> = BTreeMap::new();
 
     for chunk_ref in &index.chunks {
         let chunk_path = chunk_dir.join(format!("chunk-{}.cfir", chunk_ref.chunk_hash));
@@ -223,6 +265,21 @@ fn load_resolve_model(model_handle: &ModelHandle) -> Result<crate::schema::Confi
             if facets.insert(facet_id.clone(), facet).is_some() {
                 anyhow::bail!("Duplicate facet '{}' appears across chunks", facet_id);
             }
+        }
+
+        // ADR-0054 §1: constraints pass through the resolve layer VERBATIM,
+        // exactly as facets do — pack-global, no inheritance, gap-fill, or
+        // merge. Carried rather than dropped so the resolve-time `Config` is a
+        // faithful view of the authored model; enforcement against a resolved
+        // assignment is ADR-0054 §6 (configflux-4sjk), not this walk.
+        for (constraint_id, constraint) in chunk.constraints {
+            if constraints.insert(constraint_id.clone(), constraint).is_some() {
+                anyhow::bail!(
+                    "Duplicate constraint '{}' appears across chunks",
+                    constraint_id
+                );
+            }
+            constraint_sources.insert(constraint_id, chunk_ref.source_id.clone());
         }
 
         for (definition_id, definition) in chunk.definitions {
@@ -251,13 +308,17 @@ fn load_resolve_model(model_handle: &ModelHandle) -> Result<crate::schema::Confi
         }
     }
 
-    Ok(crate::schema::Config {
-        package: "merged_root".to_string(),
-        version: "0.0.0".to_string(),
-        definitions,
-        components,
-        artifacts,
-        facets,
+    Ok(ResolveModel {
+        config: crate::schema::Config {
+            package: "merged_root".to_string(),
+            version: "0.0.0".to_string(),
+            definitions,
+            components,
+            artifacts,
+            facets,
+            constraints,
+        },
+        constraint_sources,
     })
 }
 
@@ -1521,6 +1582,24 @@ fn option_is_valid(
     let mut candidate = assignments.clone();
     candidate.insert(facet.to_string(), option.to_string());
 
+    // ADR-0054 §2, ahead of every selector rule below: an option the model's
+    // own policy forbids is not an option, whatever the inclusion selectors
+    // say. A selector can only ever ADD a reason to keep `option` (the loop
+    // below returns `true` on the first satisfiable branch), so the screen has
+    // to come first or a selector would out-vote a constraint.
+    //
+    // Doing it HERE — in the one predicate `get_selection_options`,
+    // `apply_selection` and `explain_rejection` all share — is what makes the
+    // loader agree with the solver on all three at once (configflux-narb).
+    // Both engines are then answering the same question about the same
+    // assignment: the solver existentially, over the `.ccm` root whose
+    // synthesized intra-facet cardinality (ADR-0054 §5.2) makes a selection
+    // exclude its siblings; the loader concretely, over the assignment those
+    // exclusions imply.
+    if first_violated_constraint(model, &candidate).is_some() {
+        return false;
+    }
+
     // configflux-ccs.7: walk the stored typed conditions. As in the legacy
     // path, only pure conjunctions of atoms (the conditions the former
     // `parse_condition_conjunction` accepted as groups) participate, and a
@@ -1558,6 +1637,94 @@ fn option_is_valid(
     }
 
     false
+}
+
+/// ADR-0054 §2, the whole rule: **every declared constraint must hold in every
+/// resolved configuration.** Returns the ids of the constraints `assignment`
+/// DEFINITELY violates, in the order `constraints` yields them (the caller
+/// yields id-ascending, which is the order the diagnostics commit to).
+///
+/// A constraint is violated iff it evaluates to `False` under `assignment`.
+/// `not_contradicted` is `eval_partial(..) != Ternary::False`, so:
+///
+///   * `False`   → violated. Every completion of `assignment` breaks the policy.
+///   * `True`    → satisfied.
+///   * `Unknown` → NOT a violation. The constraint names a facet nothing has
+///     bound, so nothing was chosen and nothing was violated (ADR-0054 §2).
+///     Under the total post-default assignment `resolve_from_selection` builds,
+///     `Unknown` cannot arise for a defaulted facet at all — which is what makes
+///     this plain Boolean evaluation, with no search and no BDD, and is why the
+///     `cfx` no-solver-dependency invariant (`cfx/src/pipeline.rs:12-19`)
+///     survives fail-closed resolve.
+///
+/// `is_pure_conjunction` is deliberately NOT applied (ADR-0054 §2). That filter
+/// exists to preserve legacy SELECTOR grouping semantics; a constraint is an
+/// arbitrary `ConditionExpr`, and applying it here would silently drop exactly
+/// the disjunctive policies (`a != x || b != y`) constraints exist to express —
+/// failing OPEN, the one failure mode this feature cannot have.
+fn violated_constraint_ids<'a, I>(
+    constraints: I,
+    assignment: &BTreeMap<String, String>,
+) -> Vec<&'a str>
+where
+    I: IntoIterator<Item = (&'a str, &'a ConditionExpr)>,
+{
+    constraints
+        .into_iter()
+        .filter(|(_, expr)| !not_contradicted(expr, assignment))
+        .map(|(id, _)| id)
+        .collect()
+}
+
+/// The first constraint (id-ascending, the order `load_selection_constraint_
+/// model` sorts into) that `assignment` DEFINITELY violates, or `None`.
+///
+/// Same predicate as `violated_constraint_ids` — `Ternary::False` is a
+/// violation, `Unknown` is not — over the selection-side model rather than the
+/// resolve-side `Config`, and returning the whole record so the caller can
+/// build the ADR-0054 §6 diagnostic without a second lookup.
+///
+/// `apply_selection` reports ONE constraint where `resolve_from_selection`
+/// reports every violated one, and the asymmetry is deliberate: resolve
+/// adjudicates a whole configuration, so the full list is the user's work
+/// queue; apply adjudicates a single `(facet, option)` choice and every other
+/// rejection it can emit carries exactly one diagnostic. Naming the first
+/// violated policy is enough to explain why that one choice was refused, and
+/// keeps the rejection envelope the shape every consumer already parses.
+fn first_violated_constraint<'a>(
+    model: &'a SelectionConstraintModel,
+    assignment: &BTreeMap<String, String>,
+) -> Option<&'a SelectionConstraint> {
+    model
+        .constraints
+        .iter()
+        .find(|constraint| !not_contradicted(&constraint.expr, assignment))
+}
+
+/// Build ADR-0054 §6's rejection diagnostic for ONE violated constraint. The
+/// §6 field table is reproduced exactly; the code is the EXISTING
+/// `E_SELECTION_CONFLICT` (§6 adds no code and no field), and `entity_path`
+/// carries the `constraints/` prefix that lets a machine consumer tell a policy
+/// violation from the other conflict causes.
+fn constraint_violation_diagnostic(
+    constraint_id: &str,
+    condition: &str,
+    source_id: Option<&str>,
+) -> Diagnostic {
+    Diagnostic {
+        code: E_SELECTION_CONFLICT.to_string(),
+        severity: DiagnosticSeverity::Error,
+        message: format!(
+            "Selection violates constraint '{}': '{}'",
+            constraint_id, condition
+        ),
+        source_id: source_id.map(str::to_string),
+        entity_path: Some(format!("{}{}", CONSTRAINT_ENTITY_PATH_PREFIX, constraint_id)),
+        hint: Some(
+            "Run 'cfx explain' with the same selection to see the minimal conflicting set."
+                .to_string(),
+        ),
+    }
 }
 
 fn classify_rejection_reason(

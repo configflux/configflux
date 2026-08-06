@@ -264,6 +264,21 @@ pub(crate) fn emit_multi_part_with_progress(
                 })
                 .collect();
 
+            // ADR-0054 §5.4 roster. `root_index` is the constraint's
+            // position in `model.constraints`, which `parse_condition_model`
+            // preserves as a contiguous block in the root AND-fold.
+            // Synthesized cardinality conjuncts are NOT rostered.
+            let roster: Vec<ConstraintRosterEntry> = model
+                .constraints
+                .iter()
+                .enumerate()
+                .map(|(i, (id, condition))| ConstraintRosterEntry {
+                    condition,
+                    id,
+                    root_index: i as u32,
+                })
+                .collect();
+
             // Top-level pre-image: canonical JSON of the top-level
             // manifest WITHOUT `ccm_hash` per ADR-0005 §5 Step 3
             // elision.
@@ -271,6 +286,7 @@ pub(crate) fn emit_multi_part_with_progress(
                 algorithm: construction.algorithm_tag(),
                 algorithm_params: &algorithm_params_pub(heuristic, construction),
                 bound_model_hash: &model.bound_model_hash,
+                constraints: &roster,
                 node_count: total_node_count,
                 partition_manifest: PARTITION_MANIFEST_FILENAME,
                 schema_version: CCM_SCHEMA_VERSION,
@@ -305,6 +321,7 @@ pub(crate) fn emit_multi_part_with_progress(
                 algorithm_params: &algorithm_params_pub(heuristic, construction),
                 bound_model_hash: &model.bound_model_hash,
                 ccm_hash: &top_level_ccm_hash_hex,
+                constraints: &roster,
                 construction_wall_time_us: 0,
                 emitted_at: "1970-01-01T00:00:00Z",
                 node_count: total_node_count,
@@ -538,13 +555,33 @@ fn emit_partition_inner(
 
 // --- canonical JSON structs ---------------------------------------
 
+/// One entry of the ADR-0054 §5.4 constraint roster.
+///
+/// `root_index` is the constraint's position in the root AND-fold among the
+/// authored conjuncts, so a solver core maps back to a constraint id by index
+/// (`cfx explain`, configflux-p571.8). Fields are alphabetical, matching every
+/// other canonical-JSON struct in this module.
+#[derive(Serialize)]
+pub(crate) struct ConstraintRosterEntry<'a> {
+    pub(crate) condition: &'a str,
+    pub(crate) id: &'a str,
+    pub(crate) root_index: u32,
+}
+
 /// Pre-image of the top-level manifest. ADR-0005 §5 Step 3: elides
 /// `ccm_hash`, `construction_wall_time_us`, and `emitted_at`.
+///
+/// ADR-0054 §5.4: the roster is INSIDE the pre-image, so declaring a
+/// constraint rotates `ccm_hash`. It is skipped when empty, which keeps a
+/// model that declares no constraint byte-identical to the pre-ADR-0054
+/// artifact — the rotation is scoped to models that actually gained policy.
 #[derive(Serialize)]
 struct TopLevelPreimage<'a> {
     algorithm: &'a str,
     algorithm_params: &'a BTreeMap<String, String>,
     bound_model_hash: &'a str,
+    #[serde(skip_serializing_if = "<[ConstraintRosterEntry]>::is_empty")]
+    constraints: &'a [ConstraintRosterEntry<'a>],
     node_count: u64,
     partition_manifest: &'a str,
     schema_version: u32,
@@ -552,14 +589,21 @@ struct TopLevelPreimage<'a> {
 }
 
 /// Final top-level `<out>/ccm/ccm.manifest.json` output. Carries the
-/// v2 `partition_manifest` field; otherwise identical shape to the
-/// per-partition manifest.
+/// v2 `partition_manifest` field and the ADR-0054 §5.4 constraint
+/// roster; otherwise identical shape to the per-partition manifest.
+///
+/// The roster is model-global and lives ONLY here — per-partition manifests
+/// (`serialize_per_partition_manifest`) are unchanged, which keeps the
+/// partitioning scheme out of the constraint-identity decision entirely.
+/// Synthesized cardinality conjuncts are deliberately absent from the roster.
 #[derive(Serialize)]
 struct TopLevelManifestOut<'a> {
     algorithm: &'a str,
     algorithm_params: &'a BTreeMap<String, String>,
     bound_model_hash: &'a str,
     ccm_hash: &'a str,
+    #[serde(skip_serializing_if = "<[ConstraintRosterEntry]>::is_empty")]
+    constraints: &'a [ConstraintRosterEntry<'a>],
     construction_wall_time_us: u64,
     emitted_at: &'a str,
     node_count: u64,

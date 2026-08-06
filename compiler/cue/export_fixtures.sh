@@ -91,6 +91,10 @@ definitionsOut: {
 	// Facets pass through verbatim (ADR-0047). Convention places them in the
 	// 00_definitions chunk, but carry them from whichever chunk authored them.
 	if defsIn.facets != _|_ {facets: defsIn.facets}
+	// Constraints likewise pass through verbatim (ADR-0054 §1) — a proposition
+	// has nothing to gap-fill. Same convention (00_definitions) and same
+	// whichever-chunk-authored-it rule as facets.
+	if defsIn.constraints != _|_ {constraints: defsIn.constraints}
 }
 
 // Components-file slice: resolved components (inheritance gap-filled) plus this
@@ -101,6 +105,7 @@ componentsOut: {
 	if compsIn.artifacts != _|_ {artifacts: compsIn.artifacts}
 	if compsIn.components != _|_ {components: _resolved.components}
 	if compsIn.facets != _|_ {facets: compsIn.facets}
+	if compsIn.constraints != _|_ {constraints: compsIn.constraints}
 }
 DRIVER
 
@@ -124,6 +129,7 @@ configOut: {
 	if srcIn.artifacts != _|_ {artifacts: srcIn.artifacts}
 	if srcIn.components != _|_ {components: _resolved.components}
 	if srcIn.facets != _|_ {facets: srcIn.facets}
+	if srcIn.constraints != _|_ {constraints: srcIn.constraints}
 }
 DRIVER
 

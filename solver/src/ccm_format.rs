@@ -227,6 +227,32 @@ pub(crate) struct Manifest {
     /// presence/absence per directory).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub partition_manifest: Option<String>,
+    /// ADR-0054 §5.4 constraint roster: the authored policy conjuncts of the
+    /// BDD root, with the `root_index` that maps a minimal-unsat-core position
+    /// back to a constraint id. Top-level only — per-partition manifests never
+    /// carry it, and synthesized intra-facet cardinality is never in it.
+    ///
+    /// The roster is INSIDE the top-level hash pre-image, so it must be
+    /// round-tripped exactly: `serde(default)` for a model that declares no
+    /// constraint (the emitter omits the field entirely rather than writing an
+    /// empty array, which keeps every pre-ADR-0054 artifact's `ccm_hash`
+    /// unmoved), and `skip_serializing_if` so the reconstructed pre-image
+    /// reproduces the compiler's canonical bytes in both cases.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub constraints: Vec<ConstraintRosterEntry>,
+}
+
+/// One entry of the ADR-0054 §5.4 constraint roster, as written by
+/// `compiler/src/ccm_emitter/multi_part.rs`. Field order is lexicographic
+/// because these bytes re-enter the top-level `ccm_hash` pre-image.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ConstraintRosterEntry {
+    /// The authored condition text, verbatim.
+    pub condition: String,
+    /// The authored `constraint_id`.
+    pub id: String,
+    /// Position in the root AND-fold among the authored conjuncts.
+    pub root_index: u32,
 }
 
 /// On-disk layout of `ccm.symbols.json` per ADR-0005 §3.
@@ -373,6 +399,16 @@ pub(crate) fn load_ccm_from_dir(dir: &Path) -> Result<ParsedCcm, ParseError> {
     if manifest.partition_manifest.is_some() {
         return Err(ParseError::ManifestParse(
             "per-partition ccm.manifest.json must not carry the partition_manifest field".into(),
+        ));
+    }
+    // ADR-0054 §5.4: the constraint roster is model-global and lives only on
+    // the top-level manifest, which is what keeps the partitioning scheme out
+    // of constraint identity. A roster here would mean a `root_index` scoped to
+    // a partition, which no consumer could interpret — reject it rather than
+    // silently ignore it, symmetrically with `partition_manifest` above.
+    if !manifest.constraints.is_empty() {
+        return Err(ParseError::ManifestParse(
+            "per-partition ccm.manifest.json must not carry the constraints roster".into(),
         ));
     }
 
@@ -839,11 +875,18 @@ pub(crate) fn compute_top_level_ccm_hash(
     // `emitted_at`. Lexicographic field order matches the compiler's
     // emission shape (see compiler/src/ccm_emitter/multi_part.rs
     // `TopLevelPreimage`).
+    // ADR-0054 §5.4: the constraint roster is part of the top-level pre-image
+    // (a model's policy is part of its content address), and is omitted
+    // entirely when empty. Both halves matter here: omitting it keeps every
+    // constraint-free artifact's ccm_hash exactly where it was, and including
+    // it when present is what makes a roster tamper detectable on load.
     #[derive(Serialize)]
     struct TopLevelPreImage<'a> {
         algorithm: &'a str,
         algorithm_params: &'a BTreeMap<String, String>,
         bound_model_hash: &'a str,
+        #[serde(skip_serializing_if = "<[ConstraintRosterEntry]>::is_empty")]
+        constraints: &'a [ConstraintRosterEntry],
         node_count: u64,
         partition_manifest: &'a str,
         schema_version: u32,
@@ -853,6 +896,7 @@ pub(crate) fn compute_top_level_ccm_hash(
         algorithm: &manifest.algorithm,
         algorithm_params: &manifest.algorithm_params,
         bound_model_hash: &manifest.bound_model_hash,
+        constraints: &manifest.constraints,
         node_count: manifest.node_count,
         partition_manifest: partition_manifest_path,
         schema_version: manifest.schema_version,

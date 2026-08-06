@@ -67,7 +67,7 @@ runtime `runtime-open` request is a direct projection of the interpreter
 `resolve` response:
 
 ```jq
-{schema_version: 3,
+{schema_version: 4,
  model_hash: .model_hash,
  resolve_hash: .resolve_hash,
  scope: .scope,

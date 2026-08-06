@@ -18,7 +18,7 @@ Out of scope:
 ## 2) Canonical Payload Shape
 
 Top-level object (`SoftwareBomV1`):
-- `schema_version: u32` (`1` in v1)
+- `schema_version: u32` (the current product schema version, `4`)
 - `bom_version: u32` (`1` in v1)
 - `bom_hash: string`
 - `hash_algo: string` (`"sha256"` in v1)

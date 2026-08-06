@@ -705,6 +705,54 @@ fn run_full_chain_for_fixture(fixture: &InterpreterFixture) {
     assert!(bom_response.software_bom.is_some());
 }
 
+/// configflux-zdf1: when `include_pruned_reasons` is set, `session_compose::options`
+/// took `pruned_options` from the compiler's legacy narrowing, which UNDER-reports an
+/// override-gated facet (configflux-z1hj). On S1 after `cooling_brand=hydra` the solver
+/// holds `cooling_model` `a9` VALID while the compiler prunes it, so `a9` was reported
+/// as BOTH valid and pruned. The fix recomputes `pruned_options` against the solver's
+/// valid set, so no option is ever in both lists.
+#[test]
+fn options_pruned_reasons_never_contradict_solver_valid_set() {
+    let cmp_dir = emitted_cmp_dir("zdf1-pruned-consistency");
+    let handle = open_handle(&cmp_dir);
+    let selection_state = init_selection_state_for_fixture(&handle, S1_SCOPE, s1_context_tags());
+    let after_hydra = apply_selection_step(&handle, selection_state, "cooling_brand", "hydra");
+
+    let options_request = GetSelectionOptionsRequest {
+        schema_version: PRODUCT_SCHEMA_VERSION,
+        model_handle: handle,
+        scope: S1_SCOPE.to_string(),
+        selection_state: after_hydra,
+        facet: "cooling_model".to_string(),
+        include_pruned_reasons: true,
+    };
+    let (options_output, options_result): (RunOutput, GetSelectionOptionsResult) =
+        run_json_command(&["options"], &options_request);
+    assert_eq!(options_output.exit_code, EXIT_OK);
+    assert_eq!(options_result.status, OperationStatus::Ok);
+
+    // Solver-authoritative valid set: `a9` remains satisfiable under `hydra`
+    // (override-not-exclusion — configflux-z1hj), so both options are valid.
+    assert!(
+        options_result.valid_options.contains(&"a9".to_string()),
+        "solver holds cooling_model=a9 valid under hydra; valid_options={:?}",
+        options_result.valid_options
+    );
+    assert!(options_result.valid_options.contains(&"x200".to_string()));
+
+    // The envelope must be internally consistent: no option may be reported as
+    // BOTH valid and pruned. Pre-fix, `a9` appeared in both.
+    if let Some(pruned) = &options_result.pruned_options {
+        for reason in pruned {
+            assert!(
+                !options_result.valid_options.contains(&reason.option),
+                "cooling_model option {:?} is reported as BOTH valid and pruned",
+                reason.option
+            );
+        }
+    }
+}
+
 #[test]
 fn int_001_happy_path_e2e_chain() {
     let cmp_dir = emitted_cmp_dir("int-001");
@@ -1446,14 +1494,26 @@ fn handle_with_ccm_ref(handle: &ModelHandle, ccm_ref: &str) -> ModelHandle {
 // hard cross-facet exclusion. This fixture mirrors the semantics the solver's
 // own real-`.ccm` explain regression uses (solver/tests/explain_rejection_real_ccm.rs:
 // a feasible space that requires one option and forbids the conflicting one),
-// authored here in the compilable scenario grammar via a `policy_module` whose
-// condition excludes exactly the `(hydra, a9)` combination
+// authored here in the compilable scenario grammar as a named `constraints:`
+// entry that excludes exactly the `(hydra, a9)` combination
 // (`cooling_brand != 'hydra' || cooling_model != 'a9'` — the De Morgan negation
 // of the forbidden pair; the condition grammar is a Boolean conjunction/
 // disjunction of tag-equality atoms, compiler/src/conditions/mod.rs). Selecting
 // `cooling_brand=hydra` then explaining `cooling_model=a9` is then a genuine
 // conflict whose minimal core names the prior `cooling_brand.hydra` selection
 // and the model rule relating the two facets.
+//
+// ADR-0054 §8 migration: this rule used to be carried by a `policy_module`
+// component whose `condition` was AND-folded into the BDD root. A component
+// condition is an inclusion selector and nothing else (§3), so under §5.1 that
+// shape asserts nothing and this fixture would silently stop encoding a
+// conflict — the exact phantom-policy failure the `constraints` namespace
+// exists to make impossible. The two facets must also be DECLARED as part of
+// the move: `link_verify::validate_constraints` builds its legal-facet set from
+// declared facets plus facets inferred from component/definition conditions,
+// and a constraint condition infers nothing, so the domains that used to exist
+// only by inference from the very condition being migrated now have to be
+// written down.
 const SOLVER_CONFLICT_SCOPE: &str = "component:climate";
 
 const SOLVER_CONFLICT_DEFS: &str = r#"{
@@ -1473,6 +1533,24 @@ const SOLVER_CONFLICT_DEFS: &str = r#"{
             "lifecycle": "runtime",
             "safety": "q_m",
             "access": "technician"
+        }
+    },
+    "facets": {
+        "cooling_brand": {
+            "values": ["hydra", "arctic"],
+            "default": "hydra",
+            "doc": "Cooling brand."
+        },
+        "cooling_model": {
+            "values": ["x200", "a9"],
+            "default": "x200",
+            "doc": "Cooling model."
+        }
+    },
+    "constraints": {
+        "combo_guard": {
+            "condition": "cooling_brand != 'hydra' || cooling_model != 'a9'",
+            "doc": "The hydra brand may not be paired with the a9 model."
         }
     }
 }"#;
@@ -1505,10 +1583,6 @@ const SOLVER_CONFLICT_COMPONENTS: &str = r#"{
                     "req_id": "req_whyt_002"
                 }
             }
-        },
-        "combo_guard": {
-            "type": "policy_module",
-            "condition": "cooling_brand != 'hydra' || cooling_model != 'a9'"
         }
     }
 }"#;
@@ -1667,15 +1741,7 @@ fn dj7f_options_fails_closed_on_unloadable_ccm() {
     let real_handle = open_handle(&cmp_dir);
     let base_state = init_selection_state_for_fixture(&real_handle, S1_SCOPE, s1_context_tags());
 
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("duration")
-        .as_nanos();
-    let malformed = std::env::temp_dir().join(format!(
-        "configflux-interp-malformed-ccm-{}-{unique}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&malformed).expect("create malformed ccm dir");
+    let malformed = unique_fixture_dir("configflux-interp", "malformed-ccm");
     std::fs::write(
         malformed.join("ccm.manifest.json"),
         b"{\"not\":\"a real ccm\"}",
@@ -1791,8 +1857,8 @@ fn assert_core_is_labeled(core: &UnsatCore) {
 }
 
 /// ADR-0031 D2/D3: explaining a genuinely-conflicting in-domain option returns
-/// the labeled unsat core with exit 0. On the solver-conflict fixture (a
-/// `policy_module` that forbids exactly the `(hydra, a9)` combination),
+/// the labeled unsat core with exit 0. On the solver-conflict fixture (the
+/// `combo_guard` constraint forbids exactly the `(hydra, a9)` combination),
 /// selecting `cooling_brand=hydra` then explaining `cooling_model=a9` is a real
 /// cross-facet conflict; the response must carry a populated `unsat_core` whose
 /// facet/option values are all labeled (no integers), and the rejection code
@@ -1822,7 +1888,7 @@ fn whyt_explain_conflict_returns_labeled_unsat_core_exit_zero() {
     let state_after_hydra = solver_conflict_state_after_hydra(&handle);
 
     // Explain cooling_model=a9: in-domain, but unsatisfiable under hydra (the
-    // policy_module forbids the hydra+a9 pair).
+    // `combo_guard` constraint forbids the hydra+a9 pair).
     let explain_request = ExplainRejectionRequest {
         schema_version: PRODUCT_SCHEMA_VERSION,
         model_handle: handle,
@@ -2162,4 +2228,290 @@ fn vwhj_interpreter_explain_labeled_mus_shape_is_deterministic() {
     assert_core_is_labeled(core);
     let core_json = serde_json::to_value(core).expect("serialize core");
     vwhj_assert_no_integer_atoms(&core_json);
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0054 §2/§6 (configflux-4sjk) — the interpreter's `resolve` verb enforces
+// declared constraints, reporting the SAME code the `cfx` surface reports.
+//
+// This is the machine/agent seam, and it is a genuinely independent path from
+// `cfx`: `session_compose::resolve` gates satisfiability with the solver and,
+// on EITHER verdict, delegates the response bytes to the compiler's
+// `resolve_from_selection`. That delegation assumed the two engines agree —
+// and for a policy constraint they did not: the solver could hold a selection
+// unsatisfiable while the compiler composed a snapshot for it anyway. These
+// tests pin the agreement on the resolve verb.
+// ---------------------------------------------------------------------------
+
+const CONSTRAINT_SOURCE_DEFS: &str = "00_definitions.json";
+const CONSTRAINT_SOURCE_COMPONENTS: &str = "10_components.json";
+const CONSTRAINT_SCOPE: &str = "all";
+
+const CONSTRAINT_CHUNK_DEFS: &str = r#"{
+  "package": "policy_demo",
+  "version": "1.0.0",
+  "definitions": {
+    "log_sink": {
+      "type": "string",
+      "lifecycle": "startup",
+      "access": "integrator",
+      "doc": "Where the service writes its log stream"
+    }
+  },
+  "facets": {
+    "environment": {"values": ["dev", "prod"], "default": "dev"},
+    "log_level": {"values": ["info", "debug"], "default": "info"}
+  },
+  "constraints": {
+    "prod_forbids_debug": {
+      "condition": "environment != 'prod' || log_level != 'debug'",
+      "doc": "Debug logging is not permitted in production."
+    }
+  }
+}"#;
+
+const CONSTRAINT_CHUNK_COMPONENTS: &str = r#"{
+  "package": "policy_demo",
+  "version": "1.0.0",
+  "components": {
+    "webapp": {
+      "type": "service",
+      "params": {
+        "log_sink": {
+          "inherits": "log_sink",
+          "type": "string",
+          "lifecycle": "startup",
+          "access": "integrator",
+          "doc": "Where the service writes its log stream",
+          "value": "stdout"
+        }
+      }
+    }
+  }
+}"#;
+
+fn constraint_selection_state(model_hash: &str, choices: &[(&str, &str)]) -> SelectionState {
+    canonical_selection_state(
+        model_hash.to_string(),
+        CONSTRAINT_SCOPE.to_string(),
+        BTreeMap::new(),
+        choices
+            .iter()
+            .map(|(facet, option)| (facet.to_string(), option.to_string()))
+            .collect(),
+    )
+    .expect("constraint selection state")
+}
+
+#[test]
+fn interpreter_resolve_rejects_a_constraint_violating_selection() {
+    let cmp_dir = emitted_cmp_dir_with_chunks(
+        "constraint-resolve",
+        CONSTRAINT_SOURCE_DEFS,
+        CONSTRAINT_SOURCE_COMPONENTS,
+        CONSTRAINT_CHUNK_DEFS,
+        CONSTRAINT_CHUNK_COMPONENTS,
+    );
+    let handle = open_handle(&cmp_dir);
+    let request = ResolveFromSelectionRequest {
+        schema_version: PRODUCT_SCHEMA_VERSION,
+        model_handle: handle.clone(),
+        scope: CONSTRAINT_SCOPE.to_string(),
+        selection_state: constraint_selection_state(
+            &handle.model_hash,
+            &[("environment", "prod"), ("log_level", "debug")],
+        ),
+    };
+
+    let (output, response): (RunOutput, ResolveResult) = run_json_command(&["resolve"], &request);
+
+    assert_eq!(output.exit_code, EXIT_COMMAND_ERROR);
+    assert_eq!(response.status, OperationStatus::Error);
+    // Nothing to export and nothing to pin: a rejected resolve produces no
+    // artifact lineage at all.
+    assert!(response.resolve_hash.is_none());
+    assert!(response.resolved_output.is_none());
+
+    let diagnostic = &response.diagnostics.diagnostics[0];
+    assert_eq!(
+        diagnostic.code, E_SELECTION_CONFLICT,
+        "the interpreter must report the SAME code cfx does, not a new one"
+    );
+    assert_eq!(diagnostic.severity, DiagnosticSeverity::Error);
+    assert_eq!(
+        diagnostic.entity_path.as_deref(),
+        Some("constraints/prod_forbids_debug")
+    );
+    assert!(
+        diagnostic.message.contains("prod_forbids_debug")
+            && diagnostic
+                .message
+                .contains("environment != 'prod' || log_level != 'debug'"),
+        "message must name the constraint and quote its condition: {}",
+        diagnostic.message
+    );
+    assert_eq!(
+        diagnostic.source_id.as_deref(),
+        Some(CONSTRAINT_SOURCE_DEFS),
+        "ADR-0054 §6: source_id is the chunk that declared the constraint"
+    );
+}
+
+#[test]
+fn interpreter_resolve_accepts_a_selection_the_policy_permits() {
+    // The control: same model, same facets, a legal combination. Fail-closed
+    // must mean "closed on violations", not "closed".
+    let cmp_dir = emitted_cmp_dir_with_chunks(
+        "constraint-resolve-ok",
+        CONSTRAINT_SOURCE_DEFS,
+        CONSTRAINT_SOURCE_COMPONENTS,
+        CONSTRAINT_CHUNK_DEFS,
+        CONSTRAINT_CHUNK_COMPONENTS,
+    );
+    let handle = open_handle(&cmp_dir);
+    let response = resolve_ok_for_scope(
+        &handle,
+        CONSTRAINT_SCOPE,
+        constraint_selection_state(
+            &handle.model_hash,
+            &[("environment", "dev"), ("log_level", "debug")],
+        ),
+    );
+
+    assert!(response.resolve_hash.is_some());
+    assert!(response.diagnostics.diagnostics.is_empty());
+}
+
+#[test]
+fn interpreter_select_rejects_a_constraint_violating_choice_as_a_conflict() {
+    // configflux-narb, through the real binary on the real `.ccm`. The solver
+    // has rejected this choice since the policy became a root conjunct; the
+    // LOADER used to accept it, so `session_compose::apply` saw solver-REJECT vs
+    // legacy-ACCEPT and fell closed with `E_SELECTION_ENGINE_DIVERGENCE` — the
+    // INTERNAL-FAULT family, hinting "recompile the model", for a model that was
+    // simply doing what it says. The two engines now answer the same question
+    // the same way, so what reaches the machine seam is the policy verdict.
+    let cmp_dir = emitted_cmp_dir_with_chunks(
+        "constraint-select",
+        CONSTRAINT_SOURCE_DEFS,
+        CONSTRAINT_SOURCE_COMPONENTS,
+        CONSTRAINT_CHUNK_DEFS,
+        CONSTRAINT_CHUNK_COMPONENTS,
+    );
+    let handle = open_handle(&cmp_dir);
+
+    // Step 1: environment=prod alone decides no constraint — it must apply.
+    let first = ApplySelectionRequest {
+        schema_version: PRODUCT_SCHEMA_VERSION,
+        model_handle: handle.clone(),
+        scope: CONSTRAINT_SCOPE.to_string(),
+        selection_state: constraint_selection_state(&handle.model_hash, &[]),
+        selection_delta: SelectionDelta {
+            facet: "environment".to_string(),
+            option: "prod".to_string(),
+        },
+    };
+    let (first_output, first_cli): (RunOutput, ApplySelectionResult) =
+        run_json_command(&["select"], &first);
+    assert_eq!(first_output.exit_code, EXIT_OK);
+    assert_eq!(first_cli.status, OperationStatus::Ok);
+    let after_prod = first_cli.selection_state.expect("state after prod");
+
+    // Step 2: log_level=debug decides it, and breaks it.
+    let second = ApplySelectionRequest {
+        schema_version: PRODUCT_SCHEMA_VERSION,
+        model_handle: handle.clone(),
+        scope: CONSTRAINT_SCOPE.to_string(),
+        selection_state: after_prod,
+        selection_delta: SelectionDelta {
+            facet: "log_level".to_string(),
+            option: "debug".to_string(),
+        },
+    };
+    let (output, response): (RunOutput, ApplySelectionResult) =
+        run_json_command(&["select"], &second);
+
+    assert_eq!(output.exit_code, EXIT_COMMAND_ERROR);
+    assert_eq!(response.status, OperationStatus::Error);
+    assert!(response.selection_state.is_none());
+
+    let diagnostic = &response.diagnostics.diagnostics[0];
+    assert_eq!(
+        diagnostic.code, E_SELECTION_CONFLICT,
+        "a policy rejection is a selection conflict, NOT an engine-divergence \
+         incident: got '{}'",
+        diagnostic.code
+    );
+    assert_eq!(
+        diagnostic.entity_path.as_deref(),
+        Some("constraints/prod_forbids_debug")
+    );
+    assert!(
+        diagnostic.message.contains("prod_forbids_debug")
+            && diagnostic
+                .message
+                .contains("environment != 'prod' || log_level != 'debug'"),
+        "select must name the constraint and quote it, exactly as resolve does: {}",
+        diagnostic.message
+    );
+}
+
+#[test]
+fn interpreter_options_and_select_agree_about_a_constraint() {
+    // Three-surface agreement on ONE selection, measured on the seam where the
+    // solver and the loader both have a vote: `options` is solver-authoritative
+    // and `select` is adjudicated by the solver with the loader rendering the
+    // rejection. If they disagreed, `select` could refuse an option `options`
+    // had just offered — or offer one it would refuse.
+    let cmp_dir = emitted_cmp_dir_with_chunks(
+        "constraint-options",
+        CONSTRAINT_SOURCE_DEFS,
+        CONSTRAINT_SOURCE_COMPONENTS,
+        CONSTRAINT_CHUNK_DEFS,
+        CONSTRAINT_CHUNK_COMPONENTS,
+    );
+    let handle = open_handle(&cmp_dir);
+
+    // With nothing selected the policy is undecided, so both arms stand.
+    let open_request = GetSelectionOptionsRequest {
+        schema_version: PRODUCT_SCHEMA_VERSION,
+        model_handle: handle.clone(),
+        scope: CONSTRAINT_SCOPE.to_string(),
+        selection_state: constraint_selection_state(&handle.model_hash, &[]),
+        facet: "log_level".to_string(),
+        include_pruned_reasons: false,
+    };
+    let (open_output, open_cli): (RunOutput, GetSelectionOptionsResult) =
+        run_json_command(&["options"], &open_request);
+    assert_eq!(open_output.exit_code, EXIT_OK);
+    assert_eq!(open_cli.status, OperationStatus::Ok);
+    assert!(
+        open_cli.valid_options.contains(&"debug".to_string()),
+        "debug is legal until something makes it illegal: {:?}",
+        open_cli.valid_options
+    );
+
+    // Under prod it is gone — the solver's per-arm SAT query over the `.ccm`
+    // root, whose synthesized intra-facet cardinality (ADR-0054 §5.2) is what
+    // makes selecting `environment=prod` exclude the other environments and so
+    // makes the policy bite.
+    let prod_request = GetSelectionOptionsRequest {
+        schema_version: PRODUCT_SCHEMA_VERSION,
+        model_handle: handle.clone(),
+        scope: CONSTRAINT_SCOPE.to_string(),
+        selection_state: constraint_selection_state(
+            &handle.model_hash,
+            &[("environment", "prod")],
+        ),
+        facet: "log_level".to_string(),
+        include_pruned_reasons: false,
+    };
+    let (prod_output, prod_cli): (RunOutput, GetSelectionOptionsResult) =
+        run_json_command(&["options"], &prod_request);
+    assert_eq!(prod_output.exit_code, EXIT_OK);
+    assert_eq!(
+        prod_cli.valid_options,
+        vec!["info".to_string()],
+        "options must not offer what select would refuse"
+    );
 }

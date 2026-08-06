@@ -6,8 +6,8 @@
 // This is pure data-model + decision logic. The `intent` field it introduces
 // lives on `DirtyEntryMetadata` (defined in `contracts.rs`); the decision
 // functions here are total, side-effect-free, and consumed by sibling tasks
-// (the active cap/lease driver, ccql.4, and ledger ingest). No agent, no
-// network, no active timer is built here.
+// (an active cap/lease driver and downstream report verification). No
+// network and no active timer is built here.
 //
 // This file is `include!`d into the `runtime_api` flat namespace via
 // `operations.rs` (so `//!` module docs are not permitted here); it shares the

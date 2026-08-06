@@ -9,12 +9,13 @@ use crate::loader_api::{
     E_SBOM_PROFILE_INVALID, E_SBOM_STATS_INVALID,
 };
 use crate::product_api::{OperationStatus, PRODUCT_SCHEMA_VERSION};
+use crate::scenario_test_support::unique_temp_path;
 use crate::Compiler;
 use anyhow::{Context, Result};
 use serde_json::{json, Value as JsonValue};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 const S1_SOURCE_DEFS: &str = "scenarios/s1_water_pump/smoke/chunks/00_definitions.toml";
 const S1_SOURCE_COMPONENTS: &str = "scenarios/s1_water_pump/smoke/chunks/10_components.toml";
@@ -84,16 +85,7 @@ const S3_MEDIUM_CHUNK_COMPONENTS: &str =
     include_str!("../scenarios/s3_automation_cell/medium/cue/10_components.json");
 
 fn emitted_cmp_dir(chunks: &[(&str, &str)], label: &str) -> Result<(PathBuf, ir::IrIndex)> {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .context("Failed to compute unique timestamp")?
-        .as_nanos();
-    let temp_dir = std::env::temp_dir().join(format!(
-        "configflux-loop6-sbom-{}-{}-{}",
-        label,
-        std::process::id(),
-        unique
-    ));
+    let temp_dir = unique_temp_path("cfx-software-bom", label);
     std::fs::create_dir_all(&temp_dir)
         .with_context(|| format!("Failed to create temp dir '{}'", temp_dir.display()))?;
 
@@ -303,7 +295,7 @@ fn assert_scenario_golden(
 }
 
 #[test]
-fn loop6_contract_s1_sbom_result_envelope_has_required_fields() -> Result<()> {
+fn software_bom_contract_s1_sbom_result_envelope_has_required_fields() -> Result<()> {
     let (temp_dir, index) = emitted_cmp_dir(
         &[
             (S1_SOURCE_DEFS, S1_CHUNK_DEFS),
@@ -356,7 +348,7 @@ fn loop6_contract_s1_sbom_result_envelope_has_required_fields() -> Result<()> {
 }
 
 #[test]
-fn loop6_golden_s1_smoke_software_bom_matches() -> Result<()> {
+fn software_bom_golden_s1_smoke_software_bom_matches() -> Result<()> {
     assert_scenario_golden(
         &[
             (S1_SOURCE_DEFS, S1_CHUNK_DEFS),
@@ -370,7 +362,7 @@ fn loop6_golden_s1_smoke_software_bom_matches() -> Result<()> {
 }
 
 #[test]
-fn loop6_golden_s2_smoke_software_bom_matches() -> Result<()> {
+fn software_bom_golden_s2_smoke_software_bom_matches() -> Result<()> {
     assert_scenario_golden(
         &[
             (S2_SOURCE_DEFS, S2_CHUNK_DEFS),
@@ -384,7 +376,7 @@ fn loop6_golden_s2_smoke_software_bom_matches() -> Result<()> {
 }
 
 #[test]
-fn loop6_golden_s3_smoke_software_bom_matches() -> Result<()> {
+fn software_bom_golden_s3_smoke_software_bom_matches() -> Result<()> {
     assert_scenario_golden(
         &[
             (S3_SOURCE_DEFS, S3_CHUNK_DEFS),
@@ -398,7 +390,7 @@ fn loop6_golden_s3_smoke_software_bom_matches() -> Result<()> {
 }
 
 #[test]
-fn loop6_golden_s4_smoke_software_bom_matches() -> Result<()> {
+fn software_bom_golden_s4_smoke_software_bom_matches() -> Result<()> {
     assert_scenario_golden(
         &[
             (S4_SOURCE_DEFS, S4_CHUNK_DEFS),
@@ -412,7 +404,7 @@ fn loop6_golden_s4_smoke_software_bom_matches() -> Result<()> {
 }
 
 #[test]
-fn loop6_golden_s5_smoke_software_bom_matches() -> Result<()> {
+fn software_bom_golden_s5_smoke_software_bom_matches() -> Result<()> {
     assert_scenario_golden(
         &[
             (S5_SOURCE_DEFS, S5_CHUNK_DEFS),
@@ -426,7 +418,7 @@ fn loop6_golden_s5_smoke_software_bom_matches() -> Result<()> {
 }
 
 #[test]
-fn loop6_mutation_invalid_profile_artifact_binding_binding_phase_and_stats_are_rejected(
+fn software_bom_mutation_invalid_profile_artifact_binding_binding_phase_and_stats_are_rejected(
 ) -> Result<()> {
     let (temp_dir, _index) = emitted_cmp_dir(
         &[
@@ -488,7 +480,7 @@ fn loop6_mutation_invalid_profile_artifact_binding_binding_phase_and_stats_are_r
 }
 
 #[test]
-fn loop6_determinism_identical_calls_stable_bom_hash_and_payload() -> Result<()> {
+fn software_bom_determinism_identical_calls_stable_bom_hash_and_payload() -> Result<()> {
     let (temp_dir, _index) = emitted_cmp_dir(
         &[
             (S1_SOURCE_DEFS, S1_CHUNK_DEFS),
@@ -515,7 +507,7 @@ fn loop6_determinism_identical_calls_stable_bom_hash_and_payload() -> Result<()>
 }
 
 #[test]
-fn loop6_determinism_equivalent_key_order_payload_stable_bom_hash_and_payload() -> Result<()> {
+fn software_bom_determinism_equivalent_key_order_payload_stable_bom_hash_and_payload() -> Result<()> {
     let (temp_dir, _index) = emitted_cmp_dir(
         &[
             (S1_SOURCE_DEFS, S1_CHUNK_DEFS),
@@ -550,7 +542,7 @@ fn loop6_determinism_equivalent_key_order_payload_stable_bom_hash_and_payload() 
 }
 
 #[test]
-fn loop6_profile_full_audit_preserves_values_and_value_redacted_redacts_selected_values(
+fn software_bom_profile_full_audit_preserves_values_and_value_redacted_redacts_selected_values(
 ) -> Result<()> {
     let (temp_dir, _index) = emitted_cmp_dir(
         &[
@@ -616,7 +608,7 @@ fn loop6_profile_full_audit_preserves_values_and_value_redacted_redacts_selected
 }
 
 #[test]
-fn loop6_medium_s1_and_s3_bom_validation_paths_pass() -> Result<()> {
+fn software_bom_medium_s1_and_s3_bom_validation_paths_pass() -> Result<()> {
     let (s1_dir, _index) = emitted_cmp_dir(
         &[
             (S1_MEDIUM_SOURCE_DEFS, S1_MEDIUM_CHUNK_DEFS),
@@ -663,7 +655,7 @@ fn loop6_medium_s1_and_s3_bom_validation_paths_pass() -> Result<()> {
 }
 
 #[test]
-fn loop6_bom_metrics_snapshot_smoke_and_medium() -> Result<()> {
+fn software_bom_metrics_snapshot_smoke_and_medium() -> Result<()> {
     let (smoke_dir, _index) = emitted_cmp_dir(
         &[
             (S1_SOURCE_DEFS, S1_CHUNK_DEFS),
@@ -734,7 +726,7 @@ fn loop6_bom_metrics_snapshot_smoke_and_medium() -> Result<()> {
     assert_eq!(s3_medium_export.status, OperationStatus::Ok);
 
     eprintln!(
-        "loop6_bom_metrics smoke_export_us={} medium_s1_export_us={} medium_s3_export_us={} rss_kib={}",
+        "software_bom_metrics smoke_export_us={} medium_s1_export_us={} medium_s3_export_us={} rss_kib={}",
         smoke_export_us,
         s1_medium_export_us,
         s3_medium_export_us,
@@ -748,7 +740,7 @@ fn loop6_bom_metrics_snapshot_smoke_and_medium() -> Result<()> {
 }
 
 #[test]
-fn loop6_value_redacted_profile_retains_required_structure() -> Result<()> {
+fn software_bom_value_redacted_profile_retains_required_structure() -> Result<()> {
     let (temp_dir, _index) = emitted_cmp_dir(
         &[
             (S4_SOURCE_DEFS, S4_CHUNK_DEFS),

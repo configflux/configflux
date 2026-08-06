@@ -11,9 +11,13 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
+/// registry: cause = a telemetry spool or archive file could not be created, read, written, renamed, or removed on the local device; remedy = check the free space, permissions, and mount state of the telemetry directory; the diagnostic names the specific file and the underlying system error
 pub const E_RUNTIME_TELEMETRY_IO: &str = "E_RUNTIME_TELEMETRY_IO";
+/// registry: cause = reserved for a telemetry sink refusing a record because its buffer is full; no current code path emits it, because the sinks drop the oldest record and count the drop instead; remedy = no action is needed for this code; to detect record loss, read the dropped-record counter a sink exposes rather than watching for this diagnostic
 pub const E_RUNTIME_TELEMETRY_BACKPRESSURE: &str = "E_RUNTIME_TELEMETRY_BACKPRESSURE";
+/// registry: cause = a telemetry flush reached its publisher, and the publisher itself rejected or could not deliver the batch; remedy = treat this as a delivery failure rather than a data failure: the records stay spooled, so restoring the publisher's availability lets the next flush drain them
 pub const E_RUNTIME_TELEMETRY_PUBLISH_FAILED: &str = "E_RUNTIME_TELEMETRY_PUBLISH_FAILED";
+/// registry: cause = a telemetry record could not be formed or read back: an audit event with a blank actor, or a spooled record that will not serialize or parse; remedy = supply a non-empty actor on every audit event; a record that fails to parse on read-back indicates a damaged spool file, which can be removed to resume telemetry
 pub const E_RUNTIME_TELEMETRY_RECORD_CORRUPT: &str = "E_RUNTIME_TELEMETRY_RECORD_CORRUPT";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -913,29 +917,10 @@ fn sha256_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    struct TempDirGuard {
-        path: PathBuf,
-    }
-
-    impl Drop for TempDirGuard {
-        fn drop(&mut self) {
-            fs::remove_dir_all(&self.path).ok();
-        }
-    }
+    use crate::scenario_test_support::{unique_temp_dir, TempDirGuard};
 
     fn temp_dir(label: &str) -> TempDirGuard {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("duration")
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "configflux-telemetry-sink-{label}-{}-{unique}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&path).expect("create temp dir");
-        TempDirGuard { path }
+        unique_temp_dir("configflux-telemetry-sink", label).expect("create temp dir")
     }
 
     #[derive(Default)]

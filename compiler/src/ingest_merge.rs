@@ -109,11 +109,21 @@ pub(crate) fn build_ir_index(chunks: &[SourceChunk]) -> Result<ir::IrIndex> {
         }
     }
 
-    chunk_refs.sort_by(|a, b| {
-        a.source_id
-            .cmp(&b.source_id)
-            .then_with(|| a.chunk_hash.cmp(&b.chunk_hash))
-    });
+    // ADR-0056 §2: order by `chunk_hash` ascending, lexicographic over the
+    // lowercase hex string. The alphabet is [0-9a-f], so byte order and
+    // codepoint order coincide and no locale-aware comparison is involved.
+    //
+    // The key USED to be `(source_id, chunk_hash)`. That normalized `--source`
+    // argument order, but it made the emitted order — and therefore the
+    // `model_hash` preimage's order — a function of how the sources were
+    // spelled. Removing `source_id` from the preimage without re-keying this
+    // sort would have left path spelling in the identity through the ordering
+    // alone. No tiebreak is needed: `add_parsed_chunk` rejects a repeated
+    // `chunk_hash` at ingest (§3), so the key is unique.
+    //
+    // Sorted exactly once, here. Both the emitted `IrIndex.chunks` and the
+    // preimage vector derive from this one result.
+    chunk_refs.sort_by(|a, b| a.chunk_hash.cmp(&b.chunk_hash));
 
     ir::IrIndex::from_parts(
         chunk_refs,

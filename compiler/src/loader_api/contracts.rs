@@ -1,13 +1,22 @@
 // SPDX-License-Identifier: BUSL-1.1
 
+/// registry: cause = the request's schema_version is not the version this build implements; remedy = set schema_version to the version this binary reports, or use a binary built for the version your caller targets
 pub const E_LOADER_UNSUPPORTED_SCHEMA_VERSION: &str = "E_LOADER_UNSUPPORTED_SCHEMA_VERSION";
+/// registry: cause = the compiled model package manifest could not be read or parsed as JSON, so the package cannot be opened; remedy = point the model handle at a manifest produced by a successful compile, and recompile the model if the file is damaged
 pub const E_LOADER_MANIFEST_INVALID: &str = "E_LOADER_MANIFEST_INVALID";
+/// registry: cause = the manifest parses but disagrees with the package it describes: an unsupported manifest version, a mismatched IR format, hash algorithm or model hash, or recorded statistics that do not match the index; remedy = recompile the model to regenerate a self-consistent package, and do not hand-edit a manifest or mix files from separate compilations
 pub const E_LOADER_MANIFEST_INCONSISTENT: &str = "E_LOADER_MANIFEST_INCONSISTENT";
+/// registry: cause = the package index failed to load, its recorded config hash does not match the hash computed from its contents, or a chunk file it names is missing or modified; remedy = restore the complete, unmodified package directory or recompile the model: every chunk file the index names must be present and byte-identical
 pub const E_LOADER_INDEX_INVALID: &str = "E_LOADER_INDEX_INVALID";
+/// registry: cause = the supplied selection state is not consistent with the open model: its model hash or scope differs, its recorded state hash does not match its contents, or a choice contradicts a context tag; remedy = start from a fresh selection state initialized against the model you opened, and pass it back unmodified between calls
 pub const E_SELECTION_STATE_INVALID: &str = "E_SELECTION_STATE_INVALID";
+/// registry: cause = the requested facet name is blank, or no facet by that name is declared or discovered anywhere in the opened model; remedy = check the name for typos and list the model's facets first; a facet must exist in the compiled model before it can be selected
 pub const E_SELECTION_UNKNOWN_FACET: &str = "E_SELECTION_UNKNOWN_FACET";
+/// registry: cause = the facet exists, but the requested option is not a member of that facet's declared domain; remedy = choose one of the options the diagnostic lists, or add the value to the facet's domain in the model source and recompile
 pub const E_SELECTION_INVALID_OPTION: &str = "E_SELECTION_INVALID_OPTION";
+/// registry: cause = the choice contradicts something already fixed: an immutable context tag, an earlier selection of the same facet, or a declared constraint the choice would violate; remedy = read the conflict the diagnostic names and drop or change the earlier choice; a constraint violation identifies the rule under an entity path of constraints/<id>
 pub const E_SELECTION_CONFLICT: &str = "E_SELECTION_CONFLICT";
+/// registry: cause = the option is valid on its own, but once applied no assignment of the remaining facets satisfies the model; remedy = query the valid options for the facet before choosing, or run explain to see the minimal set of choices that conflict
 pub const E_SELECTION_UNSATISFIABLE: &str = "E_SELECTION_UNSATISFIABLE";
 // ADR-0030 frozen codes (CCM hard precondition + fallback retirement). A usable
 // `.ccm` solver model is required for the selection path; absence and internal
@@ -18,14 +27,19 @@ pub const E_SELECTION_UNSATISFIABLE: &str = "E_SELECTION_UNSATISFIABLE";
 //
 // Emitted when `options`/`select` cannot reach a usable solver model (empty
 // reference, unloadable artifact, or symbol-less stub). ADR-0030 D1.
+/// registry: cause = selection could not reach a usable solver model: the package's solver-model reference is empty, the artifact will not load, or it carries no symbol table; remedy = recompile the model so a complete solver model is emitted beside the package, and keep the two together whenever the package is copied or moved
 pub const E_SELECTION_SOLVER_MODEL_UNAVAILABLE: &str = "E_SELECTION_SOLVER_MODEL_UNAVAILABLE";
 // The selection surface's internal-fault family (ADR-0030). Emitted when the
 // solver rejects a `select` the legacy engine accepts (engine divergence, D3),
 // or when a solver-owned `options`/`select`/`set-parameter` query faults
 // internally (D4). Both fail closed rather than degrade to legacy.
+/// registry: cause = the solver faulted while adjudicating the request, or rejected a selection the model's own semantics accept; the inputs are not at fault; remedy = this is a defect rather than a usage error: re-run with the same inputs to confirm, then report it with the model package and the exact sequence of selections
 pub const E_SELECTION_ENGINE_DIVERGENCE: &str = "E_SELECTION_ENGINE_DIVERGENCE";
+/// registry: cause = the scope selector could not be parsed, or names a form the resolver does not recognize; remedy = use a supported selector such as component:<id>, platform:<id>, platform:all, or all
 pub const E_RESOLVE_SCOPE_INVALID: &str = "E_RESOLVE_SCOPE_INVALID";
+/// registry: cause = the model could not be loaded for resolution, or a declared constraint carries an expression the resolver cannot parse, so resolution fails closed rather than skipping the rule; remedy = recompile the model with the current toolchain, and correct any constraint expression the diagnostic names
 pub const E_RESOLVE_MODEL_INVALID: &str = "E_RESOLVE_MODEL_INVALID";
+/// registry: cause = an active condition references a facet or tag that nothing in the selection binds, so the condition cannot be evaluated; remedy = supply the missing facet as an explicit choice or as a context tag before resolving
 pub const E_RESOLVE_CONTEXT_UNSATISFIED: &str = "E_RESOLVE_CONTEXT_UNSATISFIED";
 // ADR-0047 §5: a DECLARED facet that has NO default is unbound after merging
 // context_tags ∪ choices, yet an active condition needs it. Distinct from the
@@ -33,23 +47,45 @@ pub const E_RESOLVE_CONTEXT_UNSATISFIED: &str = "E_RESOLVE_CONTEXT_UNSATISFIED";
 // the facet is bound, so this is a valid-input-but-underspecified USAGE error
 // (cfx exit 2 per ADR-0042), and its message names the facet and its declared
 // domain instead of the generic "unsatisfiable" hint.
+/// registry: cause = a declared facet with no default is left unbound while an active condition requires it, so the model is satisfiable but underspecified; remedy = bind the facet the diagnostic names to one of the values in its reported domain, or give that facet a default in the model source
 pub const E_RESOLVE_FACET_UNBOUND: &str = "E_RESOLVE_FACET_UNBOUND";
+/// registry: cause = resolution failed for a reason outside the scope and context families, or the resolved output could not be canonically serialized for hashing; remedy = read the wrapped message for the underlying cause; report a serialization failure with the model package, since deterministic hashing must succeed
 pub const E_RESOLVE_FAILED: &str = "E_RESOLVE_FAILED";
 // Emitted when `resolve` cannot reach a usable solver model to gate
 // satisfiability (absence, or a sat-gate fault). ADR-0030 D1/D4.
+/// registry: cause = resolution could not reach a usable solver model to check satisfiability, or the solver faulted while replaying the committed choices; remedy = recompile the model so a complete solver model is emitted beside the package, and keep the two together when the package is moved
 pub const E_RESOLVE_SOLVER_MODEL_UNAVAILABLE: &str = "E_RESOLVE_SOLVER_MODEL_UNAVAILABLE";
+// ADR-0054 §6: the `entity_path` prefix a constraint-violation diagnostic
+// carries. This is a MACHINE-CONSUMER CONTRACT, not cosmetics: §6 deliberately
+// adds no new diagnostic code, so `constraints/<id>` on `entity_path` is the
+// only way a consumer distinguishes a policy violation from the other
+// `E_SELECTION_CONFLICT` causes (context-tag clash, already-selected facet).
+pub const CONSTRAINT_ENTITY_PATH_PREFIX: &str = "constraints/";
+/// registry: cause = the requested export profile is not one this build supports; remedy = use the early-binding profile named in the export contract; it is the only profile this version accepts
 pub const E_EXPORT_PROFILE_INVALID: &str = "E_EXPORT_PROFILE_INVALID";
+/// registry: cause = the resolve result handed to export is unusable: a wrong schema version, a status other than success, a missing resolve hash, or resolved output that cannot be decoded; remedy = pass the complete, unmodified result of a successful resolve rather than a hand-assembled or partially copied structure
 pub const E_EXPORT_RESOLVE_INVALID: &str = "E_EXPORT_RESOLVE_INVALID";
+/// registry: cause = a construction-lifecycle parameter typed as an artifact holds something other than a non-empty artifact identifier string; remedy = give the parameter the diagnostic names a valid artifact identifier in the model source, then recompile and resolve before exporting again
 pub const E_EXPORT_ARTIFACT_INVALID: &str = "E_EXPORT_ARTIFACT_INVALID";
+/// registry: cause = a generated C++ or CMake symbol is not a valid identifier, or two parameters generate the same symbol and would collide in the emitted header; remedy = rename the component or parameter the diagnostic names so the generated symbols are both valid and unique
 pub const E_EXPORT_SYMBOL_INVALID: &str = "E_EXPORT_SYMBOL_INVALID";
+/// registry: cause = the export artifacts could not be produced, most often because a resolved floating-point value is not finite and has no deterministic representation; remedy = replace any not-a-number or infinite value in the model with a finite one; report other failures with the resolved output that produced them
 pub const E_EXPORT_FAILED: &str = "E_EXPORT_FAILED";
+/// registry: cause = the requested software bill of materials profile is not one this build supports; remedy = use the full-audit profile to include resolved values, or the value-redacted profile to omit them
 pub const E_SBOM_PROFILE_INVALID: &str = "E_SBOM_PROFILE_INVALID";
+/// registry: cause = the supplied resolve result is unusable or self-contradictory: a wrong shape, empty resolved output, or a component or parameter carrying conflicting values across scope roots; remedy = pass the complete, unmodified result of a successful resolve, and resolve a scope whose roots agree on every shared component and parameter
 pub const E_SBOM_RESOLVE_INVALID: &str = "E_SBOM_RESOLVE_INVALID";
+/// registry: cause = a component in the bill of materials names a dependency that is not itself present in the document; remedy = resolve a scope that includes every component reachable through depends_on, so the dependency graph in the document is closed
 pub const E_SBOM_PATH_INVALID: &str = "E_SBOM_PATH_INVALID";
+/// registry: cause = an artifact-typed parameter holds a blank or non-string value, or names an artifact that is absent from the resolved artifact catalog; remedy = ensure the resolve result you pass carries every artifact its parameters reference, then regenerate the document
 pub const E_SBOM_ARTIFACT_INVALID: &str = "E_SBOM_ARTIFACT_INVALID";
+/// registry: cause = a parameter in the resolved output declares a lifecycle outside the supported set; remedy = give every parameter one of the supported lifecycles: construction, startup, or runtime
 pub const E_SBOM_BINDING_INVALID: &str = "E_SBOM_BINDING_INVALID";
+/// registry: cause = a document's recorded component, parameter, or artifact counts disagree with its own contents, which signals tampering or corruption rather than bad input; remedy = regenerate the document from a fresh resolve; a stored bill of materials must never be hand-edited, because its counts and hash are part of its evidence value
 pub const E_SBOM_STATS_INVALID: &str = "E_SBOM_STATS_INVALID";
+/// registry: cause = a stored document fails verification: its hash algorithm, canonicalization version, document version, or recorded hash does not match its contents; remedy = regenerate the document; a mismatch means the stored bytes changed after the document was produced, so the copy in hand cannot be trusted as evidence
 pub const E_SBOM_HASH_INVALID: &str = "E_SBOM_HASH_INVALID";
+/// registry: cause = the assembled bill of materials could not be canonically serialized, so its content hash could not be computed; remedy = report this with the resolve result used, since canonical serialization is expected to succeed for every well-formed document
 pub const E_SBOM_FAILED: &str = "E_SBOM_FAILED";
 
 pub const EXPORT_PROFILE_CPP_EARLY_BINDING_V1: &str = "cpp_early_binding_v1";
@@ -196,11 +232,23 @@ pub enum ConstraintKind {
 /// unsatisfiability. ADR-0031 D3 `conflicting_constraints[]` element.
 ///
 /// `summary` is advisory human-gloss text, not a parsed field (ADR-0031 D3).
+///
+/// `constraint_id` names the **authored** `constraints:` entry this clause is
+/// attributed to (ADR-0054 §5.4), which is the field a machine consumer reads
+/// to tie a conflict back to declared policy. It is `None` — and omitted from
+/// the JSON — for a `Selection` (a prior choice is not a declared constraint)
+/// and for a `ModelRule` that no declared constraint accounts for. That second
+/// case means the *model* is over-constrained, not that the user violated a
+/// policy: synthesized intra-facet cardinality conjuncts are deliberately
+/// absent from the roster and must never be named here as if they were
+/// authored policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConflictingConstraint {
     pub kind: ConstraintKind,
     pub facets: Vec<ConstraintFacet>,
     pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub constraint_id: Option<String>,
 }
 
 /// The labeled unsat core attached to a genuine constraint-conflict rejection
@@ -584,6 +632,80 @@ struct SelectionConstraintModel {
     // `[closed]`/`[open]` schema-kind token. Empty (⇒ `declared_open: None`) for
     // any undeclared facet and every model that declares no facet.
     facet_open: BTreeMap<String, bool>,
+    // ADR-0054 §4: the model's authored policy assertions, in id-ascending
+    // order.
+    //
+    // THIS IS NOT `conditions`, AND THE TWO MUST NEVER BE MERGED INTO ONE LIST
+    // AGAIN (ADR-0054 §3). They are different kinds of thing that happen to
+    // share a grammar:
+    //
+    //   * `conditions` holds INCLUSION SELECTORS harvested from component,
+    //     parameter, and override `condition` fields. A selector decides what a
+    //     resolved configuration CONTAINS — it is the 150% -> 100% filter — and
+    //     asserts nothing about which selections are legal.
+    //   * `constraints` holds POLICY ASSERTIONS. Each one decides what a user is
+    //     ALLOWED TO PICK, under one rule: every declared constraint must hold
+    //     in every resolved configuration.
+    //
+    // Conflating them is the defect ADR-0054 exists to end: it is what let a
+    // branch selector prune an option model-wide (configflux-9xxq) and what let
+    // a policy written as a phantom component be enforced on two of the three
+    // public surfaces and ignored on the third (configflux-4sjk). A constraint
+    // also carries an ID, which a selector has no notion of and which
+    // `cfx explain` needs to name a violated policy.
+    //
+    // Deliberately, a constraint does NOT widen `facet_domains`: a policy
+    // asserts over a domain, it never creates one. `link_verify::
+    // validate_constraints` enforces every facet named here is DECLARED, not
+    // merely condition-inferred — ADR-0054 §5.2 amendment, configflux-6j91.
+    constraints: Vec<SelectionConstraint>,
+}
+
+/// One authored policy assertion, as the SELECTION surfaces need it.
+///
+/// `resolve_from_selection` reads constraints straight off the merged
+/// `Config` (`ResolveModel`), where the authored `condition` text and the
+/// declaring chunk are both still to hand. The selection path loads a much
+/// narrower model and used to keep only `(id, expr)` — enough to DECIDE a
+/// violation, not enough to REPORT one. Carrying the text and the source id
+/// here is what lets a rejected `apply_selection` render exactly the ADR-0054
+/// §6 diagnostic `resolve` renders, instead of a second, vaguer message for
+/// the same policy (configflux-narb).
+#[derive(Debug, Clone)]
+struct SelectionConstraint {
+    /// The authored constraint id — what `cfx explain` and the §6 diagnostic
+    /// name.
+    id: String,
+    /// The authored condition text, quoted verbatim in the §6 diagnostic. The
+    /// parsed `expr` cannot be printed back as the author wrote it.
+    condition: String,
+    /// The parsed assertion, evaluated by `not_contradicted` against a
+    /// (possibly partial) assignment.
+    expr: ConditionExpr,
+    /// The `source_id` of the chunk that declared it (ADR-0054 §6).
+    source_id: String,
+}
+
+/// What `load_resolve_model` hands `resolve_from_selection`: the merged
+/// authored model, plus the provenance the merge would otherwise throw away.
+///
+/// `Config` is the AUTHORED schema shape — it has no notion of which file an
+/// entity came from, and it must not grow one (it is what a user writes, and
+/// what `constraints` passes through verbatim per ADR-0054 §1). But ADR-0054
+/// §6's rejection diagnostic specifies `source_id` = "the chunk that declared
+/// the constraint", so the loader records it beside the config rather than
+/// inside it (configflux-emmg).
+///
+/// The map is filled on the chunk walk `load_resolve_model` ALREADY performs,
+/// from the `IrChunkRef.source_id` that loop ALREADY holds — no second pass
+/// over the package, and nothing is re-read on the error path.
+#[derive(Debug, Clone)]
+struct ResolveModel {
+    config: crate::schema::Config,
+    /// Constraint id → the `source_id` of the chunk that declared it. Total
+    /// over `config.constraints` (ingest rejects duplicate ids across chunks,
+    /// so the mapping is a function).
+    constraint_sources: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

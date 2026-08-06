@@ -2,7 +2,7 @@
 
 [![License: BUSL-1.1](https://img.shields.io/badge/license-BUSL--1.1-blue.svg)](LICENSE)
 
-<!-- evaluator-note: latest=v0.2.0 -->
+<!-- evaluator-note: latest=v0.3.0 -->
 
 
 **ConfigFlux compiles scattered configuration definitions into one validated
@@ -44,6 +44,10 @@ A few terms used throughout ConfigFlux and its docs:
   to author chunks; exported to JSON for ingestion.
 - **CMP (Compiled Model Package)** — the compiler's output artifact: the
   validated, hash-addressable model that the interpreter and runtime consume.
+- **CCM (Compiled Constraint Model)** — the compiled solver form emitted
+  alongside the CMP (in the package's `ccm/` directory): a symbol table plus a
+  reduced ordered binary decision diagram the solver queries to decide which
+  options remain valid and whether a selection is satisfiable.
 
 ## Key Features
 
@@ -63,6 +67,77 @@ A few terms used throughout ConfigFlux and its docs:
   stable diagnostic codes and frozen schemas.
 - **Requirement traceability.** Behaviour is mapped to tracked requirements
   end-to-end, so the guarantees above are auditable rather than assumed.
+- **Model explorer** — a static, local, read-only web UI (`explorer/`) for
+  browsing compiled models, resolved snapshots, and explain reports; no build
+  step, no backend, works fully offline.
+
+## Install
+
+Every release publishes prebuilt, self-contained Linux binaries. No toolchain
+is required — download, verify, run. To build from source instead, see
+[Quick Start](#quick-start) below.
+
+### 1. Download
+
+Pick the tarball for your platform from the
+[latest release](https://github.com/configflux/configflux/releases):
+
+- Linux x86_64 — `configflux-vX.Y.Z-x86_64-linux.tar.gz`
+- Linux aarch64 — `configflux-vX.Y.Z-aarch64-linux.tar.gz`
+
+Each tarball is published with a `.sha256` checksum and a `.sig`/`.crt`
+signature pair. The release also carries a combined `SHA256SUMS` manifest that
+covers every tarball, signed as a single file.
+
+### 2. Verify
+
+Check the download before extracting it. Run this from the directory you
+downloaded into:
+
+```bash
+# Verify one asset against its own checksum file
+sha256sum -c configflux-vX.Y.Z-x86_64-linux.tar.gz.sha256
+
+# Or verify against the combined manifest, ignoring platforms you skipped
+sha256sum -c --ignore-missing SHA256SUMS
+```
+
+Optionally verify the signature as well. `SHA256SUMS` is signed with keyless
+[cosign](https://github.com/sigstore/cosign) using the release workflow's
+GitHub OIDC identity, so a good signature shows the checksums were produced by
+this project's release pipeline and not substituted afterwards:
+
+```bash
+cosign verify-blob \
+  --certificate-identity-regexp 'https://github.com/configflux/configflux/.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate SHA256SUMS.crt \
+  --signature SHA256SUMS.sig \
+  SHA256SUMS
+```
+
+### 3. Extract and run
+
+The archive expands into a directory named after the asset:
+
+```bash
+tar -xzf configflux-vX.Y.Z-x86_64-linux.tar.gz
+cd configflux-vX.Y.Z-x86_64-linux
+./cfx --version
+```
+
+It contains four executables — `cfx` (the one-shot resolver), `compiler`,
+`interpreter`, and `runtime` — alongside the license files. Put them on your
+`PATH` to run them from anywhere:
+
+```bash
+export PATH="$PWD:$PATH"
+```
+
+From here the rest of this README applies unchanged, starting with
+[Resolve your first configuration](#resolve-your-first-configuration). One
+naming note: the compiler ships as `compiler` in the tarball, while the
+source-build walkthrough below exposes it as `configflux-compiler`.
 
 ## Quick Start
 
@@ -108,9 +183,9 @@ lineage that makes the result reproducible:
 ```console
 $ configflux-compiler compile --source compiler/scenarios/s1_water_pump/smoke/cue/00_definitions.json --source compiler/scenarios/s1_water_pump/smoke/cue/10_components.json --out build > /dev/null
 $ cfx resolve --model build/cmp.manifest.json --select cooling_brand=hydra --select cooling_model=x200 --select pump_type=dual --select region=eu --out snapshot
-model_hash: 76153d964da312bf4f5951ab68c196e5cda9065e7ab7150efba84c4ec4ecfdde
-selection_state_hash: 8fe466c994b2094df220633d77a46e58a011d8ccaf6579cb3171a16ca3cece4b
-resolve_hash: c77e0b3aa530d452e126f24dc2bd2f470d07f736e75eecc034a9a3a91ab30982
+model_hash: a3486458bf58f77d5eb9f7b562aab9d8eaffcacdac1cbe1218c8aa0d4196c57f
+selection_state_hash: 733c9ba87e9544cd9dc29633acc600b3b114fcd76374094b8ef1dcbd7d06bf08
+resolve_hash: 80b7b4d0108a144034a1c05f5f87579a7c3ce1077a6b41f877fac16b22622661
 wrote: generated/config.hpp
 wrote: generated/config_artifact_manifest.json
 wrote: generated/config_build_flags.cmake
@@ -121,8 +196,30 @@ commands on the same source always produces the same hashes and the same bytes.
 
 A full end-to-end worked example, from CUE chunks to a resolved runtime
 snapshot, is in [`docs/canonical-worked-example.md`](docs/canonical-worked-example.md).
-A non-robotics walkthrough using the building HVAC pack is in
-[`docs/non-robotics-worked-example.md`](docs/non-robotics-worked-example.md).
+
+Runnable examples are in [`examples/`](examples/). If you configure services
+across environments, start with
+[`00-service-multi-env`](examples/00-service-multi-env/) — the same pipeline on
+a non-robotics domain: one web service resolved across dev, staging, and prod
+with `cfx`, including a compiled policy (no debug logging in prod) that
+`cfx explain` narrates.
+
+### Explore the results visually
+
+The repository ships a static model explorer — a local, read-only web UI for
+the JSON artifacts the pipeline emits. Open `explorer/index.html` directly in
+Firefox or Safari, or serve the folder with any static file server (Chrome
+restricts `file://` module loading):
+
+```bash
+cd explorer && python3 -m http.server 8000
+```
+
+Load an artifact with the file picker or drag-and-drop: a model summary or
+`cfx options --format json` output in the Model view, a `cfx resolve --format
+json` snapshot in the Resolution view, or a `cfx explain --format json` report
+in the Explain view. Ready-to-load samples live in `explorer/fixtures/`; see
+`explorer/README.md` for details.
 
 ## Project Layout
 
@@ -148,14 +245,18 @@ compiler/scenarios/
   specification across compiler, interpreter, and runtime.
 - [`docs/interface-contracts.md`](docs/interface-contracts.md) — cross-
   application interface contracts and scale constraints.
+- [`docs/diagnostics.md`](docs/diagnostics.md) — every diagnostic code the
+  compiler, interpreter, and runtime can emit, with its cause and remedy.
 - [`docs/comparisons.md`](docs/comparisons.md) — how ConfigFlux relates to
   Helm and Kustomize, CUE, Nix, and classical SPLE tools.
 - [`docs/faq.md`](docs/faq.md) — common evaluator questions: determinism,
   tested scale, CUE, service integration, and license.
 - [`docs/glossary.md`](docs/glossary.md) — the vocabulary used across
   ConfigFlux and its documentation.
-- [`CONTRIBUTING.md`](CONTRIBUTING.md) — how to set up, build, and submit
-  changes.
+- [`explorer/README.md`](explorer/README.md) — the local model-explorer UI:
+  what each view loads, sample fixtures, schema compatibility.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — how to report bugs, request features,
+  and build from source.
 - [`SECURITY.md`](SECURITY.md) — security policy and disclosure process.
 
 ## License

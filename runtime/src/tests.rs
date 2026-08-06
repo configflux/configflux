@@ -3,9 +3,9 @@
 use super::*;
 use compiler::loader_api::{
     apply_selection, canonical_selection_state, open_model, resolve_from_selection,
-    ApplySelectionRequest, ConstraintKind, ModelHandle, OpenModelRequest,
+    ApplySelectionRequest, ConstraintKind, ExplainRejectionRequest, ModelHandle, OpenModelRequest,
     ResolveFromSelectionRequest, SelectionDelta, SelectionState, E_SELECTION_CONFLICT,
-    E_SELECTION_ENGINE_DIVERGENCE, E_SELECTION_UNKNOWN_FACET,
+    E_SELECTION_ENGINE_DIVERGENCE, E_SELECTION_UNKNOWN_FACET, MODEL_OVER_CONSTRAINED_SUMMARY,
 };
 use compiler::product_api::{
     compile_model, CompileModelRequest, SourceManifestEntry, PRODUCT_SCHEMA_VERSION,
@@ -2503,13 +2503,22 @@ fn run_035_cli_invalid_args_fail_closed_with_generic_transport_error() {
 //
 // Fixture shape: the `climate` component exposes a runtime-writable
 // `cooling_brand` parameter (lifecycle=runtime, type=string) whose
-// `param_key` is also a solver facet. A guard component carries the
-// condition `cooling_brand == 'hydra' && cooling_brand != 'aeroflux'`, so the
-// emitted feasible formula requires `cooling_brand.hydra` true and
+// `param_key` is also a solver facet. A named constraint carries
+// `cooling_brand == 'hydra' && cooling_brand != 'aeroflux'`, so the emitted
+// feasible formula requires `cooling_brand.hydra` true and
 // `cooling_brand.aeroflux` false. Setting the parameter to `hydra` is a
 // satisfiable selection (accepted); setting it to `aeroflux` conjoins
 // `cooling_brand.aeroflux` against `¬cooling_brand.aeroflux` → ⊥ → the solver
 // returns `Error::Conflict`, surfaced as `E_SELECTION_CONFLICT`.
+//
+// ADR-0054 §8 migration: this rule used to be carried by a `policy_module`
+// component whose `condition` was AND-folded into the BDD root. A component
+// condition is an inclusion selector and nothing else (§3), so under §5.1 that
+// shape asserts nothing and this fixture would silently stop rejecting the
+// conflicting write. The facet must also be DECLARED as part of the move:
+// `link_verify::validate_constraints` infers nothing from a constraint
+// condition, so the `hydra`/`aeroflux` domain that used to exist only by
+// inference from the very condition being migrated now has to be written down.
 const SOLVER_FIXTURE_DEFS: &str = r#"{
     "package": "s_solver",
     "version": "1.0.0",
@@ -2520,6 +2529,19 @@ const SOLVER_FIXTURE_DEFS: &str = r#"{
             "lifecycle": "runtime",
             "safety": "q_m",
             "access": "technician"
+        }
+    },
+    "facets": {
+        "cooling_brand": {
+            "values": ["hydra", "aeroflux"],
+            "default": "hydra",
+            "doc": "Cooling brand."
+        }
+    },
+    "constraints": {
+        "brand_guard": {
+            "condition": "cooling_brand == 'hydra' && cooling_brand != 'aeroflux'",
+            "doc": "Only the hydra cooling brand is permitted."
         }
     }
 }"#;
@@ -2542,10 +2564,6 @@ const SOLVER_FIXTURE_COMPONENTS: &str = r#"{
                     "req_id": "req_solver_001"
                 }
             }
-        },
-        "brand_guard": {
-            "type": "policy_module",
-            "condition": "cooling_brand == 'hydra' && cooling_brand != 'aeroflux'"
         }
     }
 }"#;
@@ -2762,8 +2780,8 @@ fn open_solver_fixture_snapshot(cmp_dir: &TempDirGuard) -> RuntimeSnapshot {
 // terminal child refs only in SENTINEL form, not the table-index (0=⊥/1=⊤) form
 // the real oxidd/cudd serializer emits. configflux-autp has landed (the walker
 // now resolves index-based terminal refs), so the exit-0/labeled-core contract
-// is active again. (The wrapper's own LabeledCore -> UnsatCore mapping is also
-// proven independently by the unit test `convert_core_*` in
+// is active again. (The LabeledCore -> UnsatCore mapping the wrapper delegates
+// to is also proven independently by the unit tests `shared_conversion_*` in
 // runtime/src/explain_rejection.rs, and the fail-closed/unknown-facet paths by
 // run_047 below.)
 #[test]
@@ -3146,6 +3164,692 @@ fn run_048_explain_rejection_labeled_mus_has_no_raw_indices() {
 }
 
 // ---------------------------------------------------------------------------
+// configflux-ykae — the two explain surfaces must explain one model one way.
+//
+// `cfx` and the interpreter reach explain through `session_compose::explain`;
+// the runtime binary composes its own {parameter, value} envelope around the
+// same solver decision. The core INSIDE both envelopes must be the same core:
+// the violated `constraints:` entry named by id with its condition quoted
+// (ADR-0054 §5.4), and the same wording. The runtime used to convert the
+// labeled MUS with a converter of its own, which is how it came to report
+// `blocked by model rule over cpu.highperf, cooling.air` for the conflict
+// `cfx` reports as `blocked by constraint highperf_requires_liquid`.
+// ---------------------------------------------------------------------------
+
+/// The declared-constraint ids the compiled fixture's `.ccm` roster carries.
+/// They are the ONLY ids a core may name: ADR-0054 §5.4 forbids naming a
+/// synthesized cardinality conjunct as if it were authored policy.
+fn declared_constraint_ids(cmp_dir: &TempDirGuard) -> Vec<String> {
+    let ccm = solver::Session::<solver::CuddBackend>::load_ccm(&cmp_dir.path.join("ccm"))
+        .expect("load the fixture .ccm");
+    ccm.constraint_roster()
+        .into_iter()
+        .map(|entry| entry.id)
+        .collect()
+}
+
+#[test]
+fn run_051_explain_rejection_surfaces_agree_on_the_named_constraint() {
+    let cmp_dir = emitted_labeled_mus_fixture_dir();
+    let snapshot = open_labeled_mus_snapshot(&cmp_dir);
+    // The runtime skips the facet under explanation when it replays the
+    // committed choices (the candidate supersedes any prior pin on it), while
+    // `session_compose` replays them all. The two are the same replay only
+    // while no committed choice pins the explained facet — which is the
+    // fixture's shape, asserted rather than assumed.
+    assert!(
+        !snapshot.choices.contains_key("cooling"),
+        "fixture precondition: the committed state must not pin the explained facet"
+    );
+
+    // Surface 1 — the runtime binary's `explain-rejection`.
+    let runtime_request = RuntimeExplainRejectionRequest {
+        schema_version: PRODUCT_SCHEMA_VERSION,
+        runtime_snapshot: snapshot.clone(),
+        path: LABELED_MUS_COOLING_WRITE_PATH.to_string(),
+        value: Value::String("air".to_string()),
+    };
+    let (runtime_output, runtime_response): (RunOutput, RuntimeExplainRejectionResult) =
+        run_json_command(&["explain-rejection"], &runtime_request);
+    assert_eq!(
+        runtime_output.exit_code, EXIT_OK,
+        "a rejection explanation is a success (exit 0); stderr={}",
+        runtime_output.stderr
+    );
+    let runtime_core = runtime_response
+        .rejection
+        .unsat_core
+        .expect("a genuine cross-facet conflict must carry an unsat_core");
+
+    // Surface 2 — `session_compose::explain`, the seam `cfx` and the
+    // interpreter call, over the SAME model, the SAME committed choices, and
+    // the SAME candidate.
+    let handle = open_handle(&cmp_dir);
+    let selection_state = canonical_selection_state(
+        handle.model_hash.clone(),
+        LABELED_MUS_FIXTURE_SCOPE.to_string(),
+        BTreeMap::new(),
+        snapshot.choices.clone(),
+    )
+    .expect("selection state");
+    let composed = session_compose::explain(ExplainRejectionRequest {
+        schema_version: PRODUCT_SCHEMA_VERSION,
+        model_handle: handle,
+        scope: LABELED_MUS_FIXTURE_SCOPE.to_string(),
+        selection_state,
+        rejected_option: SelectionDelta {
+            facet: "cooling".to_string(),
+            option: "air".to_string(),
+        },
+    });
+    let composed_core = composed
+        .rejection
+        .unsat_core
+        .expect("session_compose must explain the same conflict with a core");
+
+    // The whole core, field for field: same rejected candidate, same
+    // constraints in the same order, same ids, same condition text, same note.
+    assert_eq!(
+        runtime_core, composed_core,
+        "the runtime and session_compose explain surfaces must report one core"
+    );
+
+    // ADR-0054 §5.4, the content both surfaces carry: the violated
+    // `constraints:` entry is named by id and its condition is quoted.
+    assert!(
+        runtime_core.conflicting_constraints.iter().any(|constraint| {
+            constraint.kind == ConstraintKind::ModelRule
+                && constraint.constraint_id.as_deref() == Some("highperf_requires_liquid")
+                && constraint.summary == "cpu != 'highperf' || cooling != 'air'"
+        }),
+        "the core must name the violated constraint by id and quote its condition; got {:?}",
+        runtime_core.conflicting_constraints
+    );
+
+    // §5.4's hard rule: a model clause is EITHER attributed to a declared
+    // constraint OR reported as the model being over-constrained. A
+    // synthesized cardinality conjunct is never named as if it were policy.
+    let declared = declared_constraint_ids(&cmp_dir);
+    for constraint in &runtime_core.conflicting_constraints {
+        if constraint.kind != ConstraintKind::ModelRule {
+            continue;
+        }
+        match constraint.constraint_id.as_deref() {
+            Some(id) => assert!(
+                declared.iter().any(|declared_id| declared_id == id),
+                "core named '{id}', absent from the model's declared roster {declared:?}"
+            ),
+            None => assert_eq!(
+                constraint.summary, MODEL_OVER_CONSTRAINED_SUMMARY,
+                "an unattributed model clause must report the model as over-constrained"
+            ),
+        }
+    }
+
+    // The human surface: one text from both cores, naming the constraint once.
+    // The "blocked by" label belongs to the renderer, never to the embedded
+    // gloss — a gloss that carried its own label printed it twice
+    // (configflux-hdgn, fixed on the `session_compose` side only).
+    let rendered = crate::explain_renderer::render_unsat_core(&runtime_core);
+    assert_eq!(
+        rendered,
+        crate::explain_renderer::render_unsat_core(&composed_core),
+        "both surfaces must render one text"
+    );
+    assert!(
+        rendered.contains(
+            "blocked by constraint highperf_requires_liquid: cpu != 'highperf' || cooling != 'air'"
+        ),
+        "the rendered explanation must name the violated constraint; got:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("blocked by model rule: blocked by model rule"),
+        "the 'blocked by' label belongs to the renderer, never the gloss; got:\n{rendered}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// configflux-jraj / ADR-0017 amendment (2026-08-03) — write-path enforcement
+// over the session's total known assignment.
+//
+// The runtime re-derived its solver session from `snapshot.choices` alone, so a
+// sibling written DURING the session was invisible to the next write's check:
+// `cooling=air` then `cpu=highperf` were each accepted even though
+// `highperf_requires_liquid` forbids the pair. Same for a single atomic batch
+// carrying both, and the C ABI ran no check at all.
+//
+// These drive the committed `s_labeled_mus` fixture, which has never had write
+// coverage. Its all-defaults open carries an EMPTY `choices`, so the baseline
+// tier of the assignment (D2 tier 4) is what supplies the sibling values —
+// asserted below rather than assumed, because a silent miss in that projection
+// would make every case here pass for the wrong reason.
+// ---------------------------------------------------------------------------
+
+const LABELED_MUS_CPU_WRITE_PATH: &str = "component.rig.param.cpu";
+const LABELED_MUS_PSU_WRITE_PATH: &str = "component.rig.param.psu";
+const LABELED_MUS_CONSTRAINT_ID: &str = "highperf_requires_liquid";
+
+/// Open the labeled-MUS fixture with NO prior selection injected — the
+/// reproduction's starting point, and the shape `open_labeled_mus_snapshot`
+/// deliberately is not (it pins `cpu=highperf` in `choices`).
+fn open_labeled_mus_session(cmp_dir: &TempDirGuard) -> RuntimeSnapshot {
+    let ccm_ref = cmp_dir.path.join("ccm");
+    let resolve_result = resolve_labeled_mus_fixture_base(cmp_dir);
+    let mut open_request = runtime_open_request_from_resolve(&resolve_result);
+    open_request.ccm_ref = ccm_ref.to_string_lossy().into_owned();
+
+    let (open_output, open_response): (RunOutput, RuntimeOpenResult) =
+        run_json_command(&["runtime-open"], &open_request);
+    assert_eq!(open_output.exit_code, EXIT_OK, "open stderr={}", open_output.stderr);
+    let snapshot = open_response.runtime_snapshot.expect("runtime_snapshot");
+    assert!(
+        snapshot.choices.is_empty(),
+        "fixture precondition: the all-defaults open carries no choices, which is \
+         what makes the baseline tier load-bearing; got {:?}",
+        snapshot.choices
+    );
+    assert_labeled_mus_baseline(&snapshot);
+    snapshot
+}
+
+/// The baseline values the assignment's lowest tier reads, asserted rather than
+/// assumed. The projection walks
+/// `resolved_output[<scope root>].components[<component>].params[<key>].value`,
+/// and the three key spellings in play (scope id `component:rig`, scope-root key
+/// `rig`, dotted overlay path `component.rig.param.cooling`) make a silent miss
+/// easy — a miss would leave the assignment empty and every case below green.
+fn assert_labeled_mus_baseline(snapshot: &RuntimeSnapshot) {
+    let scope = snapshot
+        .resolved_output
+        .get("rig")
+        .expect("resolved_output must carry the 'rig' scope root");
+    let params = &scope
+        .components
+        .get("rig")
+        .expect("the 'rig' scope root must carry the 'rig' component")
+        .params;
+    for (key, expected) in [("cpu", "standard"), ("cooling", "liquid"), ("psu", "gold")] {
+        assert_eq!(
+            params.get(key).expect("resolved param").value,
+            Value::String(expected.to_string()),
+            "baseline value for facet-bound param '{key}'"
+        );
+    }
+}
+
+fn labeled_mus_write(
+    snapshot: RuntimeSnapshot,
+    path: &str,
+    value: &str,
+) -> SetParameterRequest {
+    SetParameterRequest {
+        schema_version: PRODUCT_SCHEMA_VERSION,
+        runtime_snapshot: snapshot,
+        path: path.to_string(),
+        value: Value::String(value.to_string()),
+        intent: compiler::runtime_api::OverrideIntent::default(),
+        actor: None,
+        reason: None,
+    }
+}
+
+/// Drive one `set-parameter` through the CLI and require it to be accepted,
+/// returning the snapshot carrying the write.
+fn accept_labeled_mus_write(snapshot: RuntimeSnapshot, path: &str, value: &str) -> RuntimeSnapshot {
+    let (output, response): (RunOutput, SetParameterResult) =
+        run_json_command(&["set-parameter"], &labeled_mus_write(snapshot, path, value));
+    assert_eq!(
+        output.exit_code, EXIT_OK,
+        "'{path}={value}' must be accepted here; response={:?}",
+        response.diagnostics.diagnostics
+    );
+    response.runtime_snapshot.expect("accepted write returns a snapshot")
+}
+
+/// Assert a write response is the D4 constraint rejection: exit 2,
+/// `status = error`, `E_SELECTION_CONFLICT`, no snapshot.
+fn assert_constraint_rejected(output: &RunOutput, response: &SetParameterResult) {
+    assert_eq!(
+        output.exit_code, EXIT_COMMAND_ERROR,
+        "a constraint-violating write is a domain rejection (exit 2); stderr={}",
+        output.stderr
+    );
+    assert_eq!(response.status, OperationStatus::Error);
+    assert_eq!(
+        response.diagnostics.diagnostics[0].code, E_SELECTION_CONFLICT,
+        "rejection reuses the existing selection-conflict code (D4); got {:?}",
+        response.diagnostics.diagnostics
+    );
+    assert!(
+        response.runtime_snapshot.is_none(),
+        "a rejected write changes nothing, so no snapshot is returned"
+    );
+}
+
+/// Case 1: two sequential DIRTY writes. `cooling=air` alone is legal (cpu is
+/// still `standard`); `cpu=highperf` on the session carrying that dirty write is
+/// the reported defect — the pair violates `highperf_requires_liquid`.
+#[test]
+fn run_052_write_enforcement_rejects_sequential_dirty_sibling_violation() {
+    let cmp_dir = emitted_labeled_mus_fixture_dir();
+    let snapshot = open_labeled_mus_session(&cmp_dir);
+
+    let dirty = accept_labeled_mus_write(snapshot, LABELED_MUS_COOLING_WRITE_PATH, "air");
+
+    let (output, response): (RunOutput, SetParameterResult) = run_json_command(
+        &["set-parameter"],
+        &labeled_mus_write(dirty, LABELED_MUS_CPU_WRITE_PATH, "highperf"),
+    );
+    assert_constraint_rejected(&output, &response);
+}
+
+/// Case 2: the same pair with the first write COMMITTED. `commit_configuration`
+/// promotes the dirty entry to the committed overlay; the assignment is
+/// invariant under that promotion (D6), so the second write is rejected exactly
+/// as in case 1.
+#[test]
+fn run_053_write_enforcement_rejects_committed_sibling_violation() {
+    let cmp_dir = emitted_labeled_mus_fixture_dir();
+    let snapshot = open_labeled_mus_session(&cmp_dir);
+
+    let dirty = accept_labeled_mus_write(snapshot, LABELED_MUS_COOLING_WRITE_PATH, "air");
+
+    let commit_request = CommitConfigurationRequest {
+        schema_version: PRODUCT_SCHEMA_VERSION,
+        runtime_snapshot: dirty,
+        actor: "runtime-cli.test".to_string(),
+        reason: Some("commit the cooling write".to_string()),
+        expected_base_configuration_id: None,
+        changed_paths_hint: Vec::new(),
+    };
+    let (commit_output, commit_response): (RunOutput, CommitConfigurationResult) =
+        run_json_command(&["commit-configuration"], &commit_request);
+    assert_eq!(
+        commit_output.exit_code, EXIT_OK,
+        "committing a legal write must succeed; {:?}",
+        commit_response.diagnostics.diagnostics
+    );
+    let committed = commit_response
+        .runtime_snapshot
+        .expect("commit returns a snapshot");
+    assert!(
+        !committed.committed_overlay.is_empty(),
+        "precondition: the commit must actually populate the committed overlay"
+    );
+
+    let (output, response): (RunOutput, SetParameterResult) = run_json_command(
+        &["set-parameter"],
+        &labeled_mus_write(committed, LABELED_MUS_CPU_WRITE_PATH, "highperf"),
+    );
+    assert_constraint_rejected(&output, &response);
+}
+
+/// Case 3: both writes in ONE atomic batch. Each is individually valid, so the
+/// old per-write loop passed them both; the batch must be checked as a whole and
+/// rejected with `applied_count = 0` and BOTH paths named.
+#[test]
+fn run_054_write_enforcement_rejects_jointly_violating_atomic_batch() {
+    let cmp_dir = emitted_labeled_mus_fixture_dir();
+    let snapshot = open_labeled_mus_session(&cmp_dir);
+
+    let request = SetParametersAtomicallyRequest {
+        schema_version: PRODUCT_SCHEMA_VERSION,
+        runtime_snapshot: snapshot,
+        writes: vec![
+            compiler::runtime_api::AtomicParameterWrite {
+                path: LABELED_MUS_COOLING_WRITE_PATH.to_string(),
+                value: Value::String("air".to_string()),
+            },
+            compiler::runtime_api::AtomicParameterWrite {
+                path: LABELED_MUS_CPU_WRITE_PATH.to_string(),
+                value: Value::String("highperf".to_string()),
+            },
+        ],
+        actor: "runtime-cli.test".to_string(),
+        reason: Some("jointly violating batch".to_string()),
+        expected_working_configuration_id: None,
+        intent: compiler::runtime_api::OverrideIntent::default(),
+    };
+    let (output, response): (RunOutput, SetParametersAtomicallyResult) =
+        run_json_command(&["set-parameters-atomically"], &request);
+
+    assert_eq!(
+        output.exit_code, EXIT_COMMAND_ERROR,
+        "a jointly-violating batch is rejected; stderr={}",
+        output.stderr
+    );
+    assert_eq!(response.status, OperationStatus::Error);
+    assert_eq!(response.diagnostics.diagnostics[0].code, E_SELECTION_CONFLICT);
+    assert_eq!(response.applied_count, 0, "all writes fail or all apply");
+    assert_eq!(response.dirty_generation_max, 0);
+    assert!(response.runtime_snapshot.is_none());
+    assert_eq!(
+        response.rejected_paths,
+        vec![
+            LABELED_MUS_COOLING_WRITE_PATH.to_string(),
+            LABELED_MUS_CPU_WRITE_PATH.to_string(),
+        ],
+        "both writes participate in the violation, so both are named"
+    );
+}
+
+/// Case 4: the reproduction's step 4. `explain-rejection` for `cpu=highperf`
+/// against a session carrying the in-session `cooling=air` write must name the
+/// violated constraint, not report "no conflict to explain".
+#[test]
+fn run_055_write_enforcement_explain_sees_in_session_sibling_write() {
+    let cmp_dir = emitted_labeled_mus_fixture_dir();
+    let snapshot = open_labeled_mus_session(&cmp_dir);
+    let dirty = accept_labeled_mus_write(snapshot, LABELED_MUS_COOLING_WRITE_PATH, "air");
+
+    let request = RuntimeExplainRejectionRequest {
+        schema_version: PRODUCT_SCHEMA_VERSION,
+        runtime_snapshot: dirty,
+        path: LABELED_MUS_CPU_WRITE_PATH.to_string(),
+        value: Value::String("highperf".to_string()),
+    };
+    let (output, response): (RunOutput, RuntimeExplainRejectionResult) =
+        run_json_command(&["explain-rejection"], &request);
+
+    assert_eq!(
+        output.exit_code, EXIT_OK,
+        "a rejection explanation is a successful query (exit 0); stderr={}",
+        output.stderr
+    );
+    assert_eq!(response.rejection.code, E_SELECTION_CONFLICT);
+    let core = response
+        .rejection
+        .unsat_core
+        .expect("the in-session write makes this a genuine conflict with a core");
+    assert!(
+        core.conflicting_constraints.iter().any(|constraint| {
+            constraint.constraint_id.as_deref() == Some(LABELED_MUS_CONSTRAINT_ID)
+        }),
+        "the core must name the violated constraint by id; got {:?}",
+        core.conflicting_constraints
+    );
+}
+
+/// Case 5: the rejection envelope. The structured core rides on the result under
+/// `unsat_core`, and the machine-consumer attribution rides on the diagnostic's
+/// `entity_path` as `constraints/<id>` (ADR-0054 §6). Doubles as the
+/// serialization guard: the new field is omitted from every other outcome, so no
+/// previously-recorded payload changes a byte.
+#[test]
+fn run_056_write_enforcement_rejection_carries_named_core_and_omits_it_otherwise() {
+    let cmp_dir = emitted_labeled_mus_fixture_dir();
+    let snapshot = open_labeled_mus_session(&cmp_dir);
+    let dirty = accept_labeled_mus_write(snapshot.clone(), LABELED_MUS_COOLING_WRITE_PATH, "air");
+
+    let (_, rejected): (RunOutput, SetParameterResult) = run_json_command(
+        &["set-parameter"],
+        &labeled_mus_write(dirty, LABELED_MUS_CPU_WRITE_PATH, "highperf"),
+    );
+    let core = rejected
+        .unsat_core
+        .as_ref()
+        .expect("a constraint rejection carries the shared unsat core");
+    assert!(
+        core.conflicting_constraints.iter().any(|constraint| {
+            constraint.kind == ConstraintKind::ModelRule
+                && constraint.constraint_id.as_deref() == Some(LABELED_MUS_CONSTRAINT_ID)
+                && constraint.summary == "cpu != 'highperf' || cooling != 'air'"
+        }),
+        "the write surface must name the constraint with the same wording the \
+         explain surface uses; got {:?}",
+        core.conflicting_constraints
+    );
+    assert_eq!(
+        rejected.diagnostics.diagnostics[0].entity_path.as_deref(),
+        Some("constraints/highperf_requires_liquid"),
+        "ADR-0054 §6: a constraint violation attributes to constraints/<id>"
+    );
+
+    // The serialization guard. `unsat_core` is `skip_serializing_if` + `None` on
+    // every non-constraint outcome, so the key is absent from the wire entirely —
+    // an accepted write and a non-constraint rejection serialize as they do today.
+    let (_, accepted): (RunOutput, SetParameterResult) = run_json_command(
+        &["set-parameter"],
+        &labeled_mus_write(snapshot.clone(), LABELED_MUS_PSU_WRITE_PATH, "bronze"),
+    );
+    assert_eq!(accepted.status, OperationStatus::Ok);
+    let (_, unknown_path): (RunOutput, SetParameterResult) = run_json_command(
+        &["set-parameter"],
+        &labeled_mus_write(snapshot, "component.rig.param.no_such_param", "air"),
+    );
+    assert_eq!(unknown_path.status, OperationStatus::Error);
+    assert_ne!(
+        unknown_path.diagnostics.diagnostics[0].code, E_SELECTION_CONFLICT,
+        "precondition: this must be a NON-constraint rejection"
+    );
+    for (label, response) in [("accepted", &accepted), ("non-constraint", &unknown_path)] {
+        assert!(response.unsat_core.is_none(), "{label}: no core is set");
+        let text = serde_json::to_string(response).expect("serialize");
+        assert!(
+            !text.contains("unsat_core"),
+            "{label}: the omitted field must not appear on the wire; got {text}"
+        );
+    }
+}
+
+/// Case 6: the regression guard for the bypass. The C ABI dispatched writes to
+/// the raw compiler entry points with no solver check at all, so every C++/ROS2
+/// SDK write was unchecked. The ABI must now reject what the CLI rejects.
+#[test]
+fn run_057_write_enforcement_c_abi_matches_the_cli() {
+    let cmp_dir = emitted_labeled_mus_fixture_dir();
+    let ccm_ref = cmp_dir.path.join("ccm");
+    let resolve_result = resolve_labeled_mus_fixture_base(&cmp_dir);
+    let mut open_request = runtime_open_request_from_resolve(&resolve_result);
+    open_request.ccm_ref = ccm_ref.to_string_lossy().into_owned();
+    let open_json =
+        CString::new(serde_json::to_string(&open_request).expect("serialize")).expect("cstring");
+
+    let mut handle: *mut ConfigFluxRuntimeSessionHandle = ptr::null_mut();
+    let mut open_response_json: *mut c_char = ptr::null_mut();
+    let open_status = unsafe {
+        configflux_runtime_session_open(open_json.as_ptr(), &mut handle, &mut open_response_json)
+    };
+    assert_eq!(open_status, ConfigFluxRuntimeAbiStatus::Ok);
+    assert!(!handle.is_null());
+    unsafe { configflux_runtime_string_free(open_response_json) };
+
+    // The handle carries the session snapshot forward across execute calls, so
+    // the second write sees the first one's overlay — the same session shape the
+    // CLI reproduction builds by threading snapshots.
+    let first: SetParameterResult =
+        c_abi_set_parameter(handle, LABELED_MUS_COOLING_WRITE_PATH, "air");
+    assert_eq!(
+        first.status,
+        OperationStatus::Ok,
+        "the first write is legal on its own; {:?}",
+        first.diagnostics.diagnostics
+    );
+
+    let second: SetParameterResult =
+        c_abi_set_parameter(handle, LABELED_MUS_CPU_WRITE_PATH, "highperf");
+    assert_eq!(
+        second.status,
+        OperationStatus::Error,
+        "the ABI must reject the sibling violation the CLI rejects"
+    );
+    assert_eq!(second.diagnostics.diagnostics[0].code, E_SELECTION_CONFLICT);
+    assert!(second.runtime_snapshot.is_none());
+
+    assert_eq!(
+        unsafe { configflux_runtime_session_close(handle) },
+        ConfigFluxRuntimeAbiStatus::Ok
+    );
+}
+
+/// Execute one `SetParameter` through the C ABI against the live handle. The ABI
+/// injects the session snapshot into the request, so the payload carries only the
+/// command-specific fields.
+fn c_abi_set_parameter(
+    handle: *mut ConfigFluxRuntimeSessionHandle,
+    path: &str,
+    value: &str,
+) -> SetParameterResult {
+    let payload = serde_json::json!({
+        "schema_version": PRODUCT_SCHEMA_VERSION,
+        "path": path,
+        "value": value,
+    });
+    let request = CString::new(serde_json::to_string(&payload).expect("serialize")).expect("cstring");
+    let mut response_json: *mut c_char = ptr::null_mut();
+    let status = unsafe {
+        configflux_runtime_session_execute_json(
+            handle,
+            ConfigFluxRuntimeOperation::SetParameter as u32,
+            request.as_ptr(),
+            &mut response_json,
+        )
+    };
+    assert_eq!(status, ConfigFluxRuntimeAbiStatus::Ok, "ABI transport status");
+    let text = unsafe { take_c_string(response_json) };
+    serde_json::from_str(&text).expect("set-parameter response")
+}
+
+/// Case 7: the ordering correction. The compiler's own preconditions run FIRST,
+/// so a constraint-violating write to a parameter that is ALSO immutable at
+/// runtime reports the lifecycle failure — not a selection conflict. The
+/// fixture's params are all `lifecycle: runtime`, so the snapshot (test-owned
+/// data) supplies the immutability rather than a new model.
+#[test]
+fn run_058_write_enforcement_lifecycle_immutability_is_reported_first() {
+    let cmp_dir = emitted_labeled_mus_fixture_dir();
+    let snapshot = open_labeled_mus_session(&cmp_dir);
+    let mut dirty = accept_labeled_mus_write(snapshot, LABELED_MUS_COOLING_WRITE_PATH, "air");
+
+    dirty
+        .resolved_output
+        .get_mut("rig")
+        .expect("scope root")
+        .components
+        .get_mut("rig")
+        .expect("component")
+        .params
+        .get_mut("cpu")
+        .expect("param")
+        .lifecycle = compiler::schema::Lifecycle::Startup;
+
+    let (output, response): (RunOutput, SetParameterResult) = run_json_command(
+        &["set-parameter"],
+        &labeled_mus_write(dirty, LABELED_MUS_CPU_WRITE_PATH, "highperf"),
+    );
+    assert_eq!(output.exit_code, EXIT_COMMAND_ERROR);
+    assert_eq!(
+        response.diagnostics.diagnostics[0].code, E_RUNTIME_LIFECYCLE_IMMUTABLE,
+        "type/limit/lifecycle failures are reported as themselves, ahead of the \
+         constraint check; got {:?}",
+        response.diagnostics.diagnostics
+    );
+    assert!(
+        response.unsat_core.is_none(),
+        "a non-constraint rejection carries no core"
+    );
+}
+
+/// D3's partial-assignment semantics: a facet that has neither been selected nor
+/// written stays FREE, so it can never cause a rejection on its own. Two shapes:
+/// a legal write against the full baseline still succeeds, and a legal write
+/// still succeeds when a sibling facet is genuinely absent from the assignment.
+#[test]
+fn run_059_write_enforcement_unset_facets_stay_free() {
+    let cmp_dir = emitted_labeled_mus_fixture_dir();
+    let snapshot = open_labeled_mus_session(&cmp_dir);
+
+    // A legal write on top of an in-session write: `psu=bronze` is fine while cpu
+    // is `standard`, so widening the replay must not turn it into a rejection.
+    let dirty = accept_labeled_mus_write(snapshot.clone(), LABELED_MUS_COOLING_WRITE_PATH, "air");
+    let _ = accept_labeled_mus_write(dirty, LABELED_MUS_PSU_WRITE_PATH, "bronze");
+
+    // With `cpu` absent from the resolved output it is unset — neither chosen nor
+    // written — so `cooling=air` must still be accepted: a completion exists
+    // (`cpu=standard`), and the runtime must not reject on the strength of a
+    // facet nothing has committed to.
+    let mut without_cpu = snapshot;
+    without_cpu
+        .resolved_output
+        .get_mut("rig")
+        .expect("scope root")
+        .components
+        .get_mut("rig")
+        .expect("component")
+        .params
+        .remove("cpu")
+        .expect("precondition: the cpu param exists to be removed");
+    let _ = accept_labeled_mus_write(without_cpu, LABELED_MUS_COOLING_WRITE_PATH, "air");
+}
+
+/// D2's skip-on-disagreement rule. `parse_param_key` maps a path to a facet by
+/// last segment, which is many-to-one: two paths in different scope roots can
+/// land on one facet. When their values DISAGREE the facet is omitted from the
+/// assignment — treated as unset, and therefore free — so iteration order can
+/// never decide whether a write is accepted. The agreeing case is asserted
+/// alongside it, otherwise the disagreeing case would pass just as well if the
+/// second scope root were ignored entirely.
+#[test]
+fn run_060_write_enforcement_disagreeing_paths_leave_the_facet_free() {
+    let cmp_dir = emitted_labeled_mus_fixture_dir();
+    let snapshot = open_labeled_mus_session(&cmp_dir);
+
+    // Both scope roots say `cooling = air`: they agree, the agreed value is used,
+    // and `cpu = highperf` is rejected. This proves the projection really reads
+    // the second scope root.
+    let agreeing = with_second_cooling_scope(&snapshot, "air", "air");
+    let (agree_output, agree_response): (RunOutput, SetParameterResult) = run_json_command(
+        &["set-parameter"],
+        &labeled_mus_write(agreeing, LABELED_MUS_CPU_WRITE_PATH, "highperf"),
+    );
+    assert_constraint_rejected(&agree_output, &agree_response);
+
+    // The same two paths now disagree (`liquid` vs `air`). The facet is omitted,
+    // so `cpu = highperf` is accepted. A silent last-wins would pick `air` here
+    // and reject.
+    let disagreeing = with_second_cooling_scope(&snapshot, "liquid", "air");
+    let _ = accept_labeled_mus_write(disagreeing, LABELED_MUS_CPU_WRITE_PATH, "highperf");
+}
+
+/// A snapshot carrying a SECOND scope root whose component also has a `cooling`
+/// param, so two distinct paths map to the one `cooling` facet. The component id
+/// differs from `rig` so the written path still resolves to exactly one scope
+/// root; only the facet projection sees both.
+fn with_second_cooling_scope(
+    snapshot: &RuntimeSnapshot,
+    first_cooling: &str,
+    second_cooling: &str,
+) -> RuntimeSnapshot {
+    let mut snapshot = snapshot.clone();
+    let mut second = snapshot
+        .resolved_output
+        .get("rig")
+        .expect("scope root")
+        .clone();
+    let mut component = second.components.remove("rig").expect("component");
+    component
+        .params
+        .get_mut("cooling")
+        .expect("cooling param")
+        .value = Value::String(second_cooling.to_string());
+    second.components.insert("spare_rig".to_string(), component);
+    snapshot.resolved_output.insert("spare".to_string(), second);
+
+    snapshot
+        .resolved_output
+        .get_mut("rig")
+        .expect("scope root")
+        .components
+        .get_mut("rig")
+        .expect("component")
+        .params
+        .get_mut("cooling")
+        .expect("cooling param")
+        .value = Value::String(first_cooling.to_string());
+    snapshot
+}
+
+// ---------------------------------------------------------------------------
 // ADR-0030 (configflux-dj7f) D2/D4: runtime-open CCM precondition + fail-closed.
 //
 // `runtime-open` now enforces that a usable `.ccm` solver model is reachable
@@ -3464,7 +4168,7 @@ fn run_042_ffi_open_execute_snapshot_and_close_round_trip() {
     );
     assert!(!handle.is_null());
 
-    let execute_request = CString::new(r#"{"schema_version":3}"#).expect("cstring");
+    let execute_request = CString::new(r#"{"schema_version":4}"#).expect("cstring");
     let mut execute_response_json: *mut c_char = ptr::null_mut();
     let execute_status = unsafe {
         configflux_runtime_session_execute_json(
@@ -3509,7 +4213,7 @@ fn run_043_ffi_execute_rejects_unknown_operation() {
         configflux_runtime_string_free(response_json);
     }
 
-    let execute_request = CString::new(r#"{"schema_version":3}"#).expect("cstring");
+    let execute_request = CString::new(r#"{"schema_version":4}"#).expect("cstring");
     let mut execute_response_json: *mut c_char = ptr::null_mut();
     let execute_status = unsafe {
         configflux_runtime_session_execute_json(
@@ -3569,5 +4273,80 @@ fn run_045_ffi_handshake_version_contract() {
         ok,
         ConfigFluxRuntimeAbiStatus::Ok,
         "an expected_minor=0 client must remain compatible with ABI 1.1"
+    );
+}
+
+/// configflux-jlrm (cold-eval F4): a request envelope that omits a required
+/// field must NAME that field in the transport diagnostic instead of reporting
+/// a generic "malformed envelope". serde reports the first missing struct
+/// field; the CLI surfaces it under `E_RUNTIME_CLI_REQUEST_INVALID`.
+#[test]
+fn run_049_transport_request_invalid_names_offending_field() {
+    // Top-level `schema_version` omitted.
+    let missing_schema = run_cli(&["get-parameter"], br#"{}"#);
+    assert_eq!(missing_schema.exit_code, EXIT_TRANSPORT_ERROR);
+    assert!(missing_schema.stdout.is_empty());
+    assert!(missing_schema.stderr.contains(E_RUNTIME_CLI_REQUEST_INVALID));
+    assert!(
+        missing_schema.stderr.contains("schema_version"),
+        "diagnostic must name the missing field, got: {}",
+        missing_schema.stderr
+    );
+
+    // Required `runtime_snapshot` omitted (schema_version supplied).
+    let missing_snapshot = run_cli(&["get-parameter"], br#"{"schema_version":1}"#);
+    assert_eq!(missing_snapshot.exit_code, EXIT_TRANSPORT_ERROR);
+    assert!(
+        missing_snapshot.stderr.contains("runtime_snapshot"),
+        "diagnostic must name the missing field, got: {}",
+        missing_snapshot.stderr
+    );
+
+    // The cold-eval scenario: a valid snapshot is threaded but the
+    // command-specific selector `scope_root` is omitted (the caller wrote
+    // `scope`, an ignored unknown field, instead — see the service integration
+    // guide's troubleshooting note).
+    let payload = serde_json::json!({
+        "schema_version": 1,
+        "runtime_snapshot": {
+            "schema_version": 1,
+            "model_hash": "m",
+            "resolve_hash": "r",
+            "scope": "component:runtime_tuner",
+            "resolved_output": {}
+        },
+        "scope": "runtime_tuner"
+    });
+    let missing_scope_root = run_cli(
+        &["get-scope-metadata"],
+        &serde_json::to_vec(&payload).expect("serialize request"),
+    );
+    assert_eq!(missing_scope_root.exit_code, EXIT_TRANSPORT_ERROR);
+    assert!(
+        missing_scope_root.stderr.contains("scope_root"),
+        "diagnostic must name the missing field, got: {}",
+        missing_scope_root.stderr
+    );
+}
+
+/// configflux-jlrm: naming the offending field must not regress the
+/// no-request-payload-secret-echo transport invariant
+/// (docs/runtime-cli-contract.md §7). A type-mismatched field carries its value
+/// in serde's own message, so the diagnostic must report the failure by
+/// category + location only — never by echoing the field value.
+#[test]
+fn run_050_transport_request_invalid_does_not_echo_field_values() {
+    // `schema_version` expects an integer; a secret-bearing string triggers a
+    // serde type error whose Display contains the value. It must not surface.
+    let payload = br#"{"schema_version":"sk_live_should_not_leak"}"#;
+    let output = run_cli(&["get-parameter"], payload);
+
+    assert_eq!(output.exit_code, EXIT_TRANSPORT_ERROR);
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.contains(E_RUNTIME_CLI_REQUEST_INVALID));
+    assert!(
+        !output.stderr.contains("sk_live_should_not_leak"),
+        "diagnostic must not echo request field values, got: {}",
+        output.stderr
     );
 }

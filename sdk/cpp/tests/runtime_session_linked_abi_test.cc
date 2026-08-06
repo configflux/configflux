@@ -21,7 +21,7 @@ using configflux::sdk::RuntimeSession;
 // the version handshake, open-request marshaling, the JSON envelope round-trip,
 // boundary-status mapping, and ABI-owned string release.
 constexpr char kRuntimeOpenRequestJson[] = R"({
-  "schema_version": 3,
+  "schema_version": 4,
   "model_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "resolve_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
   "scope": "component:thermal_control",

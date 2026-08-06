@@ -29,9 +29,8 @@
 //! cross-tree=50/50 case (bd-9xgw-owned) are `#[ignore]`d.
 
 use std::collections::HashSet;
-use std::fs;
 use std::path::PathBuf;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use compiler::ccm_emitter::emit_ccm_dir_with_heuristic;
 
@@ -127,18 +126,13 @@ fn run_scale_emit_with_params(params: fixture::GenParams, threshold: Duration) {
     assert!(p0.join("ccm.manifest.json").is_file());
 }
 
+// Collision-proof temp-dir naming shared across the compiler integration
+// tests; see `temp_dirs.rs` (configflux-rvpb).
+#[path = "temp_dirs.rs"]
+mod temp_dirs;
+
 fn tempdir_for(test_name: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock after epoch")
-        .as_nanos();
-    let base = std::env::temp_dir().join(format!(
-        "configflux-compiler-{test_name}-{}-{nanos}",
-        std::process::id()
-    ));
-    let _ = fs::remove_dir_all(&base);
-    fs::create_dir_all(&base).expect("mkdir tempdir");
-    base
+    temp_dirs::unique_temp_dir("configflux-compiler", test_name)
 }
 
 // ----------------------------------------------------------------------------
@@ -392,9 +386,6 @@ mod fixture {
         // this test, so any deterministic 32-byte string works.
         let bound_model_hash = "44".repeat(32);
 
-        compiler::ccm_emitter::ConditionModel {
-            bound_model_hash,
-            clauses,
-        }
+        compiler::ccm_emitter::ConditionModel::from_clauses(bound_model_hash, clauses)
     }
 }

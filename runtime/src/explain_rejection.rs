@@ -6,17 +6,24 @@
 // and converting the solver-owned labeled MUS into the compiler-side
 // `UnsatCore` envelope.
 //
-// # Where this lives and why (ADR-0003 §2)
+// # Where the conversion lives and why (ADR-0003 §2, configflux-ykae)
 //
 // The MUS extraction lives in the `solver` crate (it owns the BDD/SAT machinery
 // and returns a SOLVER-OWNED `LabeledCore` carrying labeled `{facet}.{value}`
 // strings only — never a raw BDD/batsat index). The compiler must never import
 // `solver`, so the conversion `LabeledCore` → `compiler::loader_api::UnsatCore`
-// CANNOT live in `solver/` or `compiler/`. It lives HERE, in the `runtime`
-// crate, which already depends on both — exactly the boundary
-// `solver_validation.rs` (the `set-parameter` pre-check) and the interpreter's
-// `solver_session.rs` already occupy. This is the single point where the two
-// vocabularies meet.
+// cannot live in `solver/` or `compiler/`. It lives in `session_compose`, the
+// composition seam that may consult both (ADR-0003 §2 amendment), and this
+// module CALLS it — `session_compose::labeled_core_to_unsat_core`.
+//
+// It used to live here, duplicated. That duplicate drifted: it glossed a model
+// clause `blocked by model rule over cpu.highperf, cooling.air` where the shared
+// one says `blocked by constraint highperf_requires_liquid: cpu != 'highperf' ||
+// cooling != 'air'`, and having no `.ccm` roster in hand it could not name a
+// declared `constraints:` entry at all (ADR-0054 §5.4). `cfx` and the interpreter
+// reach explain through `session_compose::explain`; this command composes its own
+// {parameter, value} envelope, but the core INSIDE that envelope is now the very
+// same core, produced by the very same function.
 //
 // # The {parameter, value} <-> {facet, option} mapping (settled Q4)
 //
@@ -63,9 +70,8 @@
 //         "degraded explanation". Never a partial core, never a raw index.
 
 use compiler::loader_api::{
-    ConflictingConstraint, ConstraintFacet, ConstraintKind, RejectionReason, UnsatCore,
-    E_SELECTION_CONFLICT, E_SELECTION_ENGINE_DIVERGENCE, E_SELECTION_INVALID_OPTION,
-    E_SELECTION_UNKNOWN_FACET,
+    ConstraintKind, RejectionReason, UnsatCore, E_SELECTION_CONFLICT,
+    E_SELECTION_ENGINE_DIVERGENCE, E_SELECTION_INVALID_OPTION, E_SELECTION_UNKNOWN_FACET,
 };
 use compiler::product_api::{
     Diagnostic, DiagnosticSeverity, DiagnosticsReport, OperationStatus, PRODUCT_SCHEMA_VERSION,
@@ -74,15 +80,13 @@ use compiler::runtime_api::{
     RuntimeExplainRejectionRequest, RuntimeExplainRejectionResult, RuntimeSnapshot,
 };
 use compiler::schema::Value;
-use solver::{
-    CoreConstraintKind, CuddBackend, LabeledAtom, LabeledConstraint, LabeledCore,
-    RejectionExplanation, Session,
-};
+// The ONE `component.<id>.param.<key>` parser and the ONE symbol-table facet
+// predicate. Both were duplicated verbatim here until configflux-jraj lifted
+// them, so the `explain-rejection` and write surfaces cannot drift on what a
+// facet write is.
+use crate::solver_validation::{facet_present, parse_param_key};
+use solver::{CuddBackend, RejectionExplanation, Session};
 use std::path::Path;
-
-/// The fixed advisory note attached to every emitted core (ADR-0031 D3): MUS
-/// extraction returns *a* minimal explanation, not *the* canonical one.
-const UNSAT_CORE_NOTE: &str = "one minimal explanation; other minimal cores may exist";
 
 /// Explain why setting `path` to `value` would be rejected against the snapshot.
 ///
@@ -145,29 +149,49 @@ pub(crate) fn explain_rejection_via_solver(
         );
     }
 
-    // Replay the committed selection (ADR-0017 §3) so the explanation accounts
-    // for prior choices. Skip the very facet under explanation (the candidate
-    // supersedes any prior pin on it) and any choice the BDD does not model.
-    // Re-deriving an already-accepted state must never spuriously fault, so a
-    // replay error is ignored here — the explain call below is the authority on
-    // the candidate decision.
-    for (facet, option) in &snapshot.choices {
+    // Replay the session's TOTAL known assignment (ADR-0017 §3 as corrected by
+    // the 2026-08-03 amendment), not `snapshot.choices` alone. This loop used to
+    // be a byte-identical copy of the write path's, and carried the identical
+    // blind spot: a sibling written during the session lands in an overlay, and
+    // an overlay was never replayed — so explaining a candidate against an
+    // in-session write reported "no conflict to explain" for a pair the write
+    // path itself would reject. Both surfaces now project the snapshot the same
+    // way, so they agree on what the session knows.
+    //
+    // The facet under explanation is skipped (the candidate supersedes any prior
+    // pin on it). Re-deriving an already-accepted state must never spuriously
+    // fault, so a replay error is ignored here — the explain call below is the
+    // authority on the candidate decision.
+    for (facet, option) in crate::solver_validation::session_assignment(&session, snapshot) {
         if facet == param_key {
             continue;
         }
-        let _ = session.apply(facet, option);
+        let _ = session.apply(&facet, &option);
     }
+
+    // The declared-constraint roster the artifact itself carries (ADR-0054
+    // §5.4). Read from the loaded `.ccm`, not from the model sources, so the ids
+    // named in a core are the ids of the artifact that produced it. This is what
+    // the retired local converter never had, and why it could not name a
+    // `constraints:` entry (configflux-ykae).
+    let roster = session.ccm().constraint_roster();
 
     // Ask the solver to explain the candidate. The solver decides; this wrapper
     // only composes the envelope (ADR-0017 amendment: solver DECIDES, the
     // compose layer COMPOSES).
     match session.explain_rejection(param_key, value_str) {
         // Genuine constraint conflict with a labeled MUS → success, carry the
-        // converted core (ADR-0031 D2/D3).
+        // converted core (ADR-0031 D2/D3). The conversion is the shared one
+        // `cfx`/interpreter get, so both surfaces report one core, one wording.
         Ok(RejectionExplanation {
             would_reject: true,
             core: Some(core),
-        }) => explain_conflict(&request, param_key, value_str, convert_core(core)),
+        }) => explain_conflict(
+            &request,
+            param_key,
+            value_str,
+            session_compose::labeled_core_to_unsat_core(core, &roster),
+        ),
         // `would_reject` without a core would be a solver contract violation
         // (a genuine reject must carry its MUS, ADR-0031 D3). Treat the missing
         // core as a fail-closed fault rather than emitting a coreless conflict.
@@ -192,103 +216,6 @@ pub(crate) fn explain_rejection_via_solver(
         // FAIL CLOSED (ADR-0031 D4). Never a partial core.
         Err(_) => engine_divergence(&request, param_key, value_str),
     }
-}
-
-/// Convert the solver-owned `LabeledCore` (labeled `{facet}.{value}` strings)
-/// into the compiler-side `UnsatCore` envelope (ADR-0031 D3). This is the
-/// ADR-0003 §2 boundary crossing — the only place a solver decision type is
-/// translated into a compiler contract type. Labeled names only ever flow
-/// through; no BDD/batsat index can appear because `LabeledCore` carries none.
-fn convert_core(core: LabeledCore) -> UnsatCore {
-    UnsatCore {
-        rejected: convert_atom(&core.rejected),
-        conflicting_constraints: core
-            .conflicting_constraints
-            .iter()
-            .map(convert_constraint)
-            .collect(),
-        minimal: core.minimal,
-        note: UNSAT_CORE_NOTE.to_string(),
-    }
-}
-
-/// Map one solver `LabeledAtom` onto a compiler `ConstraintFacet` — a pure
-/// `{facet, value}` -> `{facet, option}` rename (the solver's `value` is the
-/// compiler's `option`).
-fn convert_atom(atom: &LabeledAtom) -> ConstraintFacet {
-    ConstraintFacet {
-        facet: atom.facet.clone(),
-        option: atom.value.clone(),
-    }
-}
-
-/// Map one solver `LabeledConstraint` onto a compiler `ConflictingConstraint`,
-/// translating the `CoreConstraintKind` onto the compiler `ConstraintKind` and
-/// synthesizing the advisory `summary` gloss from the labeled atoms (ADR-0031
-/// D3 — `summary` is advisory text, not a parsed field).
-fn convert_constraint(constraint: &LabeledConstraint) -> ConflictingConstraint {
-    let kind = match constraint.kind {
-        CoreConstraintKind::Selection => ConstraintKind::Selection,
-        CoreConstraintKind::ModelRule => ConstraintKind::ModelRule,
-    };
-    let facets: Vec<ConstraintFacet> = constraint.atoms.iter().map(convert_atom).collect();
-    ConflictingConstraint {
-        kind,
-        summary: constraint_summary(kind, &facets),
-        facets,
-    }
-}
-
-/// A short, advisory one-line gloss for a conflicting constraint (ADR-0031 D3).
-/// Derived purely from the labeled atoms; the human renderer (configflux-9d28)
-/// is the richer presentation layer over the JSON — this is only the embedded
-/// gloss so the machine envelope is self-describing without it.
-fn constraint_summary(kind: ConstraintKind, facets: &[ConstraintFacet]) -> String {
-    let atoms: Vec<String> = facets
-        .iter()
-        .map(|f| format!("{}.{}", f.facet, f.option))
-        .collect();
-    match kind {
-        ConstraintKind::Selection => {
-            format!("conflicts with your earlier choice {}", atoms.join(", "))
-        }
-        ConstraintKind::ModelRule => {
-            format!("blocked by model rule over {}", atoms.join(", "))
-        }
-    }
-}
-
-/// Whether the loaded CCM's symbol table contains a facet named `facet` (some
-/// `{facet}.{value}` symbol is present). Mirrors the prefix convention
-/// `Session::valid_options` uses and the identical helper in
-/// `solver_validation.rs`.
-fn facet_present(session: &Session<CuddBackend>, facet: &str) -> bool {
-    let Some(symbols) = session.ccm().symbols() else {
-        return false;
-    };
-    let prefix = format!("{facet}.");
-    symbols.variable_order().any(|sym| sym.starts_with(&prefix))
-}
-
-/// Extract the `param_key` from a `component.<id>.param.<param_key>` path.
-/// Returns `None` for any other shape (those are not runtime parameter writes
-/// the solver governs). Identical to the `solver_validation.rs` parser so the
-/// `explain-rejection` and `set-parameter` surfaces agree on what a facet write
-/// is.
-fn parse_param_key(path: &str) -> Option<&str> {
-    let mut parts = path.split('.');
-    if parts.next()? != "component" {
-        return None;
-    }
-    let _component_id = parts.next()?;
-    if parts.next()? != "param" {
-        return None;
-    }
-    let param_key = parts.next()?;
-    if parts.next().is_some() {
-        return None;
-    }
-    Some(param_key)
 }
 
 /// Build the SUCCESS envelope for a genuine constraint-conflict explanation
@@ -488,16 +415,24 @@ fn error_result(
 
 #[cfg(test)]
 mod tests {
-    //! Unit coverage for the solver-owned `LabeledCore` -> compiler-side
-    //! `UnsatCore` conversion (the ADR-0003 §2 boundary crossing this module
-    //! owns). These are pure-function tests with NO solver/BDD dependency, so
-    //! they pin the {facet, value} -> {facet, option} mapping, the kind
-    //! translation, the labeled-name invariant, the advisory note, and the
-    //! `blocking_choices` derivation independently of the live MUS extraction.
-    //! The end-to-end path through a real `.ccm` is covered by the runtime
-    //! integration tests `run_046`/`run_047`.
+    //! Unit coverage for the core this command puts on the wire. The
+    //! `LabeledCore` -> `UnsatCore` conversion itself is no longer owned here —
+    //! it is `session_compose::labeled_core_to_unsat_core`, the one both this
+    //! surface and `cfx` call (configflux-ykae) — so these tests pin the
+    //! properties the RUNTIME depends on across that call: the
+    //! {facet, value} -> {facet, option} mapping, the kind translation, the
+    //! labeled-name invariant, the advisory note, the ADR-0054 §5.4 rule that an
+    //! unattributed model clause is reported as over-constrained rather than
+    //! given an id it did not earn, and the `blocking_choices` derivation. All
+    //! pure-function, no solver/BDD dependency. That the two surfaces agree on a
+    //! real `.ccm` is `run_051`; the end-to-end path is `run_046`/`run_047`.
 
     use super::*;
+    use compiler::loader_api::{
+        ConflictingConstraint, ConstraintFacet, MODEL_OVER_CONSTRAINED_SUMMARY,
+    };
+    use session_compose::labeled_core_to_unsat_core;
+    use solver::{CoreConstraintKind, LabeledAtom, LabeledConstraint, LabeledCore};
 
     fn atom(facet: &str, value: &str) -> LabeledAtom {
         LabeledAtom {
@@ -506,28 +441,48 @@ mod tests {
         }
     }
 
+    /// One signed literal of the partial assignment a clause forbids
+    /// (ADR-0054 §5.4). `asserted` is the sign the BDD falsifying path had.
+    fn literal(facet: &str, value: &str, asserted: bool) -> solver::LabeledLiteral {
+        solver::LabeledLiteral {
+            atom: atom(facet, value),
+            asserted,
+        }
+    }
+
     /// A `LabeledCore` carrying one prior-selection constraint and one
     /// multi-atom model rule converts to the ADR-0031 D3 `UnsatCore` shape:
     /// `{facet, value}` becomes `{facet, option}`, the kinds map across, the
     /// fixed note is attached, and `minimal` is carried through.
+    ///
+    /// The roster is empty here, which is exactly the ADR-0054 §5.4 boundary
+    /// case: no declared constraint can account for the model clause, so it must
+    /// be reported as the model being over-constrained and must NOT be handed an
+    /// id. The old local converter reached this shape by never attributing at
+    /// all; the shared one reaches it by finding nothing to attribute to.
     #[test]
-    fn convert_core_maps_facets_kinds_and_note() {
+    fn shared_conversion_maps_facets_kinds_and_note() {
         let core = LabeledCore {
             rejected: atom("database", "postgres"),
             conflicting_constraints: vec![
                 LabeledConstraint {
                     kind: CoreConstraintKind::Selection,
                     atoms: vec![atom("storage", "local")],
+                    forbidden: vec![literal("storage", "local", true)],
                 },
                 LabeledConstraint {
                     kind: CoreConstraintKind::ModelRule,
                     atoms: vec![atom("database", "postgres"), atom("storage", "remote")],
+                    forbidden: vec![
+                        literal("database", "postgres", true),
+                        literal("storage", "remote", false),
+                    ],
                 },
             ],
             minimal: true,
         };
 
-        let converted = convert_core(core);
+        let converted = labeled_core_to_unsat_core(core, &[]);
 
         assert_eq!(converted.rejected.facet, "database");
         assert_eq!(converted.rejected.option, "postgres");
@@ -546,10 +501,15 @@ mod tests {
         }]);
         assert!(selection.summary.contains("storage.local"));
 
+        // ADR-0054 §5.4: nothing in the (empty) roster accounts for this clause,
+        // so it reports the model as over-constrained and carries no id. A
+        // synthesized cardinality conjunct reaches this same path — which is why
+        // the rule is "attributed OR over-constrained", never "nearest match".
         let model_rule = &converted.conflicting_constraints[1];
         assert_eq!(model_rule.kind, ConstraintKind::ModelRule);
         assert_eq!(model_rule.facets.len(), 2);
-        assert!(model_rule.summary.contains("model rule"));
+        assert_eq!(model_rule.constraint_id, None);
+        assert_eq!(model_rule.summary, MODEL_OVER_CONSTRAINED_SUMMARY);
     }
 
     /// Every emitted atom is a labeled `{facet}.{option}` name — never a bare
@@ -557,16 +517,20 @@ mod tests {
     /// conversion boundary (the solver type already carries labels; the
     /// converter must not lose them).
     #[test]
-    fn convert_core_emits_only_labeled_names() {
+    fn shared_conversion_emits_only_labeled_names() {
         let core = LabeledCore {
             rejected: atom("engine", "v8"),
             conflicting_constraints: vec![LabeledConstraint {
                 kind: CoreConstraintKind::ModelRule,
                 atoms: vec![atom("engine", "v6"), atom("engine", "v8")],
+                forbidden: vec![
+                    literal("engine", "v6", true),
+                    literal("engine", "v8", true),
+                ],
             }],
             minimal: true,
         };
-        let converted = convert_core(core);
+        let converted = labeled_core_to_unsat_core(core, &[]);
         let is_label = |s: &str| !s.is_empty() && !s.chars().all(|c| c.is_ascii_digit());
         assert!(is_label(&converted.rejected.facet) && is_label(&converted.rejected.option));
         for constraint in &converted.conflicting_constraints {
@@ -598,6 +562,7 @@ mod tests {
                         option: "local".to_string(),
                     }],
                     summary: String::new(),
+                    constraint_id: None,
                 },
                 ConflictingConstraint {
                     kind: ConstraintKind::ModelRule,
@@ -606,6 +571,7 @@ mod tests {
                         option: "offline".to_string(),
                     }],
                     summary: String::new(),
+                    constraint_id: None,
                 },
             ],
             minimal: true,

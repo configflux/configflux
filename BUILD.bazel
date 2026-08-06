@@ -14,6 +14,12 @@ exports_files([
     "docs/cpp-engineering-standards.md",
     "docs/ros2-bazel-colcon-guidelines.md",
     "docs/requirement-test-matrix.tsv",
+    # configflux-3j2i: consumed as compile_data by
+    # //compiler:runtime_v2_lineage_doc_test, which re-derives the section 11.4
+    # lineage `entry_id` worked example from the contract text itself. Both the
+    # doc and compiler/tests/ are in the published set, so the published build
+    # graph needs this export too (configflux-sycm drift check).
+    "docs/runtime-v2-contract.md",
 ])
 
 # Optional: Alias for easy building of the main components

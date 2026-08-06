@@ -19,15 +19,14 @@
 
 use std::fs;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use compiler::ccm_emitter::{emit_ccm_dir_with_construction, ConditionModel};
 use solver::{CuddBackend, OxiddBackend, Session, SolverBackend};
 
 fn sample_model() -> ConditionModel {
-    ConditionModel {
-        bound_model_hash: "33".repeat(32),
-        clauses: vec![
+    ConditionModel::from_clauses(
+        "33".repeat(32),
+        vec![
             // Boolean conjunction + predicate.
             "engine == 'v6' && gearbox == 'auto'".to_string(),
             // Predicate + negation.
@@ -35,7 +34,7 @@ fn sample_model() -> ConditionModel {
             // Disjunction.
             "gearbox == 'auto' || gearbox == 'manual'".to_string(),
         ],
-    }
+    )
 }
 
 #[test]
@@ -206,16 +205,11 @@ fn load(dir: &PathBuf) -> Session<OxiddBackend> {
     Session::<OxiddBackend>::new(ccm).expect("session")
 }
 
+// Collision-proof temp-dir naming shared across the compiler integration
+// tests; see `temp_dirs.rs` (configflux-rvpb).
+#[path = "temp_dirs.rs"]
+mod temp_dirs;
+
 fn tempdir_for(test_name: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock after epoch")
-        .as_nanos();
-    let base = std::env::temp_dir().join(format!(
-        "configflux-wbzw-{test_name}-{}-{nanos}",
-        std::process::id()
-    ));
-    let _ = fs::remove_dir_all(&base);
-    fs::create_dir_all(&base).expect("mkdir tempdir");
-    base
+    temp_dirs::unique_temp_dir("configflux-wbzw", test_name)
 }

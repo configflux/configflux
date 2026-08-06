@@ -201,6 +201,7 @@ fn canonicalize_json_value(value: serde_json::Value) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scenario_test_support::unique_temp_path;
 
     fn sample(stamped_at: Option<String>) -> ProvenanceSidecar {
         let mut schema_versions = BTreeMap::new();
@@ -253,10 +254,7 @@ mod tests {
 
     #[test]
     fn hash_file_recomputes_sha256() {
-        let dir = std::env::temp_dir().join(format!(
-            "configflux-prov-hash-{}",
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
-        ));
+        let dir = unique_temp_path("configflux-prov", "hash");
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("artifact.bin");
         fs::write(&path, b"hello").unwrap();

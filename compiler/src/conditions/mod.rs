@@ -40,8 +40,12 @@ pub use rewrite::{condition_identifiers, rewrite_condition_identifiers, Conditio
 pub(crate) use implication::condition_expr_implies;
 // configflux-ccs.7: typed-AST selection-constraint evaluator. Replaces the
 // string-scanning option-validity path in loader_api/shared_ops.rs.
+// configflux-9xxq / ADR-0054 §5.1: `for_each_predicate_symbol` is the
+// symbol-universe walk (both operators), used to land a branch selector's
+// `(facet, value)` symbols without asserting the selector on the BDD root.
 pub(crate) use selection_eval::{
-    for_each_eq_predicate, is_pure_conjunction, mentions_eq, not_contradicted,
+    for_each_eq_predicate, for_each_predicate_symbol, is_pure_conjunction, mentions_eq,
+    not_contradicted,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

@@ -1,3 +1,5 @@
+> Before opening a pull request, please read [How to Contribute](/CONTRIBUTING.md#how-to-contribute) — it explains how this project handles contributions.
+
 ## Summary
 
 What does this change do, and why?

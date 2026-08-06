@@ -103,7 +103,7 @@ fn choices_for_spec(spec: &ScenarioSpec) -> BTreeMap<String, String> {
 }
 
 fn emitted_cmp_dir(spec: &ScenarioSpec, label: &str) -> Result<TempDirGuard> {
-    let output_dir = unique_temp_dir("configflux-loop10-runtime", label)?;
+    let output_dir = unique_temp_dir("cfx-runtime", label)?;
 
     let mut compiler = Compiler::new();
     compiler
@@ -204,7 +204,7 @@ fn canonical_runtime_path(spec: &ScenarioSpec, path: &str) -> String {
 }
 
 #[test]
-fn loop10_contract_runtime_open_and_read_envelopes_have_required_fields() -> Result<()> {
+fn runtime_contract_runtime_open_and_read_envelopes_have_required_fields() -> Result<()> {
     let resolved = resolve_result_for_spec(&S1_SPEC, "s1-contract")?;
     let open_result = runtime_open(runtime_open_request_from_resolve(&resolved));
     assert_eq!(open_result.status, OperationStatus::Ok);
@@ -267,7 +267,7 @@ fn loop10_contract_runtime_open_and_read_envelopes_have_required_fields() -> Res
 }
 
 #[test]
-fn loop10_smoke_s1_and_s3_runtime_read_paths_validate() -> Result<()> {
+fn runtime_smoke_s1_and_s3_runtime_read_paths_validate() -> Result<()> {
     for (idx, spec) in [S1_SPEC, S3_SPEC].iter().enumerate() {
         let snapshot = runtime_snapshot_for_spec(spec, &format!("{}-smoke", idx))?;
 
@@ -318,7 +318,7 @@ fn loop10_smoke_s1_and_s3_runtime_read_paths_validate() -> Result<()> {
 }
 
 #[test]
-fn loop10_mutation_hash_mismatch_and_unknown_scope_path_emit_stable_codes() -> Result<()> {
+fn runtime_mutation_hash_mismatch_and_unknown_scope_path_emit_stable_codes() -> Result<()> {
     let resolved = resolve_result_for_spec(&S1_SPEC, "s1-mutation-hash")?;
     let mut mismatched_request = runtime_open_request_from_resolve(&resolved);
     mismatched_request.resolve_hash = "00".repeat(32);
@@ -383,7 +383,7 @@ fn loop10_mutation_hash_mismatch_and_unknown_scope_path_emit_stable_codes() -> R
 }
 
 #[test]
-fn loop10_mutation_runtime_write_policy_rejections_are_enforced() -> Result<()> {
+fn runtime_mutation_runtime_write_policy_rejections_are_enforced() -> Result<()> {
     let base_snapshot = runtime_snapshot_for_spec(&S1_SPEC, "s1-mutation-writes")?;
 
     let type_mismatch = set_parameter(SetParameterRequest {
@@ -503,7 +503,7 @@ fn loop10_mutation_runtime_write_policy_rejections_are_enforced() -> Result<()> 
 }
 
 #[test]
-fn loop10_runtime_layered_overlay_precedence_and_dirty_write_path() -> Result<()> {
+fn runtime_runtime_layered_overlay_precedence_and_dirty_write_path() -> Result<()> {
     let base_snapshot = runtime_snapshot_for_spec(&S1_SPEC, "s1-layered-store")?;
     let path = "component.thermal_control.param.runtime_trim_gain";
     let scope_root = S1_SPEC.scope_root.to_string();
@@ -588,7 +588,7 @@ fn loop10_runtime_layered_overlay_precedence_and_dirty_write_path() -> Result<()
 }
 
 #[test]
-fn loop10_configuration_identity_hashes_are_stable_and_type_sensitive() -> Result<()> {
+fn runtime_configuration_identity_hashes_are_stable_and_type_sensitive() -> Result<()> {
     let base_snapshot = runtime_snapshot_for_spec(&S1_SPEC, "s1-identity-hash")?;
     let scope_root = S1_SPEC.scope_root.to_string();
     let path_a = "component.thermal_control.param.runtime_trim_gain".to_string();
@@ -668,7 +668,7 @@ fn loop10_configuration_identity_hashes_are_stable_and_type_sensitive() -> Resul
 }
 
 #[test]
-fn loop10_commit_configuration_moves_dirty_into_committed_overlay_and_emits_delta_manifest(
+fn runtime_commit_configuration_moves_dirty_into_committed_overlay_and_emits_delta_manifest(
 ) -> Result<()> {
     let path = "component.thermal_control.param.runtime_trim_gain";
     let base_snapshot = runtime_snapshot_for_spec(&S1_SPEC, "s1-commit-happy")?;
@@ -694,7 +694,7 @@ fn loop10_commit_configuration_moves_dirty_into_committed_overlay_and_emits_delt
     let commit = commit_configuration(CommitConfigurationRequest {
         schema_version: PRODUCT_SCHEMA_VERSION,
         runtime_snapshot: dirty_snapshot,
-        actor: "loop10.commit".to_string(),
+        actor: "runtime.commit".to_string(),
         reason: Some("accept update".to_string()),
         expected_base_configuration_id: Some(pre_identity.committed_configuration_id.clone()),
         changed_paths_hint: vec![canonical_runtime_path(&S1_SPEC, path)],
@@ -760,7 +760,7 @@ fn loop10_commit_configuration_moves_dirty_into_committed_overlay_and_emits_delt
 }
 
 #[test]
-fn loop10_commit_configuration_rejects_base_configuration_mismatch() -> Result<()> {
+fn runtime_commit_configuration_rejects_base_configuration_mismatch() -> Result<()> {
     let path = "component.thermal_control.param.runtime_trim_gain";
     let base_snapshot = runtime_snapshot_for_spec(&S1_SPEC, "s1-commit-base-mismatch")?;
     let write = set_parameter(SetParameterRequest {
@@ -777,7 +777,7 @@ fn loop10_commit_configuration_rejects_base_configuration_mismatch() -> Result<(
     let commit = commit_configuration(CommitConfigurationRequest {
         schema_version: PRODUCT_SCHEMA_VERSION,
         runtime_snapshot: write.runtime_snapshot.context("missing dirty snapshot")?,
-        actor: "loop10.commit".to_string(),
+        actor: "runtime.commit".to_string(),
         reason: None,
         expected_base_configuration_id: Some("00".repeat(32)),
         changed_paths_hint: Vec::new(),
@@ -791,7 +791,7 @@ fn loop10_commit_configuration_rejects_base_configuration_mismatch() -> Result<(
 }
 
 #[test]
-fn loop10_rollback_dirty_subset_clears_requested_paths_and_emits_event() -> Result<()> {
+fn runtime_rollback_dirty_subset_clears_requested_paths_and_emits_event() -> Result<()> {
     let path = "component.thermal_control.param.runtime_trim_gain";
     let base_snapshot = runtime_snapshot_for_spec(&S1_SPEC, "s1-rollback-subset")?;
     let baseline_value = get_parameter(GetParameterRequest {
@@ -820,7 +820,7 @@ fn loop10_rollback_dirty_subset_clears_requested_paths_and_emits_event() -> Resu
         runtime_snapshot: dirty_snapshot,
         mode: RollbackMode::Subset,
         paths: vec![canonical_runtime_path(&S1_SPEC, path)],
-        actor: "loop10.rollback".to_string(),
+        actor: "runtime.rollback".to_string(),
         reason: Some("operator cancel".to_string()),
     });
     assert_eq!(rollback.status, OperationStatus::Ok);
@@ -860,7 +860,7 @@ fn loop10_rollback_dirty_subset_clears_requested_paths_and_emits_event() -> Resu
 }
 
 #[test]
-fn loop10_determinism_runtime_read_envelopes_are_byte_stable() -> Result<()> {
+fn runtime_determinism_runtime_read_envelopes_are_byte_stable() -> Result<()> {
     let snapshot = runtime_snapshot_for_spec(&S3_SPEC, "s3-determinism")?;
 
     let metadata_a = get_scope_metadata(GetScopeMetadataRequest {

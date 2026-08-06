@@ -110,10 +110,10 @@ fn top_level_ccm_hash_changes_when_input_changes() {
     let dir_b = tempdir_for("hash_input_b").join("ccm");
 
     emit_ccm_dir(&small_model(), &dir_a).expect("emit a");
-    let model_b = ConditionModel {
-        bound_model_hash: "22".repeat(32),
-        clauses: vec!["x == 'on' && y == 'on'".to_string()],
-    };
+    let model_b = ConditionModel::from_clauses(
+        "22".repeat(32),
+        vec!["x == 'on' && y == 'on'".to_string()],
+    );
     emit_ccm_dir(&model_b, &dir_b).expect("emit b");
 
     let h_a = parse_json(&fs::read(dir_a.join("ccm.manifest.json")).unwrap())["ccm_hash"]
