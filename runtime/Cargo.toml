@@ -10,4 +10,10 @@ clap = { version = "4.5.53", features = ["derive"] }
 compiler = { path = "../compiler" }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.140"
+# configflux-ykae: mirrors //session_compose:session_compose in COMMON_DEPS
+# (BUILD.bazel) — src/explain_rejection.rs and src/write_enforcement.rs call
+# session_compose::labeled_core_to_unsat_core. Bazel is the only build the
+# internal gate exercises, so a missing entry here surfaces solely in the
+# cargo-zigbuild release cross-compile, after publish (configflux-3ho7).
+session_compose = { path = "../session_compose" }
 solver = { path = "../solver" }
