@@ -88,7 +88,13 @@ jobs:
       - name: Install Rust toolchain with musl target
         uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b # stable
         with:
-          toolchain: stable
+          # Pinned, not `stable`: the cross-link below has three inputs (rustc,
+          # zig, cargo-zigbuild) and all three must move together. A floating
+          # stable let rustc 1.98 start passing `--fix-cortex-a53-843419` for
+          # aarch64 musl while the zig pin below still rejected it, and the
+          # v0.4.0 tag build failed after publish. Bump this together with the
+          # ziglang / cargo-zigbuild pins and rehearse both targets first.
+          toolchain: 1.98.1
           targets: ${{ matrix.target }}
 
       - name: Install Python (for ziglang)
@@ -103,7 +109,9 @@ jobs:
           # ziglang wheel bundles the zig toolchain; pin to a known-good
           # version to keep release builds reproducible across workflow runs.
           python -m pip install "ziglang==0.13.0"
-          cargo install --locked cargo-zigbuild@0.19.7
+          # 0.23.x filters the `--fix-cortex-a53-843419` pre-link arg that
+          # rustc >= 1.98 emits for aarch64 targets and zig 0.13 rejects.
+          cargo install --locked cargo-zigbuild@0.23.4
 
       - name: Cargo fetch
         run: cargo fetch --locked
