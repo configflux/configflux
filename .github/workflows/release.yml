@@ -436,8 +436,10 @@ jobs:
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
           {
             printf '### Toolchain image\n\n'
-            printf '- `%s`\n' "${image}"
-            printf '- `ghcr.io/configflux/toolchain@sha256:%s`\n' "${digest}"
+            # `--` because the format starts with `-`; without it bash's printf
+            # parses the format as an option and the step dies after the push.
+            printf -- '- `%s`\n' "${image}"
+            printf -- '- `ghcr.io/configflux/toolchain@sha256:%s`\n' "${digest}"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Install cosign
