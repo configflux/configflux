@@ -1,0 +1,38 @@
+{
+    "package": "containers_unit",
+    "version": "1.0.0",
+    "definitions": {
+        "frame_width": {
+            "type": "integer",
+            "unit": "mm",
+            "doc": "Width of the frame a service crops to",
+            "lifecycle": "construction",
+            "safety": "q_m",
+            "access": "technician"
+        }
+    },
+    "facets": {
+        "site": {
+            "values": ["factory_a", "factory_b", "factory_c"],
+            "doc": "Which plant this deployment runs at. factory_c is deliberately NOT covered by the container derive table: a partial table implies nothing about the values it omits."
+        },
+        "mode": {
+            "values": ["x", "y"],
+            "default": "y",
+            "doc": "Whether the edge service is included. Two values so 'not x' is a reachable state and the guarded accepts conjunct can be shown to assert nothing. Defaults to the arm that EXCLUDES the edge service, so a resolve that names only the site still completes."
+        }
+    },
+    "catalogues": {
+        "containers": {
+            "doc": "The physical containers this plant runs on the line.",
+            "fields": {
+                "width_mm": {"type": "integer", "unit": "mm", "doc": "Internal width"}
+            },
+            "entries": {
+                "c1": {"width_mm": 800},
+                "c2": {"width_mm": 600},
+                "c3": {"width_mm": 400}
+            }
+        }
+    }
+}

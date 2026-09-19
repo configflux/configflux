@@ -41,11 +41,27 @@ pub(crate) const EXIT_OK: u8 = 0;
 pub(crate) const EXIT_TRANSPORT_ERROR: u8 = 1;
 pub(crate) const EXIT_COMMAND_ERROR: u8 = 2;
 
-pub(crate) const E_RUNTIME_CLI_ARGS_INVALID: &str = "E_RUNTIME_CLI_ARGS_INVALID";
-pub(crate) const E_RUNTIME_CLI_REQUEST_IO: &str = "E_RUNTIME_CLI_REQUEST_IO";
-pub(crate) const E_RUNTIME_CLI_REQUEST_TOO_LARGE: &str = "E_RUNTIME_CLI_REQUEST_TOO_LARGE";
-pub(crate) const E_RUNTIME_CLI_REQUEST_INVALID: &str = "E_RUNTIME_CLI_REQUEST_INVALID";
-pub(crate) const E_RUNTIME_CLI_RESPONSE_IO: &str = "E_RUNTIME_CLI_RESPONSE_IO";
+// The five transport codes are `pub`, unlike everything else in this module,
+// because `docs/interface-contracts.md` section 5.7 publishes them as a frozen
+// contract: an operator scripting the binary branches on them, so they are as
+// public as the loader and runtime codes the compiler crate declares `pub`
+// (configflux-p8ki). The visibility is what makes that claim true in the code
+// rather than only in the document, and it is what the frozen-registry lint
+// anchors on (tools/frozen_diagnostic_registry.py reads `pub const E_*`, so a
+// crate-private constant can never satisfy a published registry). Their
+// registry text feeds `docs/diagnostics.md` (ADR-0044 D4) the same way every
+// other emitted code's does. Nothing outside the crate links this binary, so
+// `pub` widens no real surface; the module stays private in `main.rs`.
+/// registry: cause = the command line the runtime binary was invoked with is not one it accepts, whether an unknown subcommand, a missing argument, or a flag the command does not take; remedy = run the binary with --help to see the commands it accepts and their transport flags, and reissue the invocation
+pub const E_RUNTIME_CLI_ARGS_INVALID: &str = "E_RUNTIME_CLI_ARGS_INVALID";
+/// registry: cause = the request payload could not be read at all: the file named by --request-file is missing, unreadable, or not a regular file (a directory, FIFO or device is refused from its file type before any of it is read, because only a regular file's recorded size bounds what a read returns), or stdin failed mid-read; remedy = check that the request path exists, is a regular file, and is readable by the invoking user, or pipe the payload on stdin instead of naming a file
+pub const E_RUNTIME_CLI_REQUEST_IO: &str = "E_RUNTIME_CLI_REQUEST_IO";
+/// registry: cause = the request payload is larger than the 8 MiB the transport accepts, measured from the file's recorded size before the read and from the length actually read after it, which both transports cap one byte past the bound so an oversized payload is refused rather than buffered; remedy = send a smaller request, splitting an atomic multi-parameter write into several calls if one batch exceeds the bound
+pub const E_RUNTIME_CLI_REQUEST_TOO_LARGE: &str = "E_RUNTIME_CLI_REQUEST_TOO_LARGE";
+/// registry: cause = the request payload is not the JSON the command expects, whether undecodable, the wrong shape, or missing a required field such as schema_version; remedy = send the request envelope documented for that command in docs/runtime-cli-contract.md, with schema_version set to the version this binary reports
+pub const E_RUNTIME_CLI_REQUEST_INVALID: &str = "E_RUNTIME_CLI_REQUEST_INVALID";
+/// registry: cause = the command produced a result the transport could not deliver: the response would not serialize, or the file named by --response-file or the stdout stream could not be written; remedy = point --response-file at a writable directory and keep stdout open for the life of the command, then reissue it
+pub const E_RUNTIME_CLI_RESPONSE_IO: &str = "E_RUNTIME_CLI_RESPONSE_IO";
 
 #[derive(Parser)]
 #[command(name = "configflux-runtime")]
@@ -584,6 +600,19 @@ pub(crate) fn read_request_file(path: &Path) -> Result<Vec<u8>, TransportError> 
         )
     })?;
 
+    // configflux-mtmi. A `stat()` size bounds what a read returns for a regular
+    // file and for nothing else: a FIFO, a device or a procfs entry reports a
+    // size that understates its stream, so the refusal below would never fire
+    // and the read would buffer the whole thing before the second one could
+    // refuse it. The file type is therefore settled BEFORE the file is opened.
+    // The read below is capped as well, so neither check stands alone.
+    if !metadata.file_type().is_file() {
+        return Err(TransportError::new(
+            E_RUNTIME_CLI_REQUEST_IO,
+            format!("Unable to read request file '{source}' (not a regular file)"),
+        ));
+    }
+
     if metadata.len() > REQUEST_SIZE_LIMIT_BYTES as u64 {
         return Err(TransportError::new(
             E_RUNTIME_CLI_REQUEST_TOO_LARGE,
@@ -594,15 +623,17 @@ pub(crate) fn read_request_file(path: &Path) -> Result<Vec<u8>, TransportError> 
         ));
     }
 
-    let payload = fs::read(path).map_err(|err| {
-        TransportError::new(
-            E_RUNTIME_CLI_REQUEST_IO,
-            format!(
-                "Unable to read request file '{source}' ({})",
-                io_error_class(&err)
-            ),
-        )
-    })?;
+    let payload = fs::File::open(path)
+        .and_then(|mut file| read_capped(&mut file))
+        .map_err(|err| {
+            TransportError::new(
+                E_RUNTIME_CLI_REQUEST_IO,
+                format!(
+                    "Unable to read request file '{source}' ({})",
+                    io_error_class(&err)
+                ),
+            )
+        })?;
 
     if payload.len() > REQUEST_SIZE_LIMIT_BYTES {
         return Err(TransportError::new(
@@ -617,10 +648,23 @@ pub(crate) fn read_request_file(path: &Path) -> Result<Vec<u8>, TransportError> 
     Ok(payload)
 }
 
-pub(crate) fn read_request_stdin<R: Read>(stdin: &mut R) -> Result<Vec<u8>, TransportError> {
+/// Read at most one byte past the transport bound.
+///
+/// Both transports share this reader, so the `--request-file` path is bounded
+/// by the same rule as stdin rather than by the file's own recorded size, which
+/// understates a FIFO or a device (configflux-mtmi). Stopping one byte PAST the
+/// bound is what lets the caller tell a request that sits exactly on it from
+/// one that exceeds it.
+pub(crate) fn read_capped<R: Read>(reader: &mut R) -> std::io::Result<Vec<u8>> {
     let mut payload = Vec::new();
-    let mut limited = stdin.take((REQUEST_SIZE_LIMIT_BYTES + 1) as u64);
-    limited.read_to_end(&mut payload).map_err(|err| {
+    reader
+        .take((REQUEST_SIZE_LIMIT_BYTES + 1) as u64)
+        .read_to_end(&mut payload)?;
+    Ok(payload)
+}
+
+pub(crate) fn read_request_stdin<R: Read>(stdin: &mut R) -> Result<Vec<u8>, TransportError> {
+    let payload = read_capped(stdin).map_err(|err| {
         TransportError::new(
             E_RUNTIME_CLI_REQUEST_IO,
             format!("Unable to read request payload from stdin ({})", io_error_class(&err)),
@@ -658,7 +702,16 @@ pub(crate) fn parse_request_payload<Req: DeserializeOwned>(
 /// serde embeds the value inline for type/shape errors (e.g.
 /// `invalid type: string "..."`), so those are reported by failure category and
 /// location only; a missing required field carries no value, so its schema
-/// field name is surfaced verbatim to tell the caller what to add.
+/// field name is surfaced verbatim to tell the caller what to add. An
+/// unrecognized field is in between: its name is the caller's own key, so the
+/// name stays unreported, but the class is named (configflux-8gah).
+///
+/// MIRRORED, not shared: the edge-agent subsystem's session module carries a
+/// copy of this function so its socket answers the same three classes with the
+/// same rules (configflux-hil1). That subsystem takes no `runtime` dependency —
+/// one would pull `solver` into its link graph and break the solver-free
+/// property its guard test enforces (ADR-0036 §3, Amendment 1) — so a change to
+/// either copy belongs in both.
 pub(crate) fn describe_request_parse_error(command_name: &str, err: &serde_json::Error) -> String {
     let location = format!("line {}, column {}", err.line(), err.column());
 
@@ -667,6 +720,21 @@ pub(crate) fn describe_request_parse_error(command_name: &str, err: &serde_json:
     if let Some(field) = missing_field_name(&err.to_string()) {
         return format!(
             "Request for '{command_name}' command is missing required field '{field}' ({location})"
+        );
+    }
+
+    // configflux-8gah: a request struct that refuses an undeclared field reports
+    // it as serde's canonical "unknown field `<name>`" — the same stable wording
+    // `missing_field_name` keys off, but here `<name>` is the caller's own key
+    // and so is never echoed. The CLASS is compile-time text and worth naming:
+    // without it a field this operation does not declare is reported as a type
+    // or value fault, sending the operator to inspect a value that is perfectly
+    // well formed. That mis-attribution is the fault being removed, not a new
+    // one to introduce.
+    if err.to_string().starts_with("unknown field `") {
+        return format!(
+            "Request for '{command_name}' command is invalid: an unrecognized request field \
+             ({location})"
         );
     }
 

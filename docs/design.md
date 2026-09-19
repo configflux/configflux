@@ -26,7 +26,7 @@ job when an artifact is missing.
 
 ## Goals
 - Ingest & Infer: Ingest many decentralized chunks (authored in CUE, exported to JSON) to infer the global "150% model". The configuration model is not an input, but an aggregate graph derived from these chunks.
-- Incremental Compilation: Compile source chunks into a hashed Incremental IR (Chunks + Global Index) to support sub-second incremental builds and delta updates.
+- Incremental Compilation: Compile source chunks into a hashed Incremental IR (Chunks + Global Index) to support sub-second incremental builds and delta updates. The granularity is the **unit** — the chunks sharing one `package` value, a folder in a monorepo or a whole repository. `compile-object` compiles one unit into a content-addressed object against the headers of the interfaces it depends on, and `link` assembles objects into the package, checking the whole cross-unit graph from those headers before it opens a chunk file. Both ship; a lockfile pins, per unit, the object hash an integration expects. An unchanged unit's object is reused byte for byte, only the edited unit recompiles, and the one-shot `compile` is the same linker fed by in-memory objects, so the two forms cannot disagree.
 - Compiled Decision Logic: Compile the model's conditions into a solver-queryable constraint model (the CCM) so selection questions — which options are still valid, is this selection satisfiable, why was it rejected — are answered by a decision procedure rather than by re-interpreting condition strings at query time.
 - Scoped Resolution: Support resolving the 100% model for a specific Target Scope (e.g., a single component or subsystem) rather than forcing a monolithic platform resolution. This enables component-level builds, unit testing, and parallel processing.
 - Artifact as Config: Treat "Artifacts" (binaries, drivers, blobs) as first-class configuration parameters. The system validates the logic of artifact selection, leaving physical retrieval to the runtime loader.
@@ -43,8 +43,9 @@ job when an artifact is missing.
   - owns model ingestion, verification, compiled model emission, and CCM emission.
   - owns composition of resolved envelopes and the rendering of diagnostics.
   - does not own post-compile answer orchestration, and does not adjudicate selection decisions over modeled facets.
+  - resolve consults the solver through the shared composition seam for inference; the compiler still composes every byte of the resolved envelope, and imports no solver type.
 - Constraint Solver:
-  - owns the selection verdict: the valid-option set for a modeled facet, the accept/reject decision on a selection, the satisfiability gate on resolve, and the unsat core behind a rejection.
+  - owns the selection verdict: the valid-option set for a modeled facet, the accept/reject decision on a selection, the satisfiability gate on resolve, the inferred binding when a selection leaves exactly one admissible value for a declared closed facet, and the unsat core behind a rejection.
   - does not own envelope shape, output serialization, or diagnostic wording.
 - Interpreter (post-compile answer engine):
   - owns CMP-driven answer flows: open/options/select/explain/resolve/export/SBOM.
@@ -63,7 +64,7 @@ Out of scope for interpreter productization:
 - runtime persistence and promotion/sync workflows
 
 ## Constraints
-- Snake case only for definition IDs, component names, parameter keys, artifact IDs, and facet IDs; enforced by the CUE authoring schema.
+- Snake case only for definition IDs, component names, parameter keys, artifact IDs, and facet IDs; enforced by the CUE authoring schema. Facet IDs, binding IDs, catalogue IDs and catalogue entry IDs are additionally re-validated by the compiler at ingest, because it interpolates them into the condition clauses it synthesizes and the JSON ingest path never evaluates CUE (ADR-0063). Facet *values* are held to a wider rule at the same point: a non-empty token of letters, digits, `_`, `.` and `-`.
 - Dependency edges are explicit (e.g., component `depends_on` list) and validated during Link and Verify.
 - Shipped product boundary is four application layers with shared model semantics:
   - configuration compiler
@@ -86,9 +87,13 @@ Solid edges are current shipped flows. Dashed edges point to deferred surfaces.
 flowchart LR
     subgraph authoring["Authoring and compile stage (shipped)"]
         cue["Authored CUE packs<br/>inheritance + merge resolved at export"] --> chunks["Source chunks<br/>CUE-exported JSON"]
-        chunks --> compiler["configflux-compiler<br/>ingest + link/verify + compile"]
+        chunks --> compiler["configflux-compiler compile<br/>ingest + link/verify + compile"]
+        chunks --> objects["configflux-compiler compile-object<br/>one unit, one object.cfo"]
+        objects --> link["configflux-compiler link<br/>headers + constraint model + emit"]
         compiler --> cmp["Compiled model package<br/>cmp.manifest.json<br/>index.cfir.json + chunk-*.cfir"]
         compiler --> ccm["Compiled constraint model<br/>ccm/ symbol table + BDD partitions"]
+        link --> cmp
+        link --> ccm
     end
 
     subgraph late_binding["Late-binding and export stage (shipped)"]
@@ -215,6 +220,35 @@ ingest with a diagnostic naming the offending path. The merge and graph rules
 below still describe how inheritance edges are validated, because link/verify
 continues to check them; they no longer describe an authoring surface.
 
+## Separate Compilation: Objects and the Link Step
+A model can be built one **unit** at a time — a unit being a directory of chunks
+that share a `package` value. `compile-object` compiles one unit, against zero
+or more interface objects it reads by HEADER only, into a content-addressed
+object directory: the unit's chunk files, a deterministic provenance sidecar,
+and `object.json`, which carries what the unit exports, what it still needs from
+elsewhere, the declarations a sibling unit must be checked against, its clauses
+and selectors, and the hashes of the interfaces it was compiled against. An
+object holds no constraint model and no package index; those are link products.
+
+`link` turns a set of objects into the package `compile` produces. Its three
+stages are documented in `docs/model-spec.md` §6b: the graph checks from headers
+alone (unit and id uniqueness, unresolved imports, interface-hash agreement),
+the constraint model from those same headers in a canonical clause order, and
+the emit. Errors between units gain names at that step — `E_LINK_DUPLICATE_ID`
+names both units, `E_LINK_UNRESOLVED_IMPORT` names the unit and the id nothing
+declares, `E_LINK_INTERFACE_MISMATCH` names the hash a unit was compiled against
+and the one being linked.
+
+**`compile` is the linker fed by in-memory objects.** It groups its `--source`
+chunks by `package`, builds one header per unit without writing it, and runs the
+same three stages. There is one code path, so the two forms produce
+byte-identical packages for every scenario pack and every example — a property
+asserted as a test rather than argued.
+
+The payoff is incremental: an unchanged unit's object is reused byte for byte,
+only the edited unit recompiles, and the link runs over headers rather than over
+every parameter in the model.
+
 ## Compiler Output: The Incremental IR
 The Compiler emits an Incremental Object Graph, consisting of:
 - IR Chunks: one binary artifact per source file (CUE authored, exported to JSON for ingestion), identified by content hash (SHA256). Contains the localized schema and logic for that component.
@@ -242,11 +276,15 @@ core rather than a guess.
 IR Chunk (per source file):
 - File name: `chunk-<sha256>.cfir` (binary or msgpack; format versioned).
 - Payload:
-  - `chunk_hash`: sha256 of canonicalized source content.
+  - `chunk_hash`: sha256 of the chunk's canonical content (its entity maps); recomputable from the chunk file by any reader.
   - `source_id`: logical source path/ID (string).
   - `components`: partial `schema::Config.components` for that file.
   - `definitions`: partial `schema::Config.definitions` for that file.
   - `artifacts`: partial `schema::Config.artifacts` for that file.
+  - `facets`: partial `schema::Config.facets` for that file (a facet is declared by at most one chunk, so the chunk holding a declaration owns it outright).
+  - `constraints`: partial `schema::Config.constraints` for that file, carried so the constraint model is readable on the same walk as the facets it names.
+  - `catalogues`: partial `schema::Config.catalogues` for that file (declared by at most one chunk, as facets are).
+  - `bindings`: partial `schema::Config.bindings` for that file, carried verbatim so a package means exactly what was authored.
   - `metadata`: optional (timestamp, author, tool version).
 
 Global Object Index:
@@ -258,6 +296,8 @@ Global Object Index:
   - `definition_index`: map `definition_id -> chunk_hash`.
   - `artifact_index`: map `artifact_id -> chunk_hash`.
   - `facet_index`: map `facet_id -> chunk_hash` (declaration to owning chunk; enters the model identity preimage exactly as the other entity indices do).
+  - `catalogue_index`: map `catalogue_id -> chunk_hash` (same rule).
+  - `binding_index`: map `binding_id -> chunk_hash` (same rule).
   - `config_hash`: sha256 of sorted index content for cache identity.
 
 Rules:

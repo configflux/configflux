@@ -26,8 +26,17 @@ SESSION_COMPOSE_DEPS = [
     "//solver:solver",
 ]
 
+# configflux-secb.3 (ADR-0057 §D6): the inference fixpoint's suite rides in this
+# crate because this crate is where the decision is made. Both product CLIs reach
+# it through `resolve`, so a test driving either binary would pin the caller
+# rather than the rule. The fixtures are compiled in-process with
+# `compiler::product_api::compile_model` — the same pattern `//cfx:cfx_unit_test`
+# uses — which needs no new dep: `//compiler:compiler_lib` is already here, and it
+# is the very library `//compiler:compiler` itself is built from, so the `.ccm`
+# the tests load into `Session<CuddBackend>` is the product's `.ccm`.
 SESSION_COMPOSE_SRCS = [
     "src/lib.rs",
+    "src/tests.rs",
 ]
 
 rust_library(

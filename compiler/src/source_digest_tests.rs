@@ -10,15 +10,20 @@
 //! same invariant — **no path string may enter any hash preimage** — through
 //! two different commands.
 //!
-//! Every assertion here reads **serialized output**, not a struct field. That
-//! is deliberate: A8 is stated over `compiler inspect`'s JSON, and the rename
-//! A10 pins is a wire-format change, so a test that named the Rust field would
-//! stop witnessing the thing that can actually break for a consumer.
+//! Every assertion about a NAME here reads **serialized output**, not a struct
+//! field. That is deliberate: A8 is stated over `compiler inspect`'s JSON, and
+//! the rename A10 pins is a wire-format change, so a test that named the Rust
+//! field would stop witnessing the thing that can actually break for a
+//! consumer. The A9 assertions below are about a VALUE — two hashes being the
+//! same hash — and read the field, because serializing first would only add a
+//! step between the comparison and what it compares.
 
 use crate::product_api::{
-    inspect_model, verify_model, InspectModelRequest, InspectQuery, OperationStatus,
-    SourceManifestEntry, VerifyModelRequest, PRODUCT_SCHEMA_VERSION,
+    compile_model, inspect_model, verify_model, CompileModelRequest, InspectModelRequest,
+    InspectQuery, OperationStatus, SourceManifestEntry, VerifyModelRequest,
+    PRODUCT_SCHEMA_VERSION,
 };
+use crate::scenario_test_support::unique_temp_dir;
 use serde_json::Value as JsonValue;
 
 const DEFS: &str = include_str!("../scenarios/s1_water_pump/smoke/cue/00_definitions.json");
@@ -105,32 +110,65 @@ fn inspect_item_output_is_invariant_under_source_path_spelling() {
 
 // --- A9: verify carries the same guarantee ----------------------------------
 
-/// ADR-0056 A9. `VerifyReport.model_hash` keeps its name (§9.2 — `compile_model`
-/// reuses the struct and assigns the real CMP identity to it), which leaves it
-/// the only field still carrying the guarantee under that name. Warranted
-/// despite A8 precisely because the name did not move.
+/// ADR-0056 A9, over the value Amendment 2 gave the field.
+///
+/// `VerifyReport.model_hash` kept its name through §9.2 while carrying the
+/// source-manifest digest; Amendment 2 (configflux-3ukw) made it the CMP model
+/// IDENTITY — the same hash `compile` emits for the same sources — and made it
+/// absent when no index was built. A9's guarantee survives the change and is
+/// asserted here over the new value: the identity is invariant under path
+/// spelling because §1–§4 removed every path string from its preimage, not
+/// because the digest it used to carry happened to be content-only.
+///
+/// The equality with `compile` is asserted here too (R1) rather than left to
+/// `//compiler:verify_identity_test` alone: this is the ADR-0056 acceptance
+/// pack, and an invariance that held over a hash nobody else produced would be
+/// invariance without meaning.
 #[test]
-fn verify_model_hash_is_invariant_under_source_path_spelling() {
+fn verify_model_identity_is_invariant_under_source_path_spelling() {
     let verify = |entries: &[(&str, &str)]| {
         let report = verify_model(VerifyModelRequest {
             schema_version: PRODUCT_SCHEMA_VERSION,
             source_manifest: manifest(entries),
         });
         assert_eq!(report.status, OperationStatus::Ok, "verify failed");
-        report.model_hash
+        report
+            .model_hash
+            .expect("a verified model reports its identity")
     };
 
+    let relative = verify(&RELATIVE);
     assert_eq!(
-        verify(&RELATIVE),
+        relative,
         verify(&ABSOLUTE),
-        "verify model_hash differs between repo-relative and absolute source ids"
+        "verify model identity differs between repo-relative and absolute source ids"
+    );
+
+    let out = unique_temp_dir("cfx-3ukw", "verify-equals-compile").expect("temp dir");
+    let compiled = compile_model(CompileModelRequest {
+        schema_version: PRODUCT_SCHEMA_VERSION,
+        source_manifest: manifest(&RELATIVE),
+        output_dir: Some(out.path.to_string_lossy().into_owned()),
+        cluster_size: None,
+        budget: None,
+        stamp_time: false,
+    });
+    assert_eq!(
+        compiled.status,
+        OperationStatus::Ok,
+        "compile failed: {:?}",
+        compiled.verify_report.diagnostics.diagnostics
+    );
+    assert_eq!(
+        relative, compiled.model_hash,
+        "verify reports a different model identity than compile emits"
     );
 }
 
-/// The source-manifest digest still discriminates: editing content moves it.
+/// The reported identity still discriminates: editing content moves it.
 /// Without this, A8 and A9 would be satisfied by a constant.
 #[test]
-fn verify_model_hash_changes_when_content_changes() {
+fn verify_model_identity_changes_when_content_changes() {
     let edited = COMPONENTS.replacen("thermal_control", "thermal_controls", 1);
     assert_ne!(edited, COMPONENTS, "edit did not change the chunk");
 
@@ -143,9 +181,11 @@ fn verify_model_hash_changes_when_content_changes() {
         source_manifest: manifest(&[(RELATIVE[0].0, DEFS), (RELATIVE[1].0, &edited)]),
     });
 
+    assert_eq!(baseline.status, OperationStatus::Ok, "baseline failed to verify");
+    assert_eq!(changed.status, OperationStatus::Ok, "edited model failed to verify");
     assert_ne!(
         baseline.model_hash, changed.model_hash,
-        "source-manifest digest did not move when a chunk's content changed"
+        "the reported model identity did not move when a chunk's content changed"
     );
 }
 
@@ -205,9 +245,12 @@ fn inspect_output_carries_source_digest_and_no_model_hash() {
     }
 }
 
-/// A10's other half: `compile`'s `model_hash` keeps its name. Asserted on the
-/// shared `VerifyReport`, which `compile_model` populates with the real CMP
-/// identity on the success path — renaming it there would make compile lie.
+/// A10's other half: the CMP identity keeps the name `model_hash`. Asserted on
+/// the `VerifyReport` of a model that VERIFIED, which is where ADR-0056
+/// Amendment 2 put the identity — renaming it here would make both `verify` and
+/// `compile` lie. The assertion is over the serialized envelope because the
+/// claim is about the key a consumer reads, and the model is a passing one
+/// because a failing report is now allowed to omit the key entirely.
 #[test]
 fn verify_report_keeps_the_model_hash_name() {
     let report = verify_model(VerifyModelRequest {

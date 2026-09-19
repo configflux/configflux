@@ -281,9 +281,10 @@ std::string BuildSubscribeEventsRequestJson(uint64_t from_sequence,
                                             uint32_t max_events) {
   const uint32_t clamped_max_events = max_events == 0 ? 1 : max_events;
   // schema_version tracks compiler::product_api::PRODUCT_SCHEMA_VERSION (bumped
-  // 2 -> 3 for first-class facets, ADR-0047); keep this literal in sync on the
-  // next bump.
-  std::string request = R"({"schema_version":4,"from_sequence":)";
+  // 2 -> 3 for first-class facets, ADR-0047; 3 -> 4 for first-class
+  // constraints, ADR-0054; 4 -> 5 for requirement delivery, ADR-0057 D7);
+  // keep this literal in sync on the next bump.
+  std::string request = R"({"schema_version":5,"from_sequence":)";
   request.append(std::to_string(from_sequence));
   request.append(R"(,"max_events":)");
   request.append(std::to_string(clamped_max_events));

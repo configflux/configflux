@@ -1,5 +1,5 @@
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "status": "ok",
   "source_digest": "__DYNAMIC_SOURCE_DIGEST__",
   "query": {
@@ -53,7 +53,7 @@
   "error_count": 0,
   "warning_count": 0,
   "diagnostics": {
-    "schema_version": 4,
+    "schema_version": 5,
     "diagnostics": [],
     "error_count": 0,
     "warning_count": 0

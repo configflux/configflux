@@ -39,6 +39,7 @@ For commercial licensing, contact:
 | 0.1.0 | 2026-07-07 | 2030-07-07 |
 | 0.2.0 | 2026-07-11 | 2030-07-11 |
 | 0.3.0 | 2026-08-06 | 2030-08-06 |
+| 0.4.0 | 2026-09-19 | 2030-09-19 |
 
 This table is updated as part of each release.
 

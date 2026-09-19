@@ -1,0 +1,4 @@
+cannot select site.factory_a:
+  blocked by your earlier choice: line_container.c2
+  blocked by binding line_container, derived from site: site == 'factory_a' -> 'c1'
+(one minimal explanation; other minimal cores may exist)

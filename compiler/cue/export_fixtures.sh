@@ -95,6 +95,11 @@ definitionsOut: {
 	// has nothing to gap-fill. Same convention (00_definitions) and same
 	// whichever-chunk-authored-it rule as facets.
 	if defsIn.constraints != _|_ {constraints: defsIn.constraints}
+	// Catalogues and bindings, likewise (ADR-0057 §D2/§D3): a typed table has
+	// no inheritable shape and a binding is a declared facet, so both ride the
+	// same verbatim path facets and constraints take.
+	if defsIn.catalogues != _|_ {catalogues: defsIn.catalogues}
+	if defsIn.bindings != _|_ {bindings: defsIn.bindings}
 }
 
 // Components-file slice: resolved components (inheritance gap-filled) plus this
@@ -106,6 +111,8 @@ componentsOut: {
 	if compsIn.components != _|_ {components: _resolved.components}
 	if compsIn.facets != _|_ {facets: compsIn.facets}
 	if compsIn.constraints != _|_ {constraints: compsIn.constraints}
+	if compsIn.catalogues != _|_ {catalogues: compsIn.catalogues}
+	if compsIn.bindings != _|_ {bindings: compsIn.bindings}
 }
 DRIVER
 
@@ -130,6 +137,8 @@ configOut: {
 	if srcIn.components != _|_ {components: _resolved.components}
 	if srcIn.facets != _|_ {facets: srcIn.facets}
 	if srcIn.constraints != _|_ {constraints: srcIn.constraints}
+	if srcIn.catalogues != _|_ {catalogues: srcIn.catalogues}
+	if srcIn.bindings != _|_ {bindings: srcIn.bindings}
 }
 DRIVER
 
@@ -245,6 +254,17 @@ done < <(find "$SCENARIOS" -path '*/cue/00_definitions.cue' | sort)
 #   - SINGLE (one chunk authoring defs+components together, e.g. config.cue):
 #            resolve the whole chunk and emit the entire config.
 #
+# The sweep is depth-limited to `examples/*/cue` because that pair of layouts is
+# the whole contract here: a cue/ directory one level below an example root,
+# with its committed JSON in that root. An example whose chunks are NESTED
+# deeper — examples/06-catalogue-polyrepo/repos/<repo>/cue, the multi-repository
+# pack, whose N chunks resolve against one shared definitions chunk and are
+# emitted by examples/export_pack.sh — fits neither layout and must not be
+# force-fitted into one. Without the depth limit it would be read as SINGLE and
+# demand a repos/<repo>/config.json that does not and should not exist. Its
+# drift guard is //examples:export_pack_test, which compares BYTE-for-byte
+# against a fresh export_pack.sh run (configflux-dkmm.6).
+#
 # Comparison is "canon" (not byte-exact): the committed example JSON was emitted
 # by a different pipeline than raw `cue export` (2-space indent, serde struct
 # key order), so canonicalizing both sides with `jq -S` is what lets the check
@@ -283,7 +303,7 @@ if [ -d "$EXAMPLES" ] && [ "$mode" = "check" ]; then
 			emit_single "$tmp/src_raw.json" >"$tmp/out.json"
 			compare_or_write "$ex_root/config.json" "$tmp/out.json" canon
 		fi
-	done < <(find "$EXAMPLES" -type d -name cue | sort)
+	done < <(find "$EXAMPLES" -mindepth 2 -maxdepth 2 -type d -name cue | sort)
 fi
 
 echo "== $count chunk(s) processed =="

@@ -2,7 +2,7 @@
 
 use super::{
     is_ident_char, parse_ident, parse_operator, parse_quoted_literal, skip_ws, to_public_atom,
-    ConditionAtom, ConditionPredicate,
+    AtomOp, ConditionAtom, ConditionPredicate, ConditionPredicateOp,
 };
 use anyhow::{bail, Context, Result};
 
@@ -24,6 +24,26 @@ pub(crate) enum ConditionExpr {
     /// conjoined with pairwise at-most-one (ADR-0006 §4). Children are held in
     /// source order.
     ExactlyOneOf(Vec<ConditionExpr>),
+    /// Facet-to-facet comparison `a == b` / `a != b`, where the right-hand
+    /// side is an UNQUOTED identifier naming another declared facet or binding
+    /// (configflux-secb.2, ADR-0057 §D5 — an amendment to ADR-0006's grammar).
+    ///
+    /// `a == b` holds iff both sides are bound to the same value. It is NOT a
+    /// merge: the two facets stay independently bindable, and only this
+    /// constraint ties them together. `a != b` is its negation.
+    ///
+    /// The node carries only the two names. Its meaning is a pairwise
+    /// equivalence over the union of the two DECLARED domains, which this
+    /// module cannot see, so it is expanded into the `And`/`Or`/`Not`/
+    /// `Predicate` fragment by
+    /// [`super::expand_facet_comparisons`](super::expand_facet_comparisons)
+    /// before either BDD backend lowers it. Evaluation against a concrete
+    /// assignment needs no domains and is handled directly.
+    FacetCompare {
+        left: String,
+        op: ConditionPredicateOp,
+        right: String,
+    },
 }
 
 pub(crate) fn parse_condition_expr(condition: &str) -> Result<ConditionExpr> {
@@ -199,13 +219,37 @@ impl AstParser<'_> {
         let op = parse_operator(self.bytes, &mut self.idx)
             .with_context(|| format!("Expected '==' or '!=' at position {}", self.idx))?;
         self.skip_ws();
-        let value = parse_quoted_literal(self.bytes, &mut self.idx)
-            .with_context(|| format!("Expected quoted string literal at position {}", self.idx))?;
-        Ok(ConditionExpr::Predicate(to_public_atom(ConditionAtom {
-            tag,
-            op,
-            value,
-        })))
+        // A QUOTED right-hand side is a literal comparison — the original
+        // grammar, unchanged, so every model authored before ADR-0057 parses
+        // exactly as it did.
+        if let Some(value) = parse_quoted_literal(self.bytes, &mut self.idx) {
+            return Ok(ConditionExpr::Predicate(to_public_atom(ConditionAtom {
+                tag,
+                op,
+                value,
+            })));
+        }
+        // configflux-secb.2 / ADR-0057 §D5: an UNQUOTED identifier names
+        // another facet or binding, and the predicate becomes a facet-to-facet
+        // comparison. Whether the name is actually declared is not a parsing
+        // question — `link_verify::validate_constraints` decides it, so the
+        // author gets a diagnostic that names the constraint as well as the
+        // identifier.
+        let rhs_start = self.idx;
+        let right = parse_ident(self.bytes, &mut self.idx).with_context(|| {
+            format!(
+                "Expected quoted string literal or identifier at position {}",
+                rhs_start
+            )
+        })?;
+        Ok(ConditionExpr::FacetCompare {
+            left: tag,
+            op: match op {
+                AtomOp::Eq => ConditionPredicateOp::Eq,
+                AtomOp::NotEq => ConditionPredicateOp::NotEq,
+            },
+            right,
+        })
     }
 
     fn try_consume_bool_literal(&mut self) -> Option<bool> {

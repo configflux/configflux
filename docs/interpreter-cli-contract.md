@@ -38,7 +38,7 @@ Determinism rules:
 - object/list ordering follows existing frozen loader/runtime contract behavior
 
 ### 3.1 Operator/Developer Command Examples (`configflux-interpreter`)
-Examples below use `schema_version = 4` (the current `PRODUCT_SCHEMA_VERSION`; `2 → 3` per ADR-0047, `3 → 4` per ADR-0054). A request carrying an older version is rejected with `E_UNSUPPORTED_SCHEMA_VERSION`; there is no compatibility mode. JSON envelopes are from
+Examples below use `schema_version = 5` (the current `PRODUCT_SCHEMA_VERSION`; `2 → 3` per ADR-0047, `3 → 4` per ADR-0054, `4 → 5` per ADR-0057 §D7). A request carrying an older version is rejected with `E_UNSUPPORTED_SCHEMA_VERSION`; there is no compatibility mode. JSON envelopes are from
 `docs/interface-contracts.md`.
 Use `docs/canonical-worked-example.md` for the canonical end-to-end operator
 flow, including the shipped helper for initial `selection_state` generation.
@@ -46,7 +46,7 @@ flow, including the shipped helper for initial `selection_state` generation.
 1. `open` (stdin/stdout mode):
 ```bash
 echo '{
-  "schema_version": 4,
+  "schema_version": 5,
   "cmp_manifest_ref": "out/cmp/cmp.manifest.json"
 }' | configflux-interpreter open > out/open.result.json
 ```
@@ -60,7 +60,7 @@ configflux-interpreter init-selection-state \
 `requests/init-selection-state.request.json`:
 ```json
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "model_handle": {
     "model_hash": "<model_hash>",
     "cmp_manifest_ref": "out/cmp/cmp.manifest.json",
@@ -83,7 +83,7 @@ configflux-interpreter options \
 `requests/options.request.json`:
 ```json
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "model_handle": {
     "model_hash": "<model_hash>",
     "cmp_manifest_ref": "out/cmp/cmp.manifest.json",
@@ -92,7 +92,7 @@ configflux-interpreter options \
   },
   "scope": "component:thermal_control",
   "selection_state": {
-    "schema_version": 4,
+    "schema_version": 5,
     "model_hash": "<model_hash>",
     "scope": "component:thermal_control",
     "context_tags": {
@@ -115,7 +115,7 @@ configflux-interpreter select \
 `requests/select.request.json`:
 ```json
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "model_handle": {
     "model_hash": "<model_hash>",
     "cmp_manifest_ref": "out/cmp/cmp.manifest.json",
@@ -124,7 +124,7 @@ configflux-interpreter select \
   },
   "scope": "component:thermal_control",
   "selection_state": {
-    "schema_version": 4,
+    "schema_version": 5,
     "model_hash": "<model_hash>",
     "scope": "component:thermal_control",
     "context_tags": {
@@ -149,7 +149,7 @@ configflux-interpreter explain \
 `requests/explain.request.json`:
 ```json
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "model_handle": {
     "model_hash": "<model_hash>",
     "cmp_manifest_ref": "out/cmp/cmp.manifest.json",
@@ -158,7 +158,7 @@ configflux-interpreter explain \
   },
   "scope": "component:thermal_control",
   "selection_state": {
-    "schema_version": 4,
+    "schema_version": 5,
     "model_hash": "<model_hash>",
     "scope": "component:thermal_control",
     "context_tags": {
@@ -185,7 +185,7 @@ configflux-interpreter resolve \
 `requests/resolve.request.json`:
 ```json
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "model_handle": {
     "model_hash": "<model_hash>",
     "cmp_manifest_ref": "out/cmp/cmp.manifest.json",
@@ -194,7 +194,7 @@ configflux-interpreter resolve \
   },
   "scope": "component:thermal_control",
   "selection_state": {
-    "schema_version": 4,
+    "schema_version": 5,
     "model_hash": "<model_hash>",
     "scope": "component:thermal_control",
     "context_tags": {
@@ -231,7 +231,7 @@ downstream `export-resolved` / `export-software-bom` to consume.
 7. `export-resolved`:
 ```bash
 jq -n --slurpfile rr out/resolve.result.json '{
-  schema_version: 4,
+  schema_version: 5,
   resolve_result: $rr[0],
   profile: "cpp_early_binding_v1"
 }' > requests/export-resolved.request.json
@@ -244,7 +244,7 @@ configflux-interpreter export-resolved \
 8. `export-software-bom`:
 ```bash
 jq -n --slurpfile rr out/resolve.result.json '{
-  schema_version: 4,
+  schema_version: 5,
   resolve_result: $rr[0],
   profile: "full_audit"
 }' > requests/export-software-bom.request.json
@@ -259,12 +259,42 @@ Expected identity continuity across command results:
 - `init-selection-state`: emits canonical `selection_state` with `selection_state_hash`.
 - `options`/`select`: preserve or update `selection_state_hash`.
 - `resolve`: emits `resolve_hash` bound to `model_hash` + `selection_state_hash`.
+- `resolve`: also emits `resolved_output_hash` (ADR-0059 D3) — hash of the
+  resolved payload alone; deliberately independent of `model_hash` and of the
+  selection, so it changes only when the bytes a consumer receives change.
+  Present iff `resolved_output` is present, so a rejected `resolve` carries
+  neither. Additive: it does not bump `schema_version` and no hash pre-image,
+  `resolve_hash`'s included, moves because of it.
 - `export-resolved` / `export-software-bom`: preserve `model_hash` + `resolve_hash`.
 
 ## 4. Exit Codes
 1. `0`: command result `status = ok`
 2. `2`: command result `status = error`
 3. `1`: CLI transport/parsing misuse (invalid JSON, invalid args, I/O failure)
+
+### 4.1 Transport diagnostics (frozen)
+The five codes below are the frozen transport vocabulary of exit code `1`: the
+codes the binary may write to `stderr`, as `{code}: {message}`, before the
+process exits. They are raised by the transport rather than by a command, so any
+command can reach one — including an invocation whose command name the binary
+does not accept. One exit-`1` path carries no code: a write failure while
+emitting `--help` or `--version` output exits `1` with `stderr` untouched,
+because the usage text has already failed to reach `stdout`. Exit status alone
+does not imply a code was written.
+
+Interpreter CLI transport diagnostics (frozen):
+- `E_INTERPRETER_CLI_ARGS_INVALID` — the command line is not one the binary accepts
+- `E_INTERPRETER_CLI_REQUEST_IO` — the request payload could not be read at all
+- `E_INTERPRETER_CLI_REQUEST_TOO_LARGE` — the request payload exceeds the bounded-input limit of §6.4
+- `E_INTERPRETER_CLI_REQUEST_INVALID` — the request payload is not the JSON the command expects
+- `E_INTERPRETER_CLI_RESPONSE_IO` — the result could not be serialized or delivered
+
+This list is frozen in both directions and mechanically held equal to the
+`pub const E_*` set declared in `interpreter/src/cli_adapter.rs`: a transport
+code the binary can emit without a bullet here, or a bullet here that no
+declaration backs, fails the repository lint at every gate scope. Membership is
+what this section freezes; per-code cause and remedy are in
+`docs/diagnostics.md`, and order is not part of the contract.
 
 ## 5. Request/Response Envelope Policy
 Mapping policy:
@@ -318,6 +348,10 @@ validation/error semantics:
    code rather than adding a resolve-side one)
 5. `export-resolved` -> `E_EXPORT_*`
 6. `export-software-bom` -> `E_SBOM_*`
+7. every command -> `E_INTERPRETER_CLI_*` (transport, exit code `1`; the frozen
+   list is §4.1). A transport failure is the one outcome reachable from every
+   command, a mistyped one included, because it is decided before the command
+   runs.
 
 CCM precondition (ADR-0030, fail closed): `options`, `select`, and `resolve`
 require a usable `.ccm` solver model (loadable artifact with a populated symbol

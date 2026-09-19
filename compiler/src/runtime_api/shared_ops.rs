@@ -189,10 +189,132 @@ fn find_parameter_scope_root(
     }
 }
 
+/// Parse `component.<component_id>.requires.<slot>.<field>` (ADR-0057 §D7),
+/// the READ-ONLY sibling of `parse_parameter_path`.
+///
+/// Deliberately a separate parser rather than a widened one. `parse_parameter_path`
+/// is what the three write commands and the reset path call to decide whether a
+/// path is addressable at all; teaching it about `requires` would make every one
+/// of those accept a requirement path and then have to refuse it again further
+/// down. Keeping the grammars apart is what makes "requirement fields are not
+/// writable in this version" a property of the parser instead of a check
+/// somebody can forget.
+fn parse_requirement_path(path: &str) -> Option<(&str, &str, &str)> {
+    let mut parts = path.split('.');
+    let prefix = parts.next()?;
+    let component_id = parts.next()?;
+    let requires_token = parts.next()?;
+    let slot = parts.next()?;
+    let field = parts.next()?;
+    if parts.next().is_some()
+        || prefix != "component"
+        || requires_token != "requires"
+        || component_id.trim().is_empty()
+        || slot.trim().is_empty()
+        || field.trim().is_empty()
+    {
+        return None;
+    }
+    Some((component_id, slot, field))
+}
+
+/// Read one requirement field out of the snapshot (ADR-0057 §D7).
+///
+/// The payload is built from the snapshot alone, because that is all a device
+/// has. The catalogue's declared column type is not carried in the snapshot, so
+/// `type` is reported from the value's own kind — which agrees with the declared
+/// type by construction: `link_verify::validate_catalogues` proved every entry's
+/// value matches its column before this value was ever written.
+///
+/// `lifecycle` is `construction` and `access` is `super_user` because both are
+/// true: the value was fixed when the deployment was resolved, and no role can
+/// change it through the v2 write API. `safety` is `q_m`, the model-wide default,
+/// because a catalogue declares no safety classification for its columns.
+fn find_requirement_payload(
+    snapshot: &RuntimeSnapshot,
+    path: &str,
+    component_id: &str,
+    slot: &str,
+    field: &str,
+) -> std::result::Result<RuntimeParameterPayload, Diagnostic> {
+    let unknown = || Diagnostic {
+        code: E_RUNTIME_UNKNOWN_PATH.to_string(),
+        severity: DiagnosticSeverity::Error,
+        message: format!("Unknown parameter path '{}'", path),
+        source_id: None,
+        entity_path: Some("request.path".to_string()),
+        hint: Some(
+            "Use path format component.<component_id>.requires.<slot>.<field>, naming a \
+             requirement the component declares"
+                .to_string(),
+        ),
+    };
+
+    let mut found: Option<(&crate::resolved_models::ResolvedRequirement, &crate::schema::Value)> =
+        None;
+    for resolved_scope in snapshot.resolved_output.values() {
+        let Some(component) = resolved_scope.components.get(component_id) else {
+            continue;
+        };
+        let Some(requirement) = component.requires.get(slot) else {
+            continue;
+        };
+        let Some(value) = requirement.fields.get(field) else {
+            continue;
+        };
+        if found.is_some() {
+            return Err(Diagnostic {
+                code: E_RUNTIME_OPEN_INVALID.to_string(),
+                severity: DiagnosticSeverity::Error,
+                message: format!("Parameter path '{path}' is ambiguous across multiple scope roots"),
+                source_id: None,
+                entity_path: Some("request.path".to_string()),
+                hint: Some(
+                    "Use runtime snapshots with unique component IDs per scope root".to_string(),
+                ),
+            });
+        }
+        found = Some((requirement, value));
+    }
+
+    let (requirement, value) = found.ok_or_else(unknown)?;
+    Ok(RuntimeParameterPayload {
+        path: path.to_string(),
+        component_id: component_id.to_string(),
+        param_key: field.to_string(),
+        r#type: value_kind(value).to_string(),
+        value: value.clone(),
+        // A requirement field is read at a `requires` path, not a parameter
+        // path, so it is never a facet's handle (ADR-0064 D5.1).
+        facet: None,
+        unit: None,
+        safety: crate::schema::SafetyLevel::QM,
+        lifecycle: crate::schema::Lifecycle::Construction,
+        access: crate::schema::Role::SuperUser,
+        req_id: None,
+        doc: None,
+        limits: None,
+        artifact: None,
+        requires: Some(RuntimeRequirementBinding {
+            slot: slot.to_string(),
+            binding: requirement.binding.clone(),
+            entry: requirement.entry.clone(),
+        }),
+    })
+}
+
 fn find_parameter_payload(
     snapshot: &RuntimeSnapshot,
     path: &str,
 ) -> std::result::Result<RuntimeParameterPayload, Diagnostic> {
+    // ADR-0057 §D7: a requirement field is readable, so it is answered here
+    // before the parameter grammar gets a look. Nothing else changes — a path
+    // that is not requirement-shaped falls straight through to the parameter
+    // lookup, unchanged.
+    if let Some((component_id, slot, field)) = parse_requirement_path(path) {
+        return find_requirement_payload(snapshot, path, component_id, slot, field);
+    }
+
     let (component_id, param_key) = parse_parameter_path(path).ok_or_else(|| Diagnostic {
         code: E_RUNTIME_UNKNOWN_PATH.to_string(),
         severity: DiagnosticSeverity::Error,
@@ -1207,6 +1329,7 @@ fn parameter_payload(
         param_key: param_key.to_string(),
         r#type: parameter.r#type.clone(),
         value: parameter.value.clone(),
+        facet: parameter.facet.clone(),
         unit: parameter.unit.clone(),
         safety: parameter.safety.clone(),
         lifecycle: parameter.lifecycle.clone(),
@@ -1215,6 +1338,9 @@ fn parameter_payload(
         doc: parameter.doc.clone(),
         limits: parameter.limits.clone(),
         artifact,
+        // A parameter read never carries requirement provenance; only
+        // `find_requirement_payload` sets this.
+        requires: None,
     })
 }
 
@@ -1339,7 +1465,7 @@ fn validate_runtime_snapshot(snapshot: &RuntimeSnapshot) -> std::result::Result<
         return Err(Diagnostic {
             code: E_RUNTIME_OPEN_INVALID.to_string(),
             severity: DiagnosticSeverity::Error,
-            message: "runtime_snapshot.model_hash must be a 64-char sha256 hex string".to_string(),
+            message: "runtime_snapshot.model_hash must be a 64-char lowercase sha256 hex string".to_string(),
             source_id: None,
             entity_path: Some("runtime_snapshot.model_hash".to_string()),
             hint: Some("Use runtime_snapshot emitted by runtime_open".to_string()),
@@ -1349,7 +1475,7 @@ fn validate_runtime_snapshot(snapshot: &RuntimeSnapshot) -> std::result::Result<
         return Err(Diagnostic {
             code: E_RUNTIME_OPEN_INVALID.to_string(),
             severity: DiagnosticSeverity::Error,
-            message: "runtime_snapshot.resolve_hash must be a 64-char sha256 hex string"
+            message: "runtime_snapshot.resolve_hash must be a 64-char lowercase sha256 hex string"
                 .to_string(),
             source_id: None,
             entity_path: Some("runtime_snapshot.resolve_hash".to_string()),
@@ -1931,6 +2057,28 @@ fn validate_artifact_references(
     Ok(())
 }
 
+/// Runtime-side adapter over the ONE resolve-hash recipe
+/// (`crate::resolve_hash::compute_resolve_hash`), which `loader_api` reaches
+/// through an adapter of its own.
+///
+/// It holds NO part of the recipe — no pre-image struct, no field order, no
+/// skip-if-empty rule, no hashing. It does the two things that are genuinely
+/// this side's job:
+///
+/// 1. Canonicalize `resolved_output`. The runtime receives the payload raw off
+///    the wire, where the loader already holds the canonical form it emitted.
+///    `canonicalize_json_value` is idempotent, so a payload that arrives already
+///    canonical is unchanged by the pass.
+/// 2. Project the request's FLAT `context_tags` / `choices` onto the pre-image's
+///    nested selection-state object. A `SelectionState` never reaches the
+///    runtime, so the product schema version and the request's outer
+///    `model_hash` / `scope` stand in for its own — sound because the loader's
+///    `validate_selection_state` refuses any resolve whose inner state disagrees
+///    with the outer handle and scope.
+///
+/// A mismatch against `request.resolve_hash` therefore means one of the six
+/// inputs moved between resolve and open — the caller changed the payload — and
+/// can no longer mean that two copies of the recipe disagree.
 fn compute_resolve_hash(
     model_hash: &str,
     scope: &str,
@@ -1938,25 +2086,23 @@ fn compute_resolve_hash(
     choices: &BTreeMap<String, String>,
     resolved_output: &serde_json::Value,
     defaulted_choices: &BTreeMap<String, String>,
+    implied_choices: &BTreeMap<String, String>,
 ) -> Result<String> {
     let canonical_output = canonicalize_json_value(resolved_output.clone());
-    let canonical = ResolveHashCanonical {
-        schema_version: PRODUCT_SCHEMA_VERSION,
+    crate::resolve_hash::compute_resolve_hash(
         model_hash,
         scope,
-        selection_state: SelectionStateCanonical {
+        SelectionStateCanonical {
             schema_version: PRODUCT_SCHEMA_VERSION,
             model_hash,
             scope,
             context_tags,
             choices,
         },
-        resolved_output: &canonical_output,
+        &canonical_output,
         defaulted_choices,
-    };
-    let bytes = serde_json::to_vec(&canonical)
-        .context("Failed to canonicalize runtime resolve hash payload")?;
-    Ok(sha256_hex(&bytes))
+        implied_choices,
+    )
 }
 
 fn canonicalize_json_value(value: serde_json::Value) -> serde_json::Value {
@@ -1985,7 +2131,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 fn is_sha256_hex(value: &str) -> bool {
-    value.len() == 64 && value.chars().all(|ch| ch.is_ascii_hexdigit())
+    value.len() == 64 && value.chars().all(|ch| matches!(ch, '0'..='9' | 'a'..='f'))
 }
 
 fn schema_version_diagnostic(

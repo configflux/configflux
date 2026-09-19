@@ -132,6 +132,7 @@ fn resolve(model_handle: &ModelHandle, scope: &str, state: &SelectionState) -> R
         model_handle: model_handle.clone(),
         scope: scope.to_string(),
         selection_state: state.clone(),
+        implied_choices: Default::default(),
     })
 }
 

@@ -74,6 +74,15 @@ fn collect(expr: &ConditionExpr, acc: &mut ConditionIdentifiers) {
                 collect(child, acc);
             }
         }
+        // configflux-secb.2 / ADR-0057 §D5: BOTH operands are facet
+        // identifiers, so both belong in `tags`. Missing the right-hand one
+        // would leave a real facet name un-pseudonymized in scrubbed output
+        // (ADR-0034 D3). Neither is an option literal, so `options` is
+        // untouched.
+        ConditionExpr::FacetCompare { left, right, .. } => {
+            acc.tags.insert(left.clone());
+            acc.tags.insert(right.clone());
+        }
     }
 }
 
@@ -137,6 +146,13 @@ fn substitute(
         ConditionExpr::ExactlyOneOf(children) => {
             ConditionExpr::ExactlyOneOf(substitute_children(children, rename_tag, rename_literal))
         }
+        // `rename_tag` applies to both operands; `rename_literal` has no
+        // meaning here because neither side is a literal (configflux-secb.2).
+        ConditionExpr::FacetCompare { left, op, right } => ConditionExpr::FacetCompare {
+            left: rename_tag(left),
+            op: op.clone(),
+            right: rename_tag(right),
+        },
     }
 }
 
@@ -197,6 +213,17 @@ fn serialize(expr: &ConditionExpr, parent: Prec) -> String {
         ConditionExpr::AnyOf(children) => serialize_call("any_of", children),
         ConditionExpr::AllOf(children) => serialize_call("all_of", children),
         ConditionExpr::ExactlyOneOf(children) => serialize_call("exactly_one_of", children),
+        // configflux-secb.2 / ADR-0057 §D5: the right-hand side is rendered
+        // BARE. Quoting it would turn a facet comparison into a literal
+        // comparison, so the round-trip guarantee this serializer owes the
+        // scrubber would silently change the condition's meaning.
+        ConditionExpr::FacetCompare { left, op, right } => {
+            let op = match op {
+                ConditionPredicateOp::Eq => "==",
+                ConditionPredicateOp::NotEq => "!=",
+            };
+            format!("{} {} {}", left, op, right)
+        }
     }
 }
 

@@ -90,8 +90,14 @@ const S5_CONTEXT: &[(&str, &str)] = &[
 /// Adding a new scenario under compiler/scenarios/ requires a new row here,
 /// a matching entry in the baseline fixture, and a new line in
 /// EXPECTED_VARIANTS below (see the second test for the guardrail).
+///
+/// `pub(crate)` because it is the corpus roster for the whole crate's
+/// pack-level tests, not just this one: `chunk_address_tests` reads it so the
+/// chunk-address invariant is asserted over the same eleven variants, under the
+/// same coverage guard, rather than over a second hand-written list that could
+/// silently fall behind this one.
 #[rustfmt::skip]
-const SCENARIOS: &[ScenarioSpec] = &[
+pub(crate) const SCENARIOS: &[ScenarioSpec] = &[
     ScenarioSpec { key: "s1-smoke",  scope: "component:thermal_control",        chunks: chunk!("s1_water_pump/smoke"),       context: S1_CONTEXT },
     ScenarioSpec { key: "s1-medium", scope: "component:thermal_control",        chunks: chunk!("s1_water_pump/medium"),      context: S1_CONTEXT },
     ScenarioSpec { key: "s2-smoke",  scope: "component:turbine_controller",     chunks: chunk!("s2_wind_turbine/smoke"),     context: S2_CONTEXT },
@@ -106,14 +112,14 @@ const SCENARIOS: &[ScenarioSpec] = &[
 ];
 
 #[derive(Clone, Copy)]
-struct ScenarioSpec {
-    key: &'static str,
-    scope: &'static str,
-    chunks: &'static [(&'static str, &'static str)],
+pub(crate) struct ScenarioSpec {
+    pub(crate) key: &'static str,
+    pub(crate) scope: &'static str,
+    pub(crate) chunks: &'static [(&'static str, &'static str)],
     /// Context tags (from profile.toml `default_context`) used to build the
     /// canonical selection state. Choices are left empty — this is the
     /// context-only resolution path exercised by scenario_early_binding_tests.
-    context: &'static [(&'static str, &'static str)],
+    pub(crate) context: &'static [(&'static str, &'static str)],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -234,6 +240,7 @@ fn run_scenario(spec: &ScenarioSpec) -> Result<(ObservedHashes, TempDirGuard)> {
         model_handle: handle.clone(),
         scope: spec.scope.to_string(),
         selection_state: state.clone(),
+        implied_choices: Default::default(),
     });
     if resolve_result.status != OperationStatus::Ok {
         return Err(anyhow!(

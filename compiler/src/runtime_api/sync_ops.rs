@@ -205,7 +205,7 @@ pub fn pull_updates(request: PullUpdatesRequest) -> PullUpdatesResult {
                 vec![Diagnostic {
                     code: crate::sync_transport::E_RUNTIME_SYNC_PAYLOAD_INVALID.to_string(),
                     severity: DiagnosticSeverity::Error,
-                    message: "request.base_configuration_id must be a 64-char sha256 hex string".to_string(),
+                    message: "request.base_configuration_id must be a 64-char lowercase sha256 hex string".to_string(),
                     source_id: None,
                     entity_path: Some("request.base_configuration_id".to_string()),
                     hint: Some("Use configuration IDs returned by get_configuration_identity".to_string()),
@@ -243,7 +243,7 @@ pub fn pull_updates(request: PullUpdatesRequest) -> PullUpdatesResult {
                     code: crate::sync_transport::E_RUNTIME_SYNC_PAYLOAD_INVALID.to_string(),
                     severity: DiagnosticSeverity::Error,
                     message:
-                        "request.target_configuration_id must be a 64-char sha256 hex string".to_string(),
+                        "request.target_configuration_id must be a 64-char lowercase sha256 hex string".to_string(),
                     source_id: None,
                     entity_path: Some("request.target_configuration_id".to_string()),
                     hint: Some("Use configuration IDs from backend/direct-push delta manifests".to_string()),
@@ -379,7 +379,7 @@ pub fn pull_updates(request: PullUpdatesRequest) -> PullUpdatesResult {
                         code: crate::sync_transport::E_RUNTIME_SYNC_PAYLOAD_INVALID.to_string(),
                         severity: DiagnosticSeverity::Error,
                         message: format!(
-                            "before_leaf_hash for '{}' must be a 64-char sha256 hex string",
+                            "before_leaf_hash for '{}' must be a 64-char lowercase sha256 hex string",
                             canonical_path
                         ),
                         source_id: None,
@@ -399,7 +399,7 @@ pub fn pull_updates(request: PullUpdatesRequest) -> PullUpdatesResult {
                         code: crate::sync_transport::E_RUNTIME_SYNC_PAYLOAD_INVALID.to_string(),
                         severity: DiagnosticSeverity::Error,
                         message: format!(
-                            "after_leaf_hash for '{}' must be a 64-char sha256 hex string",
+                            "after_leaf_hash for '{}' must be a 64-char lowercase sha256 hex string",
                             canonical_path
                         ),
                         source_id: None,

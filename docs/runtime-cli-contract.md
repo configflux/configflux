@@ -75,6 +75,13 @@ Deterministic transport rules:
 2. no nondeterministic metadata is injected by CLI transport
 3. response payloads are serialized as one JSON object + trailing newline
 4. request payload size is bounded to `8 MiB`
+5. the model directory a request's `ccm_ref` names is read under the same
+   discipline: every file the loader reads must be a regular file, each is read
+   under a `1 GiB` per-file ceiling, and every name a manifest supplies
+   (`partition_manifest` and each `partitions` entry) must be a plain filename,
+   so no name taken from a manifest is joined outside the directory the request
+   named; symbolic links are still resolved, so a link placed inside that
+   directory can name a regular file elsewhere on the filesystem
 
 ## 4. Exit Codes
 1. `0` -> command result `status = ok`
@@ -104,7 +111,9 @@ Runtime domain diagnostics (from runtime API):
 2. `E_RUNTIME_OPEN_INVALID`
 3. `E_RUNTIME_OPEN_SOLVER_MODEL_UNAVAILABLE` (ADR-0030 D2: `runtime-open` fails
    closed when the snapshot's `ccm_ref` does not resolve to a usable `.ccm`
-   solver model — empty reference, unloadable artifact, or symbol-less stub)
+   solver model — empty reference, unloadable artifact, or symbol-less stub —
+   or resolves to one bound to a different model than the snapshot's
+   `model_hash`)
 4. `E_RUNTIME_HASH_MISMATCH`
 5. `E_RUNTIME_UNKNOWN_SCOPE`
 6. `E_RUNTIME_UNKNOWN_PATH`
@@ -172,7 +181,7 @@ Concrete request bodies for the read commands `get-scope-metadata`,
 `list-parameters`, and `get-parameter`. Every read request threads the
 `runtime_snapshot` object returned by `runtime-open` (see the open request in
 `docs/service-integration-guide.md`) and adds a command-specific selector.
-`schema_version` is the current product schema version (`4`). The snapshot is
+`schema_version` is the current product schema version (`5`). The snapshot is
 abbreviated below as `{ "...": "from runtime-open" }`; pass the full object
 through unchanged.
 
@@ -180,7 +189,7 @@ through unchanged.
 
 ```json
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "runtime_snapshot": { "...": "from runtime-open" },
   "scope_root": "runtime_tuner"
 }
@@ -190,7 +199,7 @@ through unchanged.
 
 ```json
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "runtime_snapshot": { "...": "from runtime-open" },
   "scope_root": "runtime_tuner"
 }
@@ -202,13 +211,36 @@ through unchanged.
 
 ```json
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "runtime_snapshot": { "...": "from runtime-open" },
   "path": "component.runtime_tuner.param.max_rpm"
 }
 ```
 
+`get-parameter` also reads one field of a delivered catalogue entry (ADR-0057
+§D7) at `component.<component_id>.requires.<slot>.<field>`. The reply is the
+same payload shape plus a `requires` block naming the slot, the binding and the
+entry the value came from:
+
+```json
+{
+  "schema_version": 5,
+  "runtime_snapshot": { "...": "from runtime-open" },
+  "path": "component.vision_service.requires.container.width_mm"
+}
+```
+
+These paths are **read-only**: the value was decided at resolve time, so
+`set-parameter`, `set-parameters-atomically` and `reset-parameter` refuse them
+with `E_RUNTIME_UNKNOWN_PATH`, the same code any path outside the writable
+parameter grammar gets. They are likewise **not** listed by `list-parameters`,
+which enumerates writable parameter paths only; a service that wants its
+requirements reads its own `requires` block out of the snapshot.
+
 A malformed request envelope fails closed with `E_RUNTIME_CLI_REQUEST_INVALID`
 (exit `1`) and the diagnostic names the offending field — for example a request
-that omits `scope_root` reports a missing required `scope_root` field. Field
-*values* are never echoed (§7).
+that omits `scope_root` reports a missing required `scope_root` field. A request
+carrying a field the contract does not declare is refused the same way,
+including inside an individual `writes[]` entry, where the diagnostic names the
+class rather than the key so a guard sent to the wrong place is reported instead
+of ignored. Field *values* are never echoed (§7).

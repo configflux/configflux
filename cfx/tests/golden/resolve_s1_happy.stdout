@@ -1,6 +1,8 @@
 model_hash: __HASH__
 selection_state_hash: __HASH__
 resolve_hash: __HASH__
+resolved_output_hash: __HASH__
 wrote: generated/config.hpp
 wrote: generated/config_artifact_manifest.json
 wrote: generated/config_build_flags.cmake
+wrote: resolve_result.thermal_control.default.json

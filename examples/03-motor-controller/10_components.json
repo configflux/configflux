@@ -115,6 +115,13 @@
               "value": "absolute_encoder_driver"
             }
           ]
+        },
+        "encoder_mode": {
+          "type": "string",
+          "facet": "encoder_type",
+          "lifecycle": "runtime",
+          "access": "technician",
+          "doc": "Encoder feedback mode; the runtime handle of the encoder_type facet"
         }
       }
     },

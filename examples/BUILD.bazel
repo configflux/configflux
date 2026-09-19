@@ -2,6 +2,41 @@ load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 package(default_visibility = ["//visibility:public"])
 
+# configflux-x5gb.9 (ADR-0061 D3/D4): the hero example's README embeds a
+# byte-exact transcript, replayed by //tools:replay_example_00_readme_test. That
+# target lives in another package, so the README and the four files its stage
+# hook needs to reproduce `out/cmp/` have to be reachable as labels — being data
+# of an in-package sh_test is not enough.
+exports_files([
+    "00-service-multi-env/00_definitions.json",
+    "00-service-multi-env/10_components.json",
+    "00-service-multi-env/README.md",
+    "00-service-multi-env/environments.json",
+    "00-service-multi-env/run.sh",
+])
+
+# configflux-p0jz.2 (review finding 3): every JSON file inside an example, for
+# //compiler:link_oracle_test's corpus-coverage guard. Globbed and not listed on
+# purpose — the guard's whole claim is that an example added here and to no
+# CORPUS row fails the oracle, and a hand-written list would have to be edited
+# by the same person who forgot the row. It deliberately over-collects
+# (environment maps, pinned outputs); the guard filters those by path, so this
+# group needs no rule of its own and cannot drift from one. The one exclusion is
+# `out/`, as on :shipped_runner_inputs below. Every example's run.sh defaults its
+# output to ${EXAMPLE_DIR}/out and stages the committed chunks into `out/src/` to
+# compile them under filename-only source ids, and a Bazel glob does not read
+# .gitignore — so without this a developer who runs an example by hand, which the
+# READMEs teach, pulls those staged copies into the oracle's runfiles, where the
+# guard correctly reads them as packs no CORPUS row names and the test fails. The
+# Bazel-driven example tests redirect output to $TEST_TMPDIR, so CI never sees it.
+filegroup(
+    name = "example_model_chunks",
+    srcs = glob(
+        ["*/**/*.json"],
+        exclude = ["*/out/**"],
+    ),
+)
+
 # Regression tests for the runnable examples under examples/*.
 #
 # Each sh_test invokes the example's run.sh via a shared wrapper
@@ -78,6 +113,10 @@ sh_test(
     },
 )
 
+# Example 03 compiles and inspects the model, then resolves it with `cfx
+# resolve` and hands the snapshot to the runtime to show a write refused by a
+# declared constraint. It therefore depends on the compiler, cfx, and runtime
+# binaries and reshapes JSON with `jq`, so `jq` must be on the host PATH.
 sh_test(
     name = "03_motor_controller_test",
     size = "small",
@@ -89,20 +128,67 @@ sh_test(
         "03-motor-controller/cue/00_definitions.cue",
         "03-motor-controller/cue/10_components.cue",
         "03-motor-controller/run.sh",
+        "//cfx:cfx",
         "//compiler:compiler",
+        "//runtime:runtime",
+    ],
+    env = {
+        "CFX_RLOCATION": "$(rootpath //cfx:cfx)",
+        "COMPILER_RLOCATION": "$(rootpath //compiler:compiler)",
+        "EXAMPLE_RUN_RLOCATION": "$(rootpath 03-motor-controller/run.sh)",
+        "RUNTIME_RLOCATION": "$(rootpath //runtime:runtime)",
+    },
+)
+
+# The runtime v2 SESSION LIFECYCLE driven through the runtime BINARY
+# (configflux-x5gb.6, ADR-0061 D3) — the "Pattern 2" flow of
+# docs/service-integration-guide.md: a technician writes a runtime parameter,
+# sees it go dirty, rolls it back, writes it again, commits it, is refused a
+# jointly invalid batch, and re-times the auto-reset policy.
+#
+# Until now every one of the 14 v2 commands was exercised only IN PROCESS, from
+# runtime/src/tests.rs. That misses the property the CLI actually has to hold:
+# the runtime binary is STATELESS per process, so the whole session lives in the
+# `runtime_snapshot` the caller threads from each response into the next
+# request. A rejection returns no snapshot at all. This test drives that seam
+# for real — compiler -> interpreter -> runtime, one process per command.
+#
+# Reuses examples/03-motor-controller because it is the only shipped example
+# with both a lifecycle=runtime parameter (motion_controller.pid_gain_trim) and
+# a lifecycle=construction one (motor_drive.control_mode) — the pair needed to
+# make an atomic batch jointly invalid. python3 does every JSON shaping and
+# assertion; no jq. E2E impact: regression.
+sh_test(
+    name = "runtime_session_lifecycle_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["runtime_session_lifecycle_test.sh"],
+    data = [
+        "03-motor-controller/00_definitions.json",
+        "03-motor-controller/10_components.json",
+        "//compiler:compiler",
+        "//interpreter:interpreter",
+        "//runtime:runtime",
     ],
     env = {
         "COMPILER_RLOCATION": "$(rootpath //compiler:compiler)",
-        "EXAMPLE_RUN_RLOCATION": "$(rootpath 03-motor-controller/run.sh)",
+        "COMPONENTS_RLOCATION": "$(rootpath 03-motor-controller/10_components.json)",
+        "DEFS_RLOCATION": "$(rootpath 03-motor-controller/00_definitions.json)",
+        "INTERPRETER_RLOCATION": "$(rootpath //interpreter:interpreter)",
+        "RUNTIME_RLOCATION": "$(rootpath //runtime:runtime)",
     },
 )
 
 # Canonical end-to-end test for example 03 on the solver-wired stack
 # (configflux-g3f.4). Drives compiler -> interpreter -> runtime through the
 # real binaries with TWO facet applies, asserts the resolve result against a
-# byte-stable golden, exercises a runtime set/get round-trip, and confirms a
-# constraint-violating runtime write is rejected. Uses python3 (not jq) for
-# JSON shaping/assertions so it has no extra host-PATH dependency.
+# byte-stable golden, and exercises a runtime set/get round-trip. It then
+# confirms BOTH runtime refusal routes on one session: a write to
+# encoder_interface.encoder_mode — the declared handle of the encoder_type
+# facet (configflux-05hm, ADR-0064) — is refused as a policy violation naming
+# the constraint it breaks, while a write to a path that is not a parameter at
+# all is refused earlier, by the compiler's own path validation. Uses python3
+# (not jq) for JSON shaping/assertions so it has no extra host-PATH dependency.
 sh_test(
     name = "e2e_03_motor_controller_test",
     size = "small",
@@ -123,6 +209,40 @@ sh_test(
         "DEFS_RLOCATION": "$(rootpath 03-motor-controller/00_definitions.json)",
         "COMPONENTS_RLOCATION": "$(rootpath 03-motor-controller/10_components.json)",
         "GOLDEN_RLOCATION": "$(rootpath 03-motor-controller/expected/resolve.golden.json)",
+    },
+)
+
+# SOFTWARE BOM EXPORT through the interpreter BINARY (configflux-x5gb.7,
+# ADR-0061 D3). `export-software-bom` is the interpreter's compliance surface,
+# and until now it was exercised only IN PROCESS and only as a misuse case
+# (interpreter/src/tests.rs int_006) - nothing ran the command as a subprocess,
+# so nothing pinned that the payload docs/software-bom-schema.md freezes is what
+# the shipped binary actually emits. 03-motor-controller/run.sh used to say so
+# out loud, punting to the compiler scenario tests; it now points here.
+#
+# Reuses examples/03-motor-controller because it is the only shipped example
+# with artifact-typed parameters, which is what makes a bill of materials
+# non-trivial: its four-artifact CATALOGUE is deliberately larger than the two
+# artifacts this selection BINDS, so the test can prove the BOM lists what
+# shipped rather than what exists. It also spans all three binding phases, so
+# the value_redacted profile has something to withhold AND something to keep.
+# python3 does every JSON shaping and assertion; no jq. E2E impact: smoke.
+sh_test(
+    name = "sbom_export_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["sbom_export_test.sh"],
+    data = [
+        "03-motor-controller/00_definitions.json",
+        "03-motor-controller/10_components.json",
+        "//compiler:compiler",
+        "//interpreter:interpreter",
+    ],
+    env = {
+        "COMPILER_RLOCATION": "$(rootpath //compiler:compiler)",
+        "COMPONENTS_RLOCATION": "$(rootpath 03-motor-controller/10_components.json)",
+        "DEFS_RLOCATION": "$(rootpath 03-motor-controller/00_definitions.json)",
+        "INTERPRETER_RLOCATION": "$(rootpath //interpreter:interpreter)",
     },
 )
 
@@ -318,4 +438,225 @@ sh_test(
         "RESOLVER_RLOCATION": "$(rootpath resolve_environment.sh)",
         "VERIFIER_RLOCATION": "$(rootpath verify_bundle.sh)",
     },
+)
+
+# Parity between `cfx resolve --manifest ... --all` and the reference envelope
+# path (configflux-dkmm.4, ADR-0059 D2/D6/M1). ADR-0059 keeps
+# examples/resolve_environment.sh as the ENVELOPE-PATH ORACLE, so the new
+# in-process matrix must land the same cells, in the same relative places, with
+# byte-identical snapshots; `diff -r` over the two trees must be clean once the
+# exported generated/ files (which only cfx writes) are excluded. Drives the
+# REAL compiler / interpreter / cfx binaries over examples/05-compose-fleet
+# (2 environments x 2 service scopes). The reference resolver needs `jq` on
+# PATH. E2E impact: smoke.
+sh_test(
+    name = "cfx_manifest_parity_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["cfx_manifest_parity_test.sh"],
+    data = [
+        "05-compose-fleet/00_definitions.json",
+        "05-compose-fleet/10_components.json",
+        "05-compose-fleet/environments.json",
+        "resolve_environment.sh",
+        "//cfx:cfx",
+        "//compiler:compiler",
+        "//interpreter:interpreter",
+    ],
+    env = {
+        "CFX_RLOCATION": "$(rootpath //cfx:cfx)",
+        "COMPILER_RLOCATION": "$(rootpath //compiler:compiler)",
+        "COMPONENTS_RLOCATION": "$(rootpath 05-compose-fleet/10_components.json)",
+        "DEFS_RLOCATION": "$(rootpath 05-compose-fleet/00_definitions.json)",
+        "INTERPRETER_RLOCATION": "$(rootpath //interpreter:interpreter)",
+        "MANIFEST_RLOCATION": "$(rootpath 05-compose-fleet/environments.json)",
+        "RESOLVER_RLOCATION": "$(rootpath resolve_environment.sh)",
+    },
+)
+
+# The `cfx diff` review journey — "Reviewing a change before it ships" from
+# docs/service-integration-guide.md (configflux-x5gb.5, ADR-0059 D4, ADR-0061
+# D3). Until this target, `cfx diff` was covered only in process by
+# cfx/src/diff_tests.rs. It compiles TWO models per pack from the shipped
+# examples/05-compose-fleet and examples/00-service-multi-env sources — the
+# second carrying one engineered edit — and drives the REAL cfx binary over
+# them, pinning the cell enumeration and statuses, the change lines, the JSON
+# envelope's summary and per-cell hashes, byte-for-byte determinism, and the
+# 0/1/2 exit contract. python3 does every JSON shaping and assertion; no jq.
+# E2E impact: smoke.
+sh_test(
+    name = "cfx_diff_review_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["cfx_diff_review_test.sh"],
+    data = [
+        "00-service-multi-env/00_definitions.json",
+        "00-service-multi-env/10_components.json",
+        "00-service-multi-env/environments.json",
+        "05-compose-fleet/00_definitions.json",
+        "05-compose-fleet/10_components.json",
+        "05-compose-fleet/environments.json",
+        "//cfx:cfx",
+        "//compiler:compiler",
+    ],
+    env = {
+        "CFX_RLOCATION": "$(rootpath //cfx:cfx)",
+        "COMPILER_RLOCATION": "$(rootpath //compiler:compiler)",
+        "COMPONENTS00_RLOCATION": "$(rootpath 00-service-multi-env/10_components.json)",
+        "COMPONENTS05_RLOCATION": "$(rootpath 05-compose-fleet/10_components.json)",
+        "DEFS00_RLOCATION": "$(rootpath 00-service-multi-env/00_definitions.json)",
+        "DEFS05_RLOCATION": "$(rootpath 05-compose-fleet/00_definitions.json)",
+        "MANIFEST00_RLOCATION": "$(rootpath 00-service-multi-env/environments.json)",
+        "MANIFEST05_RLOCATION": "$(rootpath 05-compose-fleet/environments.json)",
+    },
+)
+
+# Example 06 is the multi-repository composition example (configflux-dkmm.6,
+# extended by configflux-secb.7 for ADR-0057): ONE model composed from chunks
+# kept in FOUR separate repository directories — a shared catalogue of physical
+# containers authored once as data with two bindings over it, plus three
+# services that declare what they `requires` from those bindings, one of which
+# brings a catalogue and a binding of its own. run.sh self-asserts all seven
+# steps: the four-directory compile (which also carries the ADR-0056
+# path-invariance proof — one repository re-checked-out elsewhere yields the
+# identical model_hash — and the dependency-closure rule, a closed subset
+# compiling where a lone repository does not), the 2 environments x 3 service
+# scopes matrix resolve with each service's delivered `requires` block,
+# `cfx options` pruning, three forced conflicts each named by `cfx explain` (the
+# derive table, an `accepts` list, a facet-equality constraint), the
+# double-binding usage error, resolve determinism, and (configflux-p0jz.5, for
+# ADR-0058) the separate-compilation flow: one object per repository, a link
+# that reproduces step 1's package file by file and writes the lockfile, and the
+# two faults only a link can name — an import no linked object declares, and a
+# service carrying the hash of a catalogue object that has since been edited.
+# Depends on the compiler and cfx binaries; uses python3 for JSON shaping. It
+# has no `cue` in its runfiles, which is why step 4c injects the facet-equality
+# constraint into a COPY of the exported sorter chunk instead of re-exporting
+# the CUE — and why step 7b edits a COPY of the exported catalogue chunk to
+# rotate its object hash.
+sh_test(
+    name = "06_catalogue_polyrepo_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["run_example_test.sh"],
+    data = [
+        "06-catalogue-polyrepo/environments.json",
+        "06-catalogue-polyrepo/repos/catalogue/00_catalogue.json",
+        "06-catalogue-polyrepo/repos/compute/10_compute.json",
+        "06-catalogue-polyrepo/repos/sorter/20_sorter.json",
+        "06-catalogue-polyrepo/repos/vision/10_vision.json",
+        "06-catalogue-polyrepo/run.sh",
+        "//cfx:cfx",
+        "//compiler:compiler",
+    ],
+    env = {
+        "CFX_RLOCATION": "$(rootpath //cfx:cfx)",
+        "COMPILER_RLOCATION": "$(rootpath //compiler:compiler)",
+        "EXAMPLE_RUN_RLOCATION": "$(rootpath 06-catalogue-polyrepo/run.sh)",
+    },
+)
+
+# Exercises the reference N-chunk CUE exporter (examples/export_pack.sh) and is
+# the drift guard for example 06's committed JSON. compiler/cue/export_fixtures.sh
+# --check covers the two-file and single-file packs under examples/*/cue; example
+# 06's chunks live under 06-catalogue-polyrepo/repos/*/cue and are deliberately
+# outside that sweep, so their guard is here: a fresh export must be BYTE-identical
+# to the committed files. It also re-exports the two-file example 00 pack and
+# compares canonicalized (jq -S), which is what proves export_pack.sh replaces the
+# documented recipe, and asserts the exit-code contract (2 usage / 1 export). The
+# pinned cue evaluator comes through runfiles (//tools:cue); jq must be on PATH.
+#
+# The data list is shared with export_pack_relocated_test below, which runs this
+# same script over this same data with the package relocated. Sharing the list is
+# what makes "identical assertions, identical inputs, different layout" true by
+# construction rather than by two lists staying in sync.
+_EXPORT_PACK_DATA = [
+    "00-service-multi-env/00_definitions.json",
+    "00-service-multi-env/10_components.json",
+    "00-service-multi-env/cue/00_definitions.cue",
+    "00-service-multi-env/cue/10_components.cue",
+    "06-catalogue-polyrepo/repos/catalogue/00_catalogue.json",
+    "06-catalogue-polyrepo/repos/catalogue/cue/00_catalogue.cue",
+    "06-catalogue-polyrepo/repos/compute/10_compute.json",
+    "06-catalogue-polyrepo/repos/compute/cue/10_compute.cue",
+    "06-catalogue-polyrepo/repos/sorter/20_sorter.json",
+    "06-catalogue-polyrepo/repos/sorter/cue/20_sorter.cue",
+    "06-catalogue-polyrepo/repos/vision/10_vision.json",
+    "06-catalogue-polyrepo/repos/vision/cue/10_vision.cue",
+    "export_pack.sh",
+    "//compiler:cue/schema.cue",
+    "//tools:cue",
+]
+
+sh_test(
+    name = "export_pack_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["export_pack_test.sh"],
+    data = _EXPORT_PACK_DATA,
+    env = {
+        "CUE_RLOCATION": "$(rootpath //tools:cue)",
+        "EXPORTER_RLOCATION": "$(rootpath export_pack.sh)",
+        "SCHEMA_RLOCATION": "$(rootpath //compiler:cue/schema.cue)",
+    },
+)
+
+# Relocation guard for export_pack_test above (configflux-k5gt). This tree is
+# redistributed by copying the package wholesale into another directory, where it
+# becomes a package of its own and its runfiles no longer contain _main/examples.
+# A drift guard that resolves its data against the workspace root passes here and
+# fails in every copy, so this test runs the real export_pack_test.sh inside a
+# synthetic runfiles tree that holds the package at a different path and has no
+# _main/examples at all. It takes the shared data plus export_pack_test.sh, which
+# is the script under test rather than this target's own src; the relocated copy
+# synthesizes its own EXPORTER_RLOCATION, so this target sets none.
+sh_test(
+    name = "export_pack_relocated_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["export_pack_relocated_test.sh"],
+    data = _EXPORT_PACK_DATA + ["export_pack_test.sh"],
+    env = {
+        "CUE_RLOCATION": "$(rootpath //tools:cue)",
+        "SCHEMA_RLOCATION": "$(rootpath //compiler:cue/schema.cue)",
+    },
+)
+
+# configflux-x5gb.10 (ADR-0061 D5): the shipped-tarball conformance runner
+# //tools:run_shipped_examples drives every example's run.sh against the
+# RELEASED binaries, so it needs the whole example corpus reachable as one label
+# from another package. Example 05 additionally resolves
+# ${REPO_ROOT}/examples/{verify_bundle,deploy_guard}.sh, which is why the four
+# reference scripts ride along; `out/` is excluded so a developer's locally-run
+# example can never leak stale output into the runfiles tree.
+filegroup(
+    name = "shipped_runner_inputs",
+    srcs = glob(
+        ["0*/**"],
+        exclude = ["*/out/**"],
+    ) + [
+        "deploy_guard.sh",
+        "export_pack.sh",
+        "resolve_environment.sh",
+        "verify_bundle.sh",
+    ],
+    visibility = ["//tools:__pkg__"],
+)
+
+# configflux-ulbg: the shell/python sources //tools:schema_version_lint_test
+# scans for stale product `schema_version` literals. Bazel globs stop at package
+# boundaries, so each owning package has to hand its own scripts over; the test
+# cross-checks the union against tools/publishignore_manifest.txt and fails when
+# a package is missing rather than skipping it in silence.
+filegroup(
+    name = "schema_version_scan_sources",
+    srcs = glob(
+        [
+            "**/*.py",
+            "**/*.sh",
+        ],
+        # sdk/cpp has no python and validation has no shell; a package holding
+        # only one of the two kinds is normal and must not fail analysis.
+        allow_empty = True,
+    ),
 )

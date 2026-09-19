@@ -1,5 +1,5 @@
 {
-  "format_version": 3,
+  "format_version": 4,
   "chunk_count": 2,
   "source_ids": [
     "scenarios/s1_water_pump/smoke/chunks/00_definitions.toml",

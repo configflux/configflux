@@ -27,12 +27,12 @@
   var TAB_ACTIVE = "flex:1 1 auto; padding:13px 18px; border:none; border-bottom:2px solid var(--accent); background:var(--surface); font-family:'IBM Plex Mono', monospace; font-size:13px; cursor:pointer; color:var(--fg); font-weight:500;";
   var TAB_BASE = "flex:1 1 auto; padding:13px 18px; border:none; border-bottom:2px solid transparent; background:transparent; font-family:'IBM Plex Mono', monospace; font-size:13px; cursor:pointer; color:var(--muted); font-weight:500;";
   function setTab(which) {
-    document.querySelectorAll('[data-panel="source"]').forEach(function (p) { p.hidden = which !== "source"; });
-    document.querySelectorAll('[data-panel="binary"]').forEach(function (p) { p.hidden = which !== "binary"; });
-    var s = document.querySelector('[data-tab="source"]');
-    var b = document.querySelector('[data-tab="binary"]');
-    if (s) s.setAttribute("style", which === "source" ? TAB_ACTIVE : TAB_BASE);
-    if (b) b.setAttribute("style", which === "binary" ? TAB_ACTIVE : TAB_BASE);
+    document.querySelectorAll("[data-panel]").forEach(function (p) {
+      p.hidden = p.getAttribute("data-panel") !== which;
+    });
+    document.querySelectorAll("[data-tab]").forEach(function (t) {
+      t.setAttribute("style", t.getAttribute("data-tab") === which ? TAB_ACTIVE : TAB_BASE);
+    });
   }
 
   // --- copy-to-clipboard for the visible quickstart command ---
@@ -63,9 +63,8 @@
     var a = t.getAttribute("data-action");
     if (a === "toggle-menu") { var m = document.getElementById("mobile-menu"); setMenu(m ? m.hidden : true); }
     else if (a === "close-menu") setMenu(false);
-    else if (a === "tab-source") setTab("source");
-    else if (a === "tab-binary") setTab("binary");
-    else if (a === "copy-source" || a === "copy-binary") copyFrom(t);
+    else if (a.indexOf("tab-") === 0) setTab(a.slice(4));
+    else if (a.indexOf("copy-") === 0) copyFrom(t);
     else if (a === "toggle-concepts") toggleConcepts(t);
   });
 })();

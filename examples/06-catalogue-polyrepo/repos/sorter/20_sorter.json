@@ -1,0 +1,71 @@
+{
+    "package": "sorter_service",
+    "version": "1.0.0",
+    "components": {
+        "sorter_service": {
+            "type": "service",
+            "requires": {
+                "container": "sorter_container",
+                "lanes": "sorter_lanes"
+            },
+            "params": {
+                "lane_width_margin_mm": {
+                    "inherits": "container_dim_mm",
+                    "type": "integer",
+                    "unit": "mm",
+                    "doc": "Clearance held either side of a container on the belt.",
+                    "value": 25,
+                    "lifecycle": "startup",
+                    "access": "integrator"
+                },
+                "divert_delay_ms": {
+                    "type": "integer",
+                    "unit": "ms",
+                    "doc": "Delay between the read point and the diverter firing.",
+                    "value": 120,
+                    "lifecycle": "startup",
+                    "access": "integrator",
+                    "overrides": [
+                        {
+                            "condition": "site == 'factory_b'",
+                            "value": 80
+                        }
+                    ]
+                }
+            }
+        }
+    },
+    "catalogues": {
+        "lane_profile": {
+            "fields": {
+                "lane_count": {
+                    "type": "integer",
+                    "doc": "Parallel lanes on the belt."
+                },
+                "belt_width_mm": {
+                    "type": "integer",
+                    "unit": "mm",
+                    "doc": "Belt width."
+                }
+            },
+            "entries": {
+                "narrow": {
+                    "lane_count": 2,
+                    "belt_width_mm": 400
+                },
+                "wide": {
+                    "lane_count": 4,
+                    "belt_width_mm": 900
+                }
+            },
+            "doc": "The belt profiles this sorter can be built with."
+        }
+    },
+    "bindings": {
+        "sorter_lanes": {
+            "catalogue": "lane_profile",
+            "default": "narrow",
+            "doc": "Which belt profile this sorter is built with."
+        }
+    }
+}

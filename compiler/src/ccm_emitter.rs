@@ -26,7 +26,9 @@ mod var_order;
 // `ccm_emitter::ConditionExpr` without reaching across into the private
 // `conditions` module. Crate-internal only; not part of the public API.
 pub(crate) use crate::conditions::ConditionExpr;
-use crate::conditions::{parse_condition_expr, ConditionPredicate, ConditionPredicateOp};
+use crate::conditions::{
+    expand_facet_comparisons, parse_condition_expr, ConditionPredicate, ConditionPredicateOp,
+};
 // configflux-9pjy.3 / ADR-0039 §7: the compile-time progress signal. The
 // in-crate apply loop reports against `ApplyProgress` at the existing
 // `clear_memos` boundary; `emit_ccm_dir_with_progress` threads the
@@ -105,6 +107,22 @@ pub struct ConditionModel {
     /// NOT rostered (§5.4): a core that reduces to a cardinality clause means the
     /// *model* is over-constrained, not that a user violated a named policy.
     pub cardinality: Vec<String>,
+    /// Declared value domains by facet name, in declared order
+    /// (configflux-secb.2, ADR-0057 §D5).
+    ///
+    /// Present because a facet-to-facet comparison (`a == b`) means a pairwise
+    /// equivalence over `dom(a) ∪ dom(b)`, and `compile_expr` — whose only
+    /// context is a symbol-name-to-variable-index map — cannot derive that.
+    /// [`parse_condition_model`] expands every such node against this map
+    /// before either BDD backend sees the expression, which is also why the
+    /// two backends agree: they fold an identical tree.
+    ///
+    /// Empty for a model that uses no comparisons, and the field is not
+    /// serialized, so it does not enter any hash preimage and changes no
+    /// emitted byte on its own. The FAMA/SPLOT fixture generators, which have
+    /// no `facets` namespace to draw on, leave it empty via
+    /// [`Self::from_clauses`].
+    pub facet_domains: crate::conditions::FacetDomains,
 }
 
 impl ConditionModel {
@@ -122,6 +140,7 @@ impl ConditionModel {
             clauses,
             constraints: Vec::new(),
             cardinality: Vec::new(),
+            facet_domains: crate::conditions::FacetDomains::new(),
         }
     }
 }
@@ -570,7 +589,22 @@ pub(crate) fn parse_condition_model(model: &ConditionModel) -> Result<Vec<Condit
                 .with_context(|| format!("synthesized cardinality clause: {clause}"))?,
         );
     }
-    Ok(exprs)
+    // configflux-secb.2 / ADR-0057 §D5. Rewrite every facet-to-facet
+    // comparison into the `And`/`Or`/`Not`/`Predicate` fragment, against the
+    // declared domains, BEFORE anything downstream looks at the expressions.
+    // Doing it here rather than in `compile_expr` is what lets the variable
+    // order, the partitioner and BOTH backends stay unchanged: they all walk
+    // an ordinary grammar tree, so the two backends fold the same structure
+    // and produce the same canonical BDD by construction. It is also why the
+    // authored text survives — `model.constraints` is not touched, so the
+    // §5.4 roster and `cfx explain` still quote what the author wrote.
+    //
+    // A model with no comparisons walks the same tree and rebuilds it
+    // unchanged, so nothing about its emitted bytes moves.
+    exprs
+        .iter()
+        .map(|expr| expand_facet_comparisons(expr, &model.facet_domains))
+        .collect()
 }
 
 pub(crate) fn parse_clauses(clauses: &[String]) -> Result<Vec<ConditionExpr>> {
@@ -822,6 +856,25 @@ fn compile_expr(
             let amo = amo.unwrap_or(TRUE_REF);
             builder.and(alo, amo)
         }
+        // configflux-secb.2 / ADR-0057 §D5. A facet-to-facet comparison means
+        // a pairwise equivalence over the union of the two DECLARED domains,
+        // and this function cannot see domains — its only context is the
+        // symbol-name-to-variable-index map. `parse_condition_model` expands
+        // every such node into the fragment below it BEFORE lowering, using
+        // `ConditionModel::facet_domains`, which is also what makes the two
+        // BDD backends agree by construction rather than by a second
+        // hand-written fold. Reaching here means an expression bypassed that
+        // expansion; failing loudly beats emitting a silently wrong root.
+        ConditionExpr::FacetCompare { left, op, right } => bail!(
+            "internal: facet comparison '{} {} {}' reached BDD lowering unexpanded; \
+             `parse_condition_model` must expand it against the declared facet domains first",
+            left,
+            match op {
+                ConditionPredicateOp::Eq => "==",
+                ConditionPredicateOp::NotEq => "!=",
+            },
+            right
+        ),
     })
 }
 

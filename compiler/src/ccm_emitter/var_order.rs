@@ -129,6 +129,15 @@ fn collect_predicates_btree(
         ConditionExpr::AnyOf(c) | ConditionExpr::AllOf(c) | ConditionExpr::ExactlyOneOf(c) => {
             c.iter().for_each(|child| collect_predicates_btree(child, out));
         }
+        // configflux-secb.2 / ADR-0057 §D5: unreachable on the emission path.
+        // `ccm_emitter::parse_condition_model` expands every facet-to-facet
+        // comparison into the `And`/`Or`/`Not`/`Predicate` fragment BEFORE any
+        // variable order is computed, so the symbols a comparison contributes
+        // are the declared values of both operands, seen here as ordinary
+        // predicates: `a`'s declared values then `b`'s remaining ones, each on
+        // first sight, in the union order the expansion emits. An unexpanded
+        // node names no `(tag, value)` pair and contributes nothing.
+        ConditionExpr::FacetCompare { .. } => {}
     }
 }
 
@@ -163,6 +172,15 @@ fn collect_predicates_dfs(
         ConditionExpr::AnyOf(c) | ConditionExpr::AllOf(c) | ConditionExpr::ExactlyOneOf(c) => {
             c.iter().for_each(|child| collect_predicates_dfs(child, order, seen));
         }
+        // configflux-secb.2 / ADR-0057 §D5: unreachable on the emission path.
+        // `ccm_emitter::parse_condition_model` expands every facet-to-facet
+        // comparison into the `And`/`Or`/`Not`/`Predicate` fragment BEFORE any
+        // variable order is computed, so the symbols a comparison contributes
+        // are the declared values of both operands, seen here as ordinary
+        // predicates: `a`'s declared values then `b`'s remaining ones, each on
+        // first sight, in the union order the expansion emits. An unexpanded
+        // node names no `(tag, value)` pair and contributes nothing.
+        ConditionExpr::FacetCompare { .. } => {}
     }
 }
 

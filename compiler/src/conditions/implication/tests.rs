@@ -12,7 +12,7 @@
 //! string evaluator (`eval_condition`) and the AST parser
 //! (`parse_condition_expr`).
 
-use super::super::{eval_condition, parse_condition_expr};
+use super::super::{condition_implies_typed, eval_condition, parse_condition_expr};
 use super::*;
 use std::collections::HashMap;
 
@@ -320,4 +320,71 @@ fn typed_implies_matches_sound_matrix_for_conjunctions() {
         &parse("variant == 'light'"),
         &parse("variant != 'heavy'"),
     ));
+}
+
+// ----------------------------------------------------------------------------
+// configflux-secb.2 / ADR-0057 §D5 — facet-to-facet comparisons in the
+// implication engine.
+//
+// The engine builds its truth table from the literals it harvests out of
+// predicates. A comparison names NO literal, so it contributes nothing to that
+// walk, and the table it produces unaided is too small to contain the
+// counterexamples these edges need. Both tests below return the WRONG answer
+// (`true`, an unsound accept) against the unaided construction; each pins one
+// half of the correction. Unsound accepts are the dangerous direction here:
+// `condition_implies_typed` gates `depends_on` subsumption, so a false accept
+// admits a dependency edge whose target is not active wherever its depender is.
+//
+// The correction is sound for a SINGLE compared pair, which is what these
+// cases cover; three mutually compared facets are not representable in this
+// construction (configflux-hd30).
+// ----------------------------------------------------------------------------
+
+#[test]
+fn a_facet_inequality_does_not_entail_a_value_it_never_names() {
+    // `a != b` says the two facets hold different values. It says nothing
+    // about WHICH values, so it cannot entail that either one is 'x'.
+    //
+    // Unaided this answers `true`, for a reason invisible in the answer: the
+    // only values the table enumerates for `a` and `b` are 'x' and ONE shared
+    // "any other value" sentinel, so the two can differ only by one of them
+    // being 'x' — and in every such row the consequent holds. The SECOND
+    // sentinel is what makes "they differ, and neither is 'x'" a row that
+    // exists at all.
+    assert!(
+        !condition_implies_typed(Some("a != b"), Some("a == 'x' || b == 'x'")).unwrap(),
+        "two facets differing does not make either of them 'x'"
+    );
+
+    // The engine must not have bought that by rejecting everything: this edge
+    // is genuinely sound and must still be accepted. If `a == b`, either both
+    // are 'x' (right disjunct) or neither is (left disjunct).
+    assert!(
+        condition_implies_typed(Some("a == b"), Some("a != 'x' || b == 'x'")).unwrap(),
+        "two facets agreeing does entail that they agree about 'x'"
+    );
+}
+
+#[test]
+fn a_facet_equality_does_not_entail_a_value_only_one_operand_names() {
+    // `a == b` says the two agree. They may perfectly well agree ON 'x', so it
+    // cannot entail `a != 'x'`.
+    //
+    // Unaided this answers `true` for a different reason than the case above:
+    // `b` never enters the table at all. The comparison names no literal, so
+    // the value-universe walk learns nothing about `b`, `b` has no domain to
+    // enumerate, the antecedent is false in every row, and the implication
+    // holds vacuously. Unifying the two operands' value universes is what puts
+    // `b` in the table with a domain that can agree with `a`.
+    assert!(
+        !condition_implies_typed(Some("a == b"), Some("a != 'x'")).unwrap(),
+        "two facets agreeing may agree on 'x', so 'a != x' does not follow"
+    );
+
+    // The sound direction over the same pair of facets, so this test also
+    // fails if the fix over-corrects into rejecting every comparison.
+    assert!(
+        condition_implies_typed(Some("a == 'x' && b == 'x'"), Some("a == b")).unwrap(),
+        "pinning both facets to the same value does entail that they agree"
+    );
 }

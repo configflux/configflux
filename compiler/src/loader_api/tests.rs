@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 use super::*;
+// configflux-y2ai: the resolve-hash pre-image moved to the leaf
+// `crate::resolve_hash` module so the loader and the runtime share one copy.
+// `resolve_hash_selection_fields_const_matches_preimage` below still asserts
+// the const against the struct itself, now at its new home.
+use crate::resolve_hash::ResolveHashCanonical;
 use crate::scenario_test_support::unique_temp_path;
 use crate::Compiler;
 use serde_json::Value as JsonValue;
@@ -706,6 +711,7 @@ fn resolve_with_choices(handle: &ModelHandle, choices: &[(&str, &str)]) -> Resol
         model_handle: handle.clone(),
         scope: "all".to_string(),
         selection_state,
+        implied_choices: Default::default(),
     })
 }
 
@@ -748,6 +754,115 @@ fn resolve_rejects_a_selection_that_violates_a_constraint() {
         diagnostic.source_id.as_deref(),
         Some("10_components.json"),
         "ADR-0054 §6: source_id is the chunk that declared the constraint"
+    );
+
+    std::fs::remove_dir_all(&temp_dir).ok();
+}
+
+// ---------------------------------------------------------------------------
+// configflux-secb.2 / ADR-0057 §D5 — resolve-side evaluation of a
+// facet-to-facet equality constraint.
+//
+// Two facets stay independently bindable; one constraint ties them together
+// for this deployment. Three cases decide the contract: bound differently is a
+// violation, bound equal resolves, and ONE side bound is Unknown — which is
+// not a violation (ADR-0054 §2), because a selection that has not yet said
+// what the other facet is has not broken an agreement rule about both.
+// ---------------------------------------------------------------------------
+
+const FACET_EQUALITY_CHUNK: &str = r#"{
+  "package": "p",
+  "version": "1.0",
+  "facets": {
+    "line_container": {"values": ["c1", "c2"], "default": "c1"},
+    "sorter_container": {"values": ["c1", "c2"], "default": "c1"}
+  },
+  "constraints": {
+    "groups_equal": {
+      "condition": "sorter_container == line_container",
+      "doc": "The sorter and the line must draw from the same container."
+    }
+  },
+  "components": {
+    "sorter": {"type": "service", "params": {}}
+  }
+}"#;
+
+#[test]
+fn resolve_rejects_a_selection_that_binds_two_equated_facets_differently() {
+    let (temp_dir, handle) = single_chunk_model("facet-equality-conflict", FACET_EQUALITY_CHUNK);
+    let result = resolve_with_choices(
+        &handle,
+        &[("line_container", "c1"), ("sorter_container", "c2")],
+    );
+
+    assert_eq!(
+        result.status,
+        OperationStatus::Error,
+        "c1 and c2 disagree, so the equality constraint must fail closed"
+    );
+    assert!(result.resolve_hash.is_none());
+    assert!(result.resolved_output.is_none());
+
+    let diagnostic = &result.diagnostics.diagnostics[0];
+    assert_eq!(diagnostic.code, E_SELECTION_CONFLICT);
+    assert_eq!(
+        diagnostic.entity_path.as_deref(),
+        Some("constraints/groups_equal")
+    );
+    assert!(
+        diagnostic.message.contains("groups_equal")
+            && diagnostic
+                .message
+                .contains("sorter_container == line_container"),
+        "the message must name the constraint and quote the AUTHORED condition, \
+         unquoted right-hand side and all: {}",
+        diagnostic.message
+    );
+
+    std::fs::remove_dir_all(&temp_dir).ok();
+}
+
+#[test]
+fn resolve_accepts_a_selection_that_binds_two_equated_facets_alike() {
+    let (temp_dir, handle) = single_chunk_model("facet-equality-agree", FACET_EQUALITY_CHUNK);
+    let result = resolve_with_choices(
+        &handle,
+        &[("line_container", "c2"), ("sorter_container", "c2")],
+    );
+
+    assert_eq!(
+        result.status,
+        OperationStatus::Ok,
+        "both bound to c2 satisfies the equality: {:?}",
+        result.diagnostics.diagnostics
+    );
+    assert!(result.resolve_hash.is_some());
+
+    std::fs::remove_dir_all(&temp_dir).ok();
+}
+
+#[test]
+fn one_unbound_side_of_an_equality_is_unknown_not_a_violation() {
+    // ADR-0054 §2. Only `line_container` is chosen; the other side is left to
+    // its declared default, and nothing about the pair is yet contradicted.
+    let (temp_dir, handle) = single_chunk_model("facet-equality-partial", FACET_EQUALITY_CHUNK);
+    let result = resolve_with_choices(&handle, &[("line_container", "c1")]);
+
+    assert_eq!(
+        result.status,
+        OperationStatus::Ok,
+        "a half-bound equality must not be reported as a violation: {:?}",
+        result.diagnostics.diagnostics
+    );
+    assert!(
+        !result
+            .diagnostics
+            .diagnostics
+            .iter()
+            .any(|d| d.code == E_SELECTION_CONFLICT),
+        "no conflict may be raised: {:?}",
+        result.diagnostics.diagnostics
     );
 
     std::fs::remove_dir_all(&temp_dir).ok();
@@ -885,6 +1000,15 @@ fn a_model_that_declares_no_constraint_resolves_unaffected() {
     // The enforcement is inert for every model authored before ADR-0054: with
     // an empty constraint list there is nothing to evaluate and nothing to
     // reject. S1 is the byte-stability anchor, so this also guards the goldens.
+    //
+    // Every choice is one S1's own `apply_selection` accepts as a delta —
+    // `pump_type=dual` is the value its condition names and its sbom golden
+    // carries. `resolve_with_choices` seals the state directly rather than
+    // building it through `apply_selection`, so a value no surface would accept
+    // could sit here unnoticed; since ADR-0030 Amendment 2 the state's
+    // assignments are screened against the model on the way in, and one would
+    // be refused as `E_SELECTION_INVALID_OPTION` — a true verdict, but not the
+    // one this case is about.
     let (temp_dir, index) = emitted_cmp_dir();
     let handle = model_handle_for(&temp_dir, &index);
     let result = resolve_with_choices(
@@ -892,7 +1016,7 @@ fn a_model_that_declares_no_constraint_resolves_unaffected() {
         &[
             ("cooling_brand", "hydra"),
             ("cooling_model", "x200"),
-            ("pump_type", "centrifugal"),
+            ("pump_type", "dual"),
             ("region", "eu"),
         ],
     );
@@ -1305,6 +1429,957 @@ fn a_model_that_declares_no_constraint_selects_unaffected() {
         OperationStatus::Ok,
         "S1's applies must be unchanged: {:?}",
         applied.diagnostics.diagnostics
+    );
+
+    std::fs::remove_dir_all(&temp_dir).ok();
+}
+
+/// Every non-empty `{string: string}` object in a serialized pre-image, by field
+/// name — the shape a selection-provenance map takes on the wire. Recurses, so a
+/// provenance field nested inside `selection_state` counts the same as a
+/// top-level one. `resolved_output` is skipped BY NAME: it is the resolved
+/// payload, and a model whose output happened to be flat strings is not
+/// provenance about the selection.
+fn collect_string_map_fields(value: &JsonValue, out: &mut BTreeSet<String>) {
+    let Some(object) = value.as_object() else {
+        return;
+    };
+    for (key, child) in object {
+        if key == "resolved_output" {
+            continue;
+        }
+        let Some(entries) = child.as_object() else {
+            continue;
+        };
+        if !entries.is_empty() && entries.values().all(JsonValue::is_string) {
+            out.insert(key.clone());
+        } else {
+            collect_string_map_fields(child, out);
+        }
+    }
+}
+
+/// `RESOLVE_HASH_SELECTION_FIELDS` names what the resolve-hash pre-image folds
+/// in — and nothing but a test can hold it to that, because it is a hand-written
+/// literal sitting next to the struct rather than derived from it.
+///
+/// The const is the SINGLE source of the `E_RUNTIME_HASH_MISMATCH` remediation
+/// hint, so a field added to `ResolveHashCanonical` (or to the nested
+/// `SelectionStateCanonical`) and not added here would put the hint back exactly
+/// where configflux-j2jj found it: naming a narrower set than the hash covers,
+/// pointing users away from the one field they actually dropped. That is the
+/// drift this test exists to fail on.
+///
+/// It serializes a pre-image whose every provenance map is NON-EMPTY, which is
+/// the only way the skip-if-empty rule lets them all appear at once, then
+/// requires the map fields present to be exactly the const's set — and to appear
+/// in the const's order, which is the other half of its claim.
+#[test]
+fn resolve_hash_selection_fields_const_matches_preimage() {
+    let context_tags = BTreeMap::from([("region".to_string(), "eu".to_string())]);
+    let choices = BTreeMap::from([("pump_type".to_string(), "dual".to_string())]);
+    let defaulted = BTreeMap::from([("cooling_brand".to_string(), "hydra".to_string())]);
+    let implied = BTreeMap::from([("cooling_model".to_string(), "x200".to_string())]);
+    // Nested and not all-strings, so the payload could not be mistaken for a
+    // provenance map even without the by-name exclusion above.
+    let resolved_output = serde_json::json!({"components": {"thermal": {"setpoint": 21}}});
+
+    let canonical = ResolveHashCanonical {
+        schema_version: PRODUCT_SCHEMA_VERSION,
+        model_hash: "model",
+        scope: "all",
+        selection_state: SelectionStateCanonical {
+            schema_version: PRODUCT_SCHEMA_VERSION,
+            model_hash: "model",
+            scope: "all",
+            context_tags: &context_tags,
+            choices: &choices,
+        },
+        resolved_output: &resolved_output,
+        defaulted_choices: &defaulted,
+        implied_choices: &implied,
+    };
+    // The SAME serializer `compute_resolve_hash` hashes, so what is asserted
+    // below is the pre-image itself and not a restatement of it.
+    let preimage = serde_json::to_string(&canonical).expect("canonicalize pre-image");
+    let parsed: JsonValue = serde_json::from_str(&preimage).expect("reparse pre-image");
+
+    let mut present: BTreeSet<String> = BTreeSet::new();
+    collect_string_map_fields(&parsed, &mut present);
+    let named: BTreeSet<String> = RESOLVE_HASH_SELECTION_FIELDS
+        .split(", ")
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        present, named,
+        "RESOLVE_HASH_SELECTION_FIELDS names {named:?} but the resolve-hash pre-image folds \
+         in {present:?}. Update the const: E_RUNTIME_HASH_MISMATCH's hint is built from it, \
+         so a stale list sends users to the wrong field."
+    );
+
+    // ...in pre-image order. Each field must appear AFTER the previous one; the
+    // leading quote in the needle keeps `choices` from matching inside
+    // `defaulted_choices`.
+    let mut cursor = 0usize;
+    for field in RESOLVE_HASH_SELECTION_FIELDS.split(", ") {
+        let needle = format!("\"{field}\":");
+        let at = preimage[cursor..]
+            .find(&needle)
+            .map(|offset| cursor + offset)
+            .unwrap_or_else(|| {
+                panic!("pre-image carries no `{field}` after byte {cursor}: {preimage}")
+            });
+        cursor = at + 1;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// configflux-eclx (security screen): the Rule 1 screen on the resolve path must
+// not fail OPEN when the model it reads will not load.
+// ---------------------------------------------------------------------------
+
+/// Rewrite every constraint-bearing chunk of `dir` so its declared constraints
+/// carry an expression the condition parser refuses, and RE-ADDRESS the package
+/// around the edit: each edited chunk is renamed to the hash of its new content
+/// and the index follows it. Returns the handle for the rewritten package.
+///
+/// The re-addressing is what makes this a fixture rather than a corruption.
+/// `verify_index_integrity` recomputes each chunk's content address from the
+/// chunk's own entity maps (ADR-0056 Amendment 1), so an edit that left the
+/// name and the `chunk_hash` field standing would be refused on load by BOTH
+/// loaders and could no longer separate them. What separates them is the
+/// constraint expression itself: `load_selection_constraint_model` parses every
+/// constraint on the way in and refuses, while `load_resolve_model` carries
+/// them verbatim and does not — a divergence that survives only over a package
+/// whose integrity is beyond question.
+fn break_one_constraint_expression(dir: &Path, index: &ir::IrIndex) -> ModelHandle {
+    let mut edited = 0usize;
+    let mut readdressed: Vec<(String, String)> = Vec::new();
+    for chunk_ref in &index.chunks {
+        let path = dir.join(format!("chunk-{}.cfir", chunk_ref.chunk_hash));
+        let mut chunk = load_json(&path);
+        let Some(constraints) = chunk["constraints"].as_object_mut() else {
+            continue;
+        };
+        if constraints.is_empty() {
+            continue;
+        }
+        for (_, constraint) in constraints.iter_mut() {
+            constraint["condition"] = JsonValue::String("(".to_string());
+            edited += 1;
+        }
+        write_json(&path, &chunk);
+
+        let address = ir::chunk_hash_of_chunk(&ir::load_chunk(&path).expect("parse edited chunk"))
+            .expect("recompute the edited chunk's address");
+        chunk["chunk_hash"] = JsonValue::String(address.clone());
+        let new_path = dir.join(format!("chunk-{address}.cfir"));
+        write_json(&new_path, &chunk);
+        if new_path != path {
+            std::fs::remove_file(&path).expect("remove the pre-edit chunk file");
+        }
+        readdressed.push((chunk_ref.chunk_hash.clone(), address));
+    }
+    assert!(edited > 0, "the fixture must declare a constraint to break");
+
+    let index_path = dir.join(ir::CMP_DEFAULT_INDEX_REF);
+    let mut index_json = load_json(&index_path);
+    for (before, after) in &readdressed {
+        let entries = index_json["chunks"]
+            .as_array_mut()
+            .expect("index chunks array");
+        for entry in entries.iter_mut() {
+            if entry["chunk_hash"].as_str() == Some(before.as_str()) {
+                entry["chunk_hash"] = JsonValue::String(after.clone());
+            }
+        }
+        for namespace in [
+            "definition_index",
+            "component_index",
+            "artifact_index",
+            "facet_index",
+            "catalogue_index",
+            "binding_index",
+        ] {
+            let Some(map) = index_json[namespace].as_object_mut() else {
+                continue;
+            };
+            for (_, chunk_hash) in map.iter_mut() {
+                if chunk_hash.as_str() == Some(before.as_str()) {
+                    *chunk_hash = JsonValue::String(after.clone());
+                }
+            }
+        }
+    }
+    // An emitted index orders its chunk vector by `chunk_hash` (ADR-0056 §2),
+    // and re-addressing can move a chunk within that order.
+    index_json["chunks"]
+        .as_array_mut()
+        .expect("index chunks array")
+        .sort_by(|left, right| {
+            left["chunk_hash"]
+                .as_str()
+                .unwrap_or_default()
+                .cmp(right["chunk_hash"].as_str().unwrap_or_default())
+        });
+    write_json(&index_path, &index_json);
+
+    // `config_hash` is a function of the index content, and the addresses in it
+    // just moved.
+    let rewritten = ir::load_index(&index_path).expect("reload rewritten index");
+    index_json["config_hash"] =
+        JsonValue::String(rewritten.compute_config_hash().expect("recompute config_hash"));
+    write_json(&index_path, &index_json);
+
+    model_handle_for(dir, &ir::load_index(&index_path).expect("reload rewritten index"))
+}
+
+/// A `SelectionState` naming a facet the model does not have — the input the
+/// screen exists to refuse, used here only to prove the screen ran at all.
+fn inadmissible_state(handle: &ModelHandle) -> SelectionState {
+    canonical_selection_state(
+        handle.model_hash.clone(),
+        "all".to_string(),
+        BTreeMap::new(),
+        BTreeMap::from([("nosuch".to_string(), "x".to_string())]),
+    )
+    .expect("canonical selection state")
+}
+
+#[test]
+fn the_state_screen_refuses_a_package_only_its_own_loader_rejects() {
+    let (temp_dir, handle) = constraint_model_handle();
+    let index = ir::load_index(&handle.index_ref).expect("load index");
+    let handle = break_one_constraint_expression(&temp_dir, &index);
+
+    // The divergence this case is about, stated as a precondition: one loader
+    // refuses the package and the other accepts it.
+    assert!(
+        load_selection_constraint_model(&handle).is_err(),
+        "the selection loader must refuse an unparseable constraint expression"
+    );
+    assert!(
+        load_resolve_model(&handle).is_ok(),
+        "the resolve loader must still accept it — that is what makes the \
+         screen's silence a fail-open rather than a duplicate report"
+    );
+
+    let screened = screen_selection_state(&handle, &inadmissible_state(&handle));
+
+    assert_eq!(
+        screened.len(),
+        1,
+        "a model the screen cannot read must yield a refusal, not silence: {screened:?}"
+    );
+    assert_eq!(screened[0].code, E_RESOLVE_MODEL_INVALID);
+    assert_eq!(screened[0].severity, DiagnosticSeverity::Error);
+    assert_eq!(
+        screened[0].source_id.as_deref(),
+        Some(handle.index_ref.as_str()),
+        "the refusal must name the package it could not read"
+    );
+
+    std::fs::remove_dir_all(&temp_dir).ok();
+}
+
+#[test]
+fn the_state_screen_leaves_a_package_its_caller_also_rejects_to_the_caller() {
+    let (temp_dir, mut handle) = constraint_model_handle();
+    handle.index_ref = temp_dir
+        .join("no-such-index.json")
+        .to_string_lossy()
+        .into_owned();
+
+    // Both loaders refuse this one, so the screen stays silent and `resolve`
+    // renders its own canonical `E_RESOLVE_MODEL_INVALID` — byte-for-byte what
+    // it rendered before the screen existed.
+    assert!(load_selection_constraint_model(&handle).is_err());
+    assert!(load_resolve_model(&handle).is_err());
+
+    assert!(
+        screen_selection_state(&handle, &inadmissible_state(&handle)).is_empty(),
+        "pre-empting the caller's own load failure would replace a specific \
+         report of the corruption with a second one"
+    );
+
+    let resolved = resolve_from_selection(ResolveFromSelectionRequest {
+        schema_version: PRODUCT_SCHEMA_VERSION,
+        model_handle: handle.clone(),
+        scope: "all".to_string(),
+        selection_state: inadmissible_state(&handle),
+        implied_choices: Default::default(),
+    });
+    assert_eq!(resolved.status, OperationStatus::Error);
+    assert_eq!(resolved.diagnostics.diagnostics.len(), 1);
+    assert_eq!(
+        resolved.diagnostics.diagnostics[0].code,
+        E_RESOLVE_MODEL_INVALID
+    );
+    assert!(
+        resolved.diagnostics.diagnostics[0]
+            .message
+            .contains("Failed to load index"),
+        "the caller's own load failure must still be the one reported: {:?}",
+        resolved.diagnostics.diagnostics[0]
+    );
+
+    std::fs::remove_dir_all(&temp_dir).ok();
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0063 Amendment 1 / configflux-h3rm: the authored-symbol rule on the
+// CONSUMPTION path.
+//
+// Every package below is written by the crate's own writers over a `Config`
+// that never went through `Compiler::add_chunk_auto`, so `link_verify` never
+// saw it — which is the threat exactly: package hashes are self-consistent and
+// unkeyed, and ADR-0063 kept `PRODUCT_SCHEMA_VERSION` at 5, so a package built
+// by a pre-amendment compiler (or rewritten with recomputed hashes) passes
+// every integrity check `open_model` makes. What the crafted symbols reach if
+// nothing re-checks them is `lowering::lowered_root_conjuncts`, whose text
+// `facet_eq_predicate` interpolates BARE and this loader re-parses as a root
+// conjunct — the configflux-mrm6 class, on the consumption side.
+// ---------------------------------------------------------------------------
+
+/// The clean model every crafted fixture below is one edited field away from.
+///
+/// It carries all four symbol classes — declared facet keys with declared
+/// values, a catalogue with entry ids, and a binding whose `derive` table is
+/// what the lowering turns into root conjuncts — so each case can edit exactly
+/// one and leave the rest a working control.
+const H3RM_CLEAN_SOURCE: &str = r#"{
+    "package": "h3rm_loader_symbols",
+    "version": "1.0.0",
+    "facets": {
+        "environment": { "values": ["dev", "prod"], "default": "dev" },
+        "replica_class": { "values": ["single", "pair"], "default": "single" }
+    },
+    "catalogues": {
+        "containers": {
+            "fields": { "length_mm": { "type": "integer" } },
+            "entries": { "c1": { "length_mm": 1200 }, "c2": { "length_mm": 2400 } }
+        }
+    },
+    "bindings": {
+        "line_container": {
+            "catalogue": "containers",
+            "derive": { "environment": { "dev": "c1", "prod": "c2" } }
+        }
+    },
+    "components": {
+        "svc": { "type": "service", "condition": "environment == 'prod'" }
+    }
+}"#;
+
+/// Write a one-chunk package around `config`, BYPASSING ingest validation.
+///
+/// `Compiler::add_chunk_auto` runs `link_verify`, so a crafted symbol cannot
+/// reach a chunk file through it — and a fixture that hand-edited an emitted
+/// chunk would have to re-address the package around the edit anyway
+/// (`break_one_constraint_expression` above is what that costs). Going through
+/// the real writers instead — `ir::IrChunk::from_config`, the `LinkChunk` shape
+/// `link_emit::link_chunks_of` builds, `link_emit::build_package_index` and
+/// `link_emit::write_package` — produces a package whose every hash is correct
+/// by construction, which is precisely the package this rule exists to refuse.
+fn h3rm_package(label: &str, config: &crate::schema::Config) -> (PathBuf, ModelHandle) {
+    let temp_dir = unique_temp_path("cfx-loader-symbol", label);
+    std::fs::create_dir_all(&temp_dir).expect("create temp dir");
+
+    let source_id = "00_model.json";
+    let chunk_hash = ir::chunk_hash_from_config(config).expect("chunk content address");
+    let ir_chunk = ir::IrChunk::from_config(source_id, &chunk_hash, config);
+    let chunks = vec![crate::link_emit::LinkChunk {
+        chunk_hash,
+        source_id: source_id.to_string(),
+        exports: crate::interface_summary::summarize(config, source_id).exports,
+        bytes: ir::chunk_file_bytes(&ir_chunk).expect("canonical chunk bytes"),
+    }];
+    let index = crate::link_emit::build_package_index(&chunks).expect("build package index");
+    // `write_package` runs `ir::verify_index_integrity` itself, so reaching the
+    // end of this helper already proves the fixture is internally consistent.
+    crate::link_emit::write_package(&temp_dir, &chunks, &index).expect("write package");
+
+    let handle = model_handle_for(&temp_dir, &index);
+    (temp_dir, handle)
+}
+
+fn h3rm_clean_config() -> crate::schema::Config {
+    serde_json::from_str(H3RM_CLEAN_SOURCE).expect("parse the clean source")
+}
+
+fn h3rm_empty_state(handle: &ModelHandle) -> SelectionState {
+    canonical_selection_state(
+        handle.model_hash.clone(),
+        "all".to_string(),
+        BTreeMap::new(),
+        BTreeMap::new(),
+    )
+    .expect("canonical selection state")
+}
+
+/// The three public operations R1 names, driven over `handle`, each asserted to
+/// refuse under the code it already reports for a package it cannot read.
+///
+/// One helper rather than three tests because the claim is that all three AGREE
+/// — a per-operation assertion can pass while the other two answer from a model
+/// the loader should never have built.
+fn h3rm_assert_every_operation_refuses(handle: &ModelHandle, symbol: &str) {
+    // `open_model` is integrity-only and MUST still accept: the fixture's whole
+    // point is that nothing about its bytes is wrong.
+    let opened = open_model(OpenModelRequest {
+        schema_version: PRODUCT_SCHEMA_VERSION,
+        cmp_manifest_ref: handle.cmp_manifest_ref.clone(),
+    });
+    assert_eq!(
+        opened.status,
+        OperationStatus::Ok,
+        "the package must pass every integrity check: {:?}",
+        opened.diagnostics.diagnostics
+    );
+
+    let initialized = initialize_selection_state(InitializeSelectionStateRequest {
+        schema_version: PRODUCT_SCHEMA_VERSION,
+        model_handle: handle.clone(),
+        scope: "all".to_string(),
+        context_tags: BTreeMap::new(),
+    });
+    assert_eq!(initialized.status, OperationStatus::Error);
+    let from_initialize = initialized.diagnostics.diagnostics[0].clone();
+    assert_eq!(from_initialize.code, E_LOADER_INDEX_INVALID);
+
+    let options = get_selection_options(GetSelectionOptionsRequest {
+        schema_version: PRODUCT_SCHEMA_VERSION,
+        model_handle: handle.clone(),
+        scope: "all".to_string(),
+        facet: "environment".to_string(),
+        selection_state: h3rm_empty_state(handle),
+        include_pruned_reasons: false,
+    });
+    assert_eq!(options.status, OperationStatus::Error);
+    assert!(
+        options.valid_options.is_empty(),
+        "a refused package must publish no options: {:?}",
+        options.valid_options
+    );
+    let from_options = options.diagnostics.diagnostics[0].clone();
+    assert_eq!(from_options.code, E_LOADER_INDEX_INVALID);
+
+    let resolved = resolve_from_selection(ResolveFromSelectionRequest {
+        schema_version: PRODUCT_SCHEMA_VERSION,
+        model_handle: handle.clone(),
+        scope: "all".to_string(),
+        selection_state: h3rm_empty_state(handle),
+        implied_choices: Default::default(),
+    });
+    assert_eq!(resolved.status, OperationStatus::Error);
+    let from_resolve = resolved.diagnostics.diagnostics[0].clone();
+    // R1: the resolve funnel reports through `E_RESOLVE_MODEL_INVALID`, the code
+    // this operation already uses for a package it cannot read. No new code
+    // enters the frozen registry for this rule.
+    assert_eq!(from_resolve.code, E_RESOLVE_MODEL_INVALID);
+
+    for diagnostic in [&from_initialize, &from_options, &from_resolve] {
+        assert!(
+            diagnostic.message.contains(symbol),
+            "the refusal must name the offending symbol, got: {}",
+            diagnostic.message
+        );
+        assert!(
+            diagnostic.message.contains("must be recompiled"),
+            "the refusal must say the package has to be recompiled, got: {}",
+            diagnostic.message
+        );
+    }
+}
+
+/// The control the cases below are read against: the same shape with every
+/// symbol legal loads and answers exactly as it does today.
+#[test]
+fn h3rm_the_clean_package_still_loads_and_offers_its_options() {
+    let (temp_dir, handle) = h3rm_package("clean", &h3rm_clean_config());
+
+    let options = get_selection_options(GetSelectionOptionsRequest {
+        schema_version: PRODUCT_SCHEMA_VERSION,
+        model_handle: handle.clone(),
+        scope: "all".to_string(),
+        facet: "environment".to_string(),
+        selection_state: h3rm_empty_state(&handle),
+        include_pruned_reasons: false,
+    });
+    assert_eq!(
+        options.status,
+        OperationStatus::Ok,
+        "the clean package must still load: {:?}",
+        options.diagnostics.diagnostics
+    );
+    assert_eq!(
+        options.valid_options,
+        vec!["dev".to_string(), "prod".to_string()]
+    );
+
+    // A binding's own domain is its catalogue's entry ids (ADR-0057 §D3), so
+    // this is the surface a rewritten entry id would move.
+    let bound = get_selection_options(GetSelectionOptionsRequest {
+        schema_version: PRODUCT_SCHEMA_VERSION,
+        model_handle: handle.clone(),
+        scope: "all".to_string(),
+        facet: "line_container".to_string(),
+        selection_state: h3rm_empty_state(&handle),
+        include_pruned_reasons: false,
+    });
+    assert_eq!(bound.status, OperationStatus::Ok);
+    assert_eq!(
+        bound.valid_options,
+        vec!["c1".to_string(), "c2".to_string()]
+    );
+
+    std::fs::remove_dir_all(&temp_dir).ok();
+}
+
+/// T1. A catalogue entry id crafted to close its own literal and continue with
+/// valid grammar — the symbol both `accepts_disjunction` and the `derive`
+/// lowering hand to `facet_eq_predicate`.
+#[test]
+fn h3rm_a_package_declaring_an_injected_catalogue_entry_id_is_refused_at_load() {
+    let mut config = h3rm_clean_config();
+    let injected = "c1' || site == 'x";
+    let catalogue = config
+        .catalogues
+        .get_mut("containers")
+        .expect("the clean catalogue");
+    let entry = catalogue.entries.remove("c1").expect("the clean entry");
+    catalogue.entries.insert(injected.to_string(), entry);
+    let derive = config
+        .bindings
+        .get_mut("line_container")
+        .expect("the clean binding")
+        .derive
+        .as_mut()
+        .expect("the clean derive table");
+    derive
+        .get_mut("environment")
+        .expect("the derive source")
+        .insert("dev".to_string(), injected.to_string());
+
+    let (temp_dir, handle) = h3rm_package("entry-id", &config);
+    h3rm_assert_every_operation_refuses(&handle, injected);
+    std::fs::remove_dir_all(&temp_dir).ok();
+}
+
+/// T2a. configflux-mrm6 case 3 on the consumption path: a declared facet value
+/// holding BOTH quote characters, which no quote choice in
+/// `facet_eq_predicate` can contain.
+#[test]
+fn h3rm_a_package_declaring_an_injected_facet_value_is_refused_at_load() {
+    let mut config = h3rm_clean_config();
+    let injected = "a'b\" || environment == \"zz";
+    config
+        .facets
+        .get_mut("replica_class")
+        .expect("the clean facet")
+        .values
+        .push(injected.to_string());
+
+    let (temp_dir, handle) = h3rm_package("facet-value", &config);
+    h3rm_assert_every_operation_refuses(&handle, injected);
+    std::fs::remove_dir_all(&temp_dir).ok();
+}
+
+/// T2b. configflux-mrm6 case 2 on the consumption path: a facet KEY that
+/// injects a phantom value into the closed `environment` domain.
+#[test]
+fn h3rm_a_package_declaring_an_injected_facet_key_is_refused_at_load() {
+    let mut config = h3rm_clean_config();
+    let injected = "environment != 'zz' || replica_class";
+    let facet = config
+        .facets
+        .remove("replica_class")
+        .expect("the clean facet");
+    config.facets.insert(injected.to_string(), facet);
+    // The binding's derive table names `environment`, not `replica_class`, so
+    // nothing else in the model moves with the rename.
+
+    let (temp_dir, handle) = h3rm_package("facet-key", &config);
+    h3rm_assert_every_operation_refuses(&handle, injected);
+    std::fs::remove_dir_all(&temp_dir).ok();
+}
+
+/// A binding id is refused as a BINDING id, not under the wider facet wording
+/// it would collect from the ADR-0057 §D3 projection, and a catalogue entry id
+/// is refused as an ENTRY id rather than as the facet value that projection
+/// makes of it. The class order inside `validate_symbol_charset` is the whole
+/// content of this case — nothing else can distinguish it.
+#[test]
+fn h3rm_each_refused_symbol_is_named_under_its_narrowest_class() {
+    let mut config = h3rm_clean_config();
+    let injected_binding = "line_container' || environment == 'zz";
+    let binding = config
+        .bindings
+        .remove("line_container")
+        .expect("the clean binding");
+    config
+        .bindings
+        .insert(injected_binding.to_string(), binding);
+
+    let (temp_dir, handle) = h3rm_package("binding-id", &config);
+    let refusal = load_selection_constraint_model(&handle)
+        .expect_err("a binding id violating the rule must be refused")
+        .to_string();
+    assert!(
+        refusal.contains("Binding id") && refusal.contains(injected_binding),
+        "the refusal must name the class and the symbol, got: {refusal}"
+    );
+    std::fs::remove_dir_all(&temp_dir).ok();
+
+    let mut config = h3rm_clean_config();
+    let injected_entry = "c1' || site == 'x";
+    let catalogue = config
+        .catalogues
+        .get_mut("containers")
+        .expect("the clean catalogue");
+    let entry = catalogue.entries.remove("c1").expect("the clean entry");
+    catalogue.entries.insert(injected_entry.to_string(), entry);
+
+    let (temp_dir, handle) = h3rm_package("entry-id-class", &config);
+    let refusal = load_resolve_model(&handle)
+        .expect_err("an entry id violating the rule must be refused")
+        .to_string();
+    assert!(
+        refusal.contains("entry id") && refusal.contains(injected_entry),
+        "an entry id must not be reported as a facet value, got: {refusal}"
+    );
+    std::fs::remove_dir_all(&temp_dir).ok();
+}
+
+// ---------------------------------------------------------------------------
+// configflux-8nhr — how many times one operation reads its package.
+//
+// `resolve_from_selection` builds three models out of one package: the
+// admissibility screen's `SelectionConstraintModel`, the `ResolveModel`, and
+// the closed-facet table's `SelectionConstraintModel` again. Each builder used
+// to read the index and open every chunk file for itself, and each was preceded
+// by an integrity walk that opens every chunk file too — three index reads and
+// six opens of every chunk per resolve, every one of them returning bytes an
+// earlier pass had already read, since a package cannot change under one call.
+//
+// The two pins below fix the count at one index read and one open per chunk, so
+// a future load added back to this path fails a test instead of silently
+// doubling the I/O again.
+// ---------------------------------------------------------------------------
+
+/// Run `op` and report it with the package reads it performed, as
+/// `(value, index reads, chunk opens)`.
+fn measure_package_reads<T>(op: impl FnOnce() -> T) -> (T, u64, u64) {
+    let index_before = ir::INDEX_LOADS.with(|count| count.get());
+    let chunks_before = ir::CHUNK_LOADS.with(|count| count.get());
+    let value = op();
+    (
+        value,
+        ir::INDEX_LOADS.with(|count| count.get()) - index_before,
+        ir::CHUNK_LOADS.with(|count| count.get()) - chunks_before,
+    )
+}
+
+/// The `chunk-*.cfir` files a package directory actually holds.
+///
+/// Read off the filesystem rather than taken from `index.chunks` so the pins
+/// below are stated against the files on disk — the thing being opened — and an
+/// index that disagreed with its own chunk set could not satisfy them by
+/// agreeing with the count it supplied.
+fn chunk_file_count(dir: &Path) -> usize {
+    std::fs::read_dir(dir)
+        .expect("read the package directory")
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with("chunk-") && name.ends_with(".cfir")
+        })
+        .count()
+}
+
+const S1_SMOKE_SCOPE: &str = "component:thermal_control";
+
+fn s1_smoke_context() -> BTreeMap<String, String> {
+    BTreeMap::from([
+        ("cooling_brand".to_string(), "hydra".to_string()),
+        ("cooling_model".to_string(), "x200".to_string()),
+        ("pump_type".to_string(), "dual".to_string()),
+        ("region".to_string(), "us".to_string()),
+    ])
+}
+
+#[test]
+fn one_resolve_reads_the_index_once_and_opens_each_chunk_once() {
+    let (temp_dir, index) = emitted_cmp_dir();
+    let handle = model_handle_for(&temp_dir, &index);
+    let chunk_files = chunk_file_count(&temp_dir);
+    assert_eq!(
+        chunk_files,
+        index.chunks.len(),
+        "the fixture's index must name every chunk file it ships"
+    );
+
+    let state = canonical_selection_state(
+        handle.model_hash.clone(),
+        S1_SMOKE_SCOPE.to_string(),
+        s1_smoke_context(),
+        BTreeMap::new(),
+    )
+    .expect("canonical selection state");
+
+    let (resolved, index_reads, chunk_opens) = measure_package_reads(|| {
+        resolve_from_selection(ResolveFromSelectionRequest {
+            schema_version: PRODUCT_SCHEMA_VERSION,
+            model_handle: handle.clone(),
+            scope: S1_SMOKE_SCOPE.to_string(),
+            selection_state: state,
+            implied_choices: Default::default(),
+        })
+    });
+
+    assert_eq!(
+        resolved.status,
+        OperationStatus::Ok,
+        "the pin must be measured over a resolve that runs the whole path, \
+         including the closed-facet table at the end: {:?}",
+        resolved.diagnostics.diagnostics
+    );
+    assert_eq!(
+        index_reads, 1,
+        "one resolve must read the index exactly once"
+    );
+    assert_eq!(
+        chunk_opens, chunk_files as u64,
+        "one resolve must open each of the {chunk_files} chunk files exactly once"
+    );
+
+    std::fs::remove_dir_all(&temp_dir).ok();
+}
+
+const FOUR_CHUNK_FACETS: &str = r#"{
+  "package": "p",
+  "version": "1.0",
+  "facets": {
+    "environment": {"values": ["dev", "prod"], "default": "dev"},
+    "log_level": {"values": ["info", "debug"], "default": "info"}
+  },
+  "constraints": {
+    "zeta_forbids_debug": {"condition": "environment != 'prod' || log_level != 'debug'"}
+  }
+}"#;
+
+const FOUR_CHUNK_WEBAPP: &str = r#"{
+  "package": "p",
+  "version": "1.0",
+  "components": {
+    "webapp": {"type": "service", "condition": "environment == 'dev'", "params": {}}
+  }
+}"#;
+
+const FOUR_CHUNK_WORKER: &str = r#"{
+  "package": "p",
+  "version": "1.0",
+  "components": {
+    "worker": {"type": "service", "condition": "log_level == 'info'", "params": {}}
+  }
+}"#;
+
+const FOUR_CHUNK_REPORTER: &str = r#"{
+  "package": "p",
+  "version": "1.0",
+  "components": {
+    "reporter": {"type": "service", "params": {}}
+  }
+}"#;
+
+/// A package of FOUR chunks, so the pin scales with the chunk count rather than
+/// holding only for the two-chunk shape every other fixture here has.
+fn four_chunk_model() -> (PathBuf, ModelHandle) {
+    let temp_dir = unique_temp_path("cfx-loader-four-chunk", "fixture");
+    std::fs::create_dir_all(&temp_dir).expect("create temp dir");
+
+    let mut compiler = Compiler::new();
+    for (source_id, chunk) in [
+        ("00_facets.json", FOUR_CHUNK_FACETS),
+        ("10_webapp.json", FOUR_CHUNK_WEBAPP),
+        ("20_worker.json", FOUR_CHUNK_WORKER),
+        ("30_reporter.json", FOUR_CHUNK_REPORTER),
+    ] {
+        compiler
+            .add_chunk_auto(source_id, chunk)
+            .expect("add chunk");
+    }
+    let index = compiler.emit_ir(&temp_dir).expect("emit ir");
+
+    let handle = model_handle_for(&temp_dir, &index);
+    (temp_dir, handle)
+}
+
+#[test]
+fn the_one_open_per_chunk_pin_holds_on_a_four_chunk_package() {
+    let (temp_dir, handle) = four_chunk_model();
+    let chunk_files = chunk_file_count(&temp_dir);
+    assert_eq!(
+        chunk_files, 4,
+        "the fixture must ship four chunk files for this pin to say anything \
+         the two-chunk case does not"
+    );
+
+    let (resolved, index_reads, chunk_opens) = measure_package_reads(|| {
+        resolve_with_choices(&handle, &[("environment", "dev"), ("log_level", "info")])
+    });
+
+    assert_eq!(
+        resolved.status,
+        OperationStatus::Ok,
+        "dev + info breaks no policy: {:?}",
+        resolved.diagnostics.diagnostics
+    );
+    assert_eq!(index_reads, 1, "one resolve reads the index exactly once");
+    assert_eq!(
+        chunk_opens, 4,
+        "one resolve opens each of the four chunk files exactly once"
+    );
+
+    std::fs::remove_dir_all(&temp_dir).ok();
+}
+
+// ---------------------------------------------------------------------------
+// configflux-8nhr — error parity across the shared read.
+//
+// Sharing one read between the funnels can only be invisible if each funnel
+// still refuses in its own words. The three cases below pin the whole message a
+// package fault reaches the caller as: the integrity refusal (whose wording
+// names the funnel, and so is the one the sharing could blur), the missing
+// index, and the package only the selection loader refuses.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn an_integrity_failure_is_reported_in_the_words_of_the_funnel_that_hit_it() {
+    let (temp_dir, handle) = constraint_model_handle();
+    let index = ir::load_index(&handle.index_ref).expect("load index");
+    let missing = temp_dir.join(format!(
+        "chunk-{}.cfir",
+        index.chunks.first().expect("a chunk").chunk_hash
+    ));
+    std::fs::remove_file(&missing).expect("remove one chunk file");
+
+    // The RESOLVE funnel. This is the fault both loaders share, which is the
+    // case the screen stays silent for, so what reaches the envelope is the
+    // refusal the resolve loader rendered — in the resolve model's words.
+    let resolved = resolve_from_selection(ResolveFromSelectionRequest {
+        schema_version: PRODUCT_SCHEMA_VERSION,
+        model_handle: handle.clone(),
+        scope: "all".to_string(),
+        selection_state: inadmissible_state(&handle),
+        implied_choices: Default::default(),
+    });
+    assert_eq!(resolved.status, OperationStatus::Error);
+    assert_eq!(resolved.diagnostics.diagnostics.len(), 1);
+    assert_eq!(
+        resolved.diagnostics.diagnostics[0].code,
+        E_RESOLVE_MODEL_INVALID
+    );
+    assert_eq!(
+        resolved.diagnostics.diagnostics[0].message,
+        format!(
+            "Resolve model integrity check failed for chunk directory '{}'",
+            handle.chunk_set_ref
+        )
+    );
+
+    // The SELECTION funnel over the same package, which must NOT have picked up
+    // the resolve funnel's wording from the read the two now share.
+    let initialized = initialize_selection_state(InitializeSelectionStateRequest {
+        schema_version: PRODUCT_SCHEMA_VERSION,
+        model_handle: handle.clone(),
+        scope: "all".to_string(),
+        context_tags: BTreeMap::new(),
+    });
+    assert_eq!(initialized.status, OperationStatus::Error);
+    assert_eq!(initialized.diagnostics.diagnostics.len(), 1);
+    assert_eq!(
+        initialized.diagnostics.diagnostics[0].code,
+        E_LOADER_INDEX_INVALID
+    );
+    assert_eq!(
+        initialized.diagnostics.diagnostics[0].message,
+        format!(
+            "Selection model integrity check failed for chunk directory '{}'",
+            handle.chunk_set_ref
+        )
+    );
+
+    std::fs::remove_dir_all(&temp_dir).ok();
+}
+
+#[test]
+fn a_package_with_no_index_resolves_to_the_index_read_failure_verbatim() {
+    let (temp_dir, mut handle) = constraint_model_handle();
+    handle.index_ref = temp_dir
+        .join("no-such-index.json")
+        .to_string_lossy()
+        .into_owned();
+
+    let resolved = resolve_from_selection(ResolveFromSelectionRequest {
+        schema_version: PRODUCT_SCHEMA_VERSION,
+        model_handle: handle.clone(),
+        scope: "all".to_string(),
+        selection_state: inadmissible_state(&handle),
+        implied_choices: Default::default(),
+    });
+
+    assert_eq!(resolved.status, OperationStatus::Error);
+    assert_eq!(resolved.diagnostics.diagnostics.len(), 1);
+    assert_eq!(
+        resolved.diagnostics.diagnostics[0].code,
+        E_RESOLVE_MODEL_INVALID
+    );
+    assert_eq!(
+        resolved.diagnostics.diagnostics[0].message,
+        format!("Failed to load index '{}'", handle.index_ref)
+    );
+    assert_eq!(
+        resolved.diagnostics.diagnostics[0].source_id.as_deref(),
+        Some(handle.index_ref.as_str())
+    );
+
+    std::fs::remove_dir_all(&temp_dir).ok();
+}
+
+#[test]
+fn a_package_only_the_selection_loader_refuses_resolves_in_that_loader_s_words() {
+    let (temp_dir, handle) = constraint_model_handle();
+    let index = ir::load_index(&handle.index_ref).expect("load index");
+    let handle = break_one_constraint_expression(&temp_dir, &index);
+
+    let resolved = resolve_from_selection(ResolveFromSelectionRequest {
+        schema_version: PRODUCT_SCHEMA_VERSION,
+        model_handle: handle.clone(),
+        scope: "all".to_string(),
+        selection_state: inadmissible_state(&handle),
+        implied_choices: Default::default(),
+    });
+
+    assert_eq!(resolved.status, OperationStatus::Error);
+    assert_eq!(resolved.diagnostics.diagnostics.len(), 1);
+    let diagnostic = &resolved.diagnostics.diagnostics[0];
+    assert_eq!(diagnostic.code, E_RESOLVE_MODEL_INVALID);
+    // The whole frame is pinned; only the constraint id and the chunk address
+    // it was declared in are left free, and both are the fixture's own.
+    assert!(
+        diagnostic.message.starts_with("Constraint '")
+            && diagnostic.message.contains("' in chunk '")
+            && diagnostic
+                .message
+                .ends_with("' has an unparseable expression '('"),
+        "the selection loader's refusal must reach the caller verbatim, got: {}",
+        diagnostic.message
+    );
+    assert_eq!(
+        diagnostic.source_id.as_deref(),
+        Some(handle.index_ref.as_str())
     );
 
     std::fs::remove_dir_all(&temp_dir).ok();

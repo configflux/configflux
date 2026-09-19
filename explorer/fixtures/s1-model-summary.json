@@ -1,5 +1,5 @@
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "status": "ok",
   "source_digest": "4ca067bd1c1690e617aa5f194efc562bea0a6dddab1ce4ca940929268eb063bc",
   "query": {
@@ -29,7 +29,7 @@
   "error_count": 0,
   "warning_count": 0,
   "diagnostics": {
-    "schema_version": 4,
+    "schema_version": 5,
     "diagnostics": [],
     "error_count": 0,
     "warning_count": 0

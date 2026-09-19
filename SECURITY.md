@@ -60,7 +60,72 @@ Security controls for configflux — a safety-critical Rust compiler for product
 
 ### Threat Model and Residual Risks
 
-A structured threat model, residual risk register, and deployment-side controls will be published as the deployment surface grows.
+A structured threat model, residual risk register, and deployment-side controls will be published as the deployment surface grows. Known residual risks are recorded below as they are identified.
+
+**A request's `ccm_ref` is untrusted input.** The model directory a runtime
+request names is loaded on the caller's behalf, so every file the loader reads
+must be a regular file, every read is bounded by a fixed per-file ceiling, and
+every name a manifest supplies — `partition_manifest` and each `partitions`
+entry — must be a plain filename, so no name taken from a manifest is joined
+outside the model directory. Residual risk: the loader resolves symbolic links,
+so a link inside the model directory that points at a regular file elsewhere on
+the filesystem is still followed and read under the same ceiling.
+
+**The `cfx` input files an operator names are untrusted input.** Both
+`--selection-file` and `--manifest` are refused unless the path is a regular
+file, and each read is bounded by the same fixed ceiling the other binaries
+apply to a request payload. Residual risk: the same symbolic-link note applies
+here — a link at either path that points at a regular file elsewhere is still
+followed and read under that ceiling.
+
+**Runtime snapshots supplied over the CLI are validated at open, not at use.**
+Every runtime operation on the command line is stateless: the caller passes the
+`runtime_snapshot` it is operating on with each request. That snapshot's
+`resolve_hash` is cross-validated against its resolved output when the snapshot
+is created, by `runtime-open`, and is not recomputed again by the individual
+read and write operations that later accept it. A caller who assembles a
+snapshot by hand, without going through `runtime-open`, can therefore present a
+resolved output that its `resolve_hash` does not account for, and the operations
+will act on it. The same is true of `ccm_ref`: `runtime-open` checks that the
+solver model it names is usable and is bound to the snapshot's own `model_hash`,
+but the later read and write operations reload that reference without repeating
+either check, so a hand-assembled snapshot can point them at a different model's
+solver artifact.
+
+What this does and does not mean:
+
+- The `resolve_hash` recompute is a **keyless consistency check over a public
+  recipe**. It establishes that a snapshot's identity matches its contents; it
+  is not, and has never been, an authenticity or authorization control. Treat it
+  as provenance integrity, not as a signature.
+- Long-lived sessions the product opens for you are not exposed to this: the C
+  ABI session handle (`configflux_runtime_session_open`) derives its resident
+  snapshot from what `runtime-open` returned, so every operation it serves runs
+  on a validated snapshot.
+- Producing a snapshot file, or invoking the CLI with a hand-built one, is
+  already a **privileged local act**. The exposure is to a caller who can
+  already run commands and write files as the operator, so this bounds what the
+  open-time check buys rather than describing a privilege escalation.
+- If you consume `resolve_hash` as a configuration identity in your own
+  downstream systems (audit records, fleet inventory, report correlation), bind
+  that identity to a snapshot that came from `runtime-open`, and sign or
+  otherwise authenticate it at the point where it leaves the device.
+
+**Package chunk and `.ccm` payload content is untrusted input.** Opening a
+compiled package re-checks its structural integrity — the manifest, the index,
+and each chunk's content address — and re-checks the authored-symbol charset
+rule over the facet keys, facet values, catalogue ids, catalogue entry ids and
+binding ids it reads, so a symbol crafted to close its own literal inside a
+synthesized condition clause is refused at load rather than silently changing
+which options the model offers. `link` separately re-checks each object header
+against the chunk files it was derived from. Neither re-runs the full
+compile-time verification: dependency rules, requirement resolution and
+constraint semantics are not re-derived from the package. Residual risk: every
+hash in a package is a keyless consistency check over a public recipe, so a
+package whose chunks were rewritten with recomputed hashes is internally
+consistent and can still carry a model the compiler would have refused. Take
+packages from a build you trust, and use the link lockfile (`--lock`) to pin
+that provenance.
 
 ### Routine Security Screening
 

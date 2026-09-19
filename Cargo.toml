@@ -40,6 +40,6 @@ resolver = "2"
 # the ADR-0029 Apache-2.0 relicense; the former solver-only carve-out
 # under ADR-0007 stays dissolved).
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 license = "BUSL-1.1"

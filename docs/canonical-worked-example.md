@@ -43,9 +43,9 @@ including the `model_hash` and a verify report with zero errors:
 ```console
 $ configflux-compiler compile --source compiler/scenarios/s1_water_pump/smoke/cue/00_definitions.json --source compiler/scenarios/s1_water_pump/smoke/cue/10_components.json --out build
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "status": "ok",
-  "model_hash": "a3486458bf58f77d5eb9f7b562aab9d8eaffcacdac1cbe1218c8aa0d4196c57f",
+  "model_hash": "f8a6f2fbc454152033f8b41def9250b3ae1d5cc3fdb7d17938e59ff034e284b7",
   "compiled_model_package_ref": "build/cmp.manifest.json",
   "stats": {
     "source_count": 2,
@@ -55,8 +55,8 @@ $ configflux-compiler compile --source compiler/scenarios/s1_water_pump/smoke/cu
     "artifact_count": 3
   },
   "verify_report": {
-    "schema_version": 4,
-    "model_hash": "a3486458bf58f77d5eb9f7b562aab9d8eaffcacdac1cbe1218c8aa0d4196c57f",
+    "schema_version": 5,
+    "model_hash": "f8a6f2fbc454152033f8b41def9250b3ae1d5cc3fdb7d17938e59ff034e284b7",
     "status": "ok",
     "error_count": 0,
     "warning_count": 0,
@@ -69,13 +69,13 @@ $ configflux-compiler compile --source compiler/scenarios/s1_water_pump/smoke/cu
       }
     ],
     "diagnostics": {
-      "schema_version": 4,
+      "schema_version": 5,
       "diagnostics": [],
       "error_count": 0,
       "warning_count": 0
     }
   },
-  "tool_version": "0.3.0"
+  "tool_version": "0.4.0"
 }
 ```
 
@@ -128,17 +128,19 @@ facet region [open]
 Once every facet you care about is chosen, `cfx resolve` performs
 open → select → resolve → export in a single process. It prints the hash
 lineage — `model_hash`, `selection_state_hash`, `resolve_hash` — and the
-relative path of each exported file, then writes the resolved snapshot under
-`--out`:
+relative path of each exported file, then writes the resolved snapshot
+(`resolve_result.<root>.<selection>.json`) and the exported files under `--out`:
 
 ```console
 $ cfx resolve --model build/cmp.manifest.json --select cooling_brand=hydra --select cooling_model=x200 --select pump_type=dual --select region=eu --out snapshot
-model_hash: a3486458bf58f77d5eb9f7b562aab9d8eaffcacdac1cbe1218c8aa0d4196c57f
-selection_state_hash: 733c9ba87e9544cd9dc29633acc600b3b114fcd76374094b8ef1dcbd7d06bf08
-resolve_hash: 80b7b4d0108a144034a1c05f5f87579a7c3ce1077a6b41f877fac16b22622661
+model_hash: f8a6f2fbc454152033f8b41def9250b3ae1d5cc3fdb7d17938e59ff034e284b7
+selection_state_hash: d8412156643c000a9c90e4a04fb5193f6217302a5cd55ed5bde5c5dda3f43d8c
+resolve_hash: 8eda451da88c4cd7f74cbc80c6aaa1737f4a19bcab446d5fe01d93891c109187
+resolved_output_hash: c2a0142a7698923fdcb3912ae36ca44a9037eaff90b8546c801db7ee8eeb9968
 wrote: generated/config.hpp
 wrote: generated/config_artifact_manifest.json
 wrote: generated/config_build_flags.cmake
+wrote: resolve_result.all.hydra-x200-dual-eu.json
 ```
 
 The `resolve_hash` is the fingerprint of this exact 100% configuration. The
@@ -147,9 +149,12 @@ the same exported bytes.
 
 ## 6) Inspect the resolved snapshot
 
-The exported snapshot is the resolved configuration a build or runtime consumes.
-For the C++ early-binding profile, the resolved parameters are emitted as a
-header:
+`snapshot/resolve_result.all.hydra-x200-dual-eu.json` is the resolved snapshot
+itself, the JSON a Pattern 1 service consumes (see
+`service-integration-guide.md`); the C++ early-binding profile shown below is
+derived from it. The exported snapshot is the resolved configuration a build or
+runtime consumes. For the C++ early-binding profile, the resolved parameters are
+emitted as a header:
 
 ```console
 $ cat snapshot/generated/config.hpp

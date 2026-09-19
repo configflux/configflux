@@ -39,6 +39,7 @@
 #![allow(dead_code)]
 
 use compiler::loader_api::{ConflictingConstraint, ConstraintFacet, ConstraintKind, UnsatCore};
+use compiler::lowering::{describe_attribution, Attribution};
 
 /// Render an unsat core as a deterministic human-readable block (ADR-0031 D5).
 ///
@@ -96,6 +97,17 @@ pub fn render_unsat_core(core: &UnsatCore) -> String {
 /// model-rule wording stands — §5.4 forbids naming a synthesized cardinality
 /// conjunct as if it were authored policy.
 ///
+/// Two constraint ids are not authored at all: the reserved `derive:` and
+/// `accepts:` prefixes ADR-0057 §D4 lowers a binding's `derive` table and a
+/// requirement's `accepts` list to. Printing those as
+/// `blocked by constraint derive:line_container:site=factory_a: site !=
+/// 'factory_a' || line_container == 'c1'` would be truthful and useless — it
+/// names a rule no one wrote, in a form no one authored. So they are rendered
+/// as the AUTHORING construct they came from, decoded by
+/// `compiler::lowering::describe_attribution` (which lives beside the code that
+/// emitted the text, so the two cannot drift). A shape that decoder cannot read
+/// falls through to the generic line rather than being guessed at.
+///
 /// `ModelRule` uses the entry's advisory `summary` gloss (itself a JSON field);
 /// `Selection` names the labeled `{facet}.{option}` pairs directly so the line
 /// echoes the prior choice without relying on the gloss. The "blocked by ..."
@@ -107,9 +119,37 @@ fn render_constraint(constraint: &ConflictingConstraint) -> String {
             format!("  blocked by your earlier choice: {}", facets_joined(&constraint.facets))
         }
         ConstraintKind::ModelRule => match constraint.constraint_id.as_deref() {
-            Some(id) => format!("  blocked by constraint {id}: {}", constraint.summary),
+            Some(id) => render_named_rule(id, &constraint.summary),
             None => format!("  blocked by model rule: {}", constraint.summary),
         },
+    }
+}
+
+/// Render a `ModelRule` clause that carries a constraint id.
+///
+/// The two ADR-0057 §D4 lowerings read as what the author wrote; everything
+/// else — every authored `constraints:` entry, and any lowered conjunct whose
+/// text the decoder does not recognise — keeps the ADR-0054 §5.4 wording.
+fn render_named_rule(id: &str, summary: &str) -> String {
+    match describe_attribution(id, summary) {
+        Some(Attribution::Derive {
+            binding,
+            source,
+            source_value,
+            entry,
+        }) => format!(
+            "  blocked by binding {binding}, derived from {source}: \
+             {source} == '{source_value}' -> '{entry}'"
+        ),
+        Some(Attribution::Accepts {
+            component,
+            slot,
+            entries,
+        }) => format!(
+            "  blocked by requirement {component}.{slot}: accepts {}",
+            entries.join(", ")
+        ),
+        None => format!("  blocked by constraint {id}: {summary}"),
     }
 }
 
@@ -343,6 +383,83 @@ cannot select engine.v8:
         assert!(
             text.contains("blocked by your earlier choice: (unspecified)"),
             "an empty Selection facet list must render a stable placeholder; got:\n{text}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod adr_0057_attribution_tests {
+    use super::*;
+
+    fn model_rule(id: &str, summary: &str) -> ConflictingConstraint {
+        ConflictingConstraint {
+            kind: ConstraintKind::ModelRule,
+            facets: Vec::new(),
+            summary: summary.to_string(),
+            constraint_id: Some(id.to_string()),
+        }
+    }
+
+    /// ADR-0057 §D4: a derive attribution names the binding, the source, and
+    /// the entry the rule forces — not the implication the model asserts.
+    #[test]
+    fn a_derive_attribution_reads_as_the_derive_rule() {
+        assert_eq!(
+            render_constraint(&model_rule(
+                "derive:line_container:site=factory_a",
+                "site != 'factory_a' || line_container == 'c1'",
+            )),
+            "  blocked by binding line_container, derived from site: \
+             site == 'factory_a' -> 'c1'"
+        );
+    }
+
+    /// ADR-0057 §D4: an accepts attribution names the requirement and the list.
+    #[test]
+    fn an_accepts_attribution_reads_as_the_requirement() {
+        assert_eq!(
+            render_constraint(&model_rule(
+                "accepts:compute_service.container",
+                "any_of(line_container == 'c1', line_container == 'c2')",
+            )),
+            "  blocked by requirement compute_service.container: accepts c1, c2"
+        );
+    }
+
+    /// The guard a conditional component adds is not part of what the component
+    /// accepts, and its own literals must not leak into the list.
+    #[test]
+    fn a_guarded_accepts_attribution_reports_only_the_accepted_entries() {
+        assert_eq!(
+            render_constraint(&model_rule(
+                "accepts:edge_service.container",
+                "!(mode == 'x') || line_container == 'c1'",
+            )),
+            "  blocked by requirement edge_service.container: accepts c1"
+        );
+    }
+
+    /// An authored constraint id keeps the ADR-0054 §5.4 wording verbatim —
+    /// the explorer's fixture test reads that exact template out of this file.
+    #[test]
+    fn an_authored_constraint_keeps_the_existing_wording() {
+        assert_eq!(
+            render_constraint(&model_rule(
+                "prod_forbids_debug",
+                "environment != 'prod' || log_level != 'debug'",
+            )),
+            "  blocked by constraint prod_forbids_debug: \
+             environment != 'prod' || log_level != 'debug'"
+        );
+    }
+
+    /// Honest degradation: a lowered id whose text does not have the emitted
+    /// shape falls back rather than inventing an entry list.
+    #[test]
+    fn an_unreadable_lowered_conjunct_falls_back_to_the_generic_line() {
+        assert_eq!(
+            render_constraint(&model_rule("accepts:broken", "nothing quotable")),
+            "  blocked by constraint accepts:broken: nothing quotable"
         );
     }
 }

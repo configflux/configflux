@@ -1,0 +1,42 @@
+{
+    "package": "compute_service",
+    "version": "1.0.0",
+    "components": {
+        "compute_service": {
+            "type": "service",
+            "requires": {
+                "container": {
+                    "binding": "line_container",
+                    "accepts": [
+                        "c1",
+                        "c2"
+                    ]
+                }
+            },
+            "params": {
+                "grid_cell_mm": {
+                    "inherits": "container_dim_mm",
+                    "type": "integer",
+                    "unit": "mm",
+                    "doc": "Edge length of one occupancy-grid cell over the container footprint.",
+                    "value": 50,
+                    "lifecycle": "startup",
+                    "access": "integrator"
+                },
+                "worker_threads": {
+                    "type": "integer",
+                    "doc": "Worker threads the planner runs.",
+                    "value": 4,
+                    "lifecycle": "startup",
+                    "access": "integrator",
+                    "overrides": [
+                        {
+                            "condition": "site == 'factory_b'",
+                            "value": 8
+                        }
+                    ]
+                }
+            }
+        }
+    }
+}

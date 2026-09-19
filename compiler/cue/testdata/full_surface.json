@@ -14,6 +14,7 @@
       "type": "controller",
       "condition": "region == 'us'",
       "depends_on": ["comp_b"],
+      "requires": {"slot_bare": "b_defaulted"},
       "params": {
         "p1": {
           "inherits": "d_int",
@@ -32,9 +33,31 @@
         "p_str": {"inherits": "d_str", "value": "hello"}
       }
     },
-    "comp_b": {"type": "module"}
+    "comp_b": {"type": "module", "requires": {"slot_narrowed": {"binding": "b_derived", "accepts": ["c1", "c2"]}}}
   },
   "artifacts": {
     "art_x": {"name": "art_x", "version": "3.2.0", "hash": "sha256-x", "source": "artifact://x.so", "target": "/opt/x.so", "doc": "driver"}
+  },
+  "facets": {
+    "site": {"values": ["factory_a", "factory_b"], "default": "factory_a", "doc": "deployment site"}
+  },
+  "catalogues": {
+    "containers": {
+      "doc": "one column per declared field type",
+      "fields": {
+        "f_int": {"type": "integer", "unit": "count", "doc": "integer column"},
+        "f_float": {"type": "float", "unit": "ratio"},
+        "f_bool": {"type": "boolean"},
+        "f_str": {"type": "string"}
+      },
+      "entries": {
+        "c1": {"f_int": 800, "f_float": 1.5, "f_bool": true, "f_str": "euro"},
+        "c2": {"f_int": 600, "f_float": 2, "f_bool": false, "f_str": "iso"}
+      }
+    }
+  },
+  "bindings": {
+    "b_derived": {"catalogue": "containers", "derive": {"site": {"factory_a": "c1", "factory_b": "c2"}}, "doc": "derived from the site"},
+    "b_defaulted": {"catalogue": "containers", "default": "c1"}
   }
 }

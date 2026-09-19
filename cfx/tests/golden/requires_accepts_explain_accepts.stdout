@@ -1,0 +1,3 @@
+cannot select line_container.c3:
+  blocked by requirement compute_service.container: accepts c1, c2
+(one minimal explanation; other minimal cores may exist)

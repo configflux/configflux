@@ -12,9 +12,10 @@
 # Steps:
 #   1. Compile the shared model (the CUE sources were exported out-of-band to the
 #      committed *.json; this script never invokes cue).
-#   2. Resolve every environment named in environments.json with `cfx resolve`
-#      (one command per environment) and record each snapshot.
-#   3. Re-resolve every environment a second time and assert the snapshots are
+#   2. Resolve every environment named in environments.json in ONE command —
+#      `cfx resolve --manifest environments.json --all` — and record each
+#      snapshot.
+#   3. Re-resolve the whole manifest a second time and assert the snapshots are
 #      byte-identical — determinism is the contract.
 #   4. Constraint showcase: the prod_forbids_debug constraint is enforced on all
 #      three surfaces — after selecting environment=prod, `cfx options` no longer
@@ -59,21 +60,27 @@ DEFS="${EXAMPLE_DIR}/00_definitions.json"
 COMPONENTS="${EXAMPLE_DIR}/10_components.json"
 MANIFEST="${EXAMPLE_DIR}/environments.json"
 
-# Build a cfx selection file for one named environment from environments.json.
-# The environment entry already carries the scope, context tags, and the facet
-# choices — this is a declarative per-environment config, not a hand-threaded
-# request envelope.
-write_selection() {
-  local env_name="$1" out_file="$2"
-  python3 -c 'import json,sys
-m=json.load(open(sys.argv[1]));e=m["environments"][sys.argv[2]]
-json.dump({"schema_version":4,"model_hash":"","scope":e["scope"],
-          "context_tags":e.get("context_tags",{}),"choices":e["choices"],
-          "selection_state_hash":""},open(sys.argv[3],"w"))' \
-    "${MANIFEST}" "${env_name}" "${out_file}"
+# The resolved snapshot `cfx resolve --manifest --all` writes for ONE named
+# environment: exactly one resolve_result.<root>.<selection>.json under
+# <out>/<environment>/<scope-root>/, beside the generated/ C++ early-binding
+# files. <root> is the scope root and <selection> the environment's choices
+# joined in sorted-facet order, so each environment lands on its own name in
+# its own directory and two targets can never collide.
+snapshot_path() {
+  local env_dir="$1"
+  local -a found
+  shopt -s nullglob
+  found=("${env_dir}"/*/resolve_result.*.json)
+  shopt -u nullglob
+  if [[ ${#found[@]} -ne 1 ]]; then
+    echo "expected exactly one resolve_result.*.json under ${env_dir}, found ${#found[@]}" >&2
+    exit 1
+  fi
+  printf '%s' "${found[0]}"
 }
 
-# Print a one-line summary of a resolved snapshot (a cfx --format json result).
+# Print a one-line summary of a resolved snapshot (the ResolveResult envelope
+# cfx wrote).
 snapshot_summary() {
   python3 -c 'import json,sys
 d=json.load(open(sys.argv[1]))
@@ -127,23 +134,28 @@ ok "compiled -> ${MODEL} (+ sibling ccm/)"
 # ---------------------------------------------------------------------------
 banner "Step 2: Resolve every environment in environments.json with cfx resolve"
 RESOLVED_DIR="${OUT_DIR}/resolved"
-mkdir -p "${RESOLVED_DIR}"
 
-# Enumerate environments in a stable, sorted order for reproducible output.
-mapfile -t ENVIRONMENTS < <(python3 -c 'import json,sys
-for k in sorted(json.load(open(sys.argv[1]))["environments"]): print(k)' "${MANIFEST}")
+# ONE command for the whole manifest. `cfx resolve` reads environments.json
+# directly — the same small JSON file you version-control — and `--all` resolves
+# every environment it names into its own directory, writing each resolved
+# snapshot (resolve_result.<root>.<selection>.json, the JSON this service would
+# read at startup) alongside the generated/ early-binding files. Nothing here
+# desugars the manifest, threads a request envelope, or rebuilds a snapshot from
+# stdout: the manifest is a product input.
+"${CFX}" resolve \
+  --model "${MODEL}" \
+  --manifest "${MANIFEST}" \
+  --all \
+  --out "${RESOLVED_DIR}" \
+  > "${OUT_DIR}/resolve.log"
+
+# The environments are the directories cfx just wrote, in sorted order — the
+# same order cfx processed them in.
+mapfile -t ENVIRONMENTS < <(cd "${RESOLVED_DIR}" && find . -mindepth 1 -maxdepth 1 -type d -printf '%P\n' | sort)
+[[ ${#ENVIRONMENTS[@]} -eq 3 ]] || { echo "expected 3 resolved environments, got ${#ENVIRONMENTS[@]}" >&2; exit 1; }
 
 for env_name in "${ENVIRONMENTS[@]}"; do
-  sel="${OUT_DIR}/.selection.${env_name}.json"
-  write_selection "${env_name}" "${sel}"
-  snap="${RESOLVED_DIR}/${env_name}/snapshot.json"
-  mkdir -p "${RESOLVED_DIR}/${env_name}"
-  "${CFX}" resolve \
-    --model "${MODEL}" \
-    --selection-file "${sel}" \
-    --out "${RESOLVED_DIR}/${env_name}/export" \
-    --format json \
-    > "${snap}"
+  snap="$(snapshot_path "${RESOLVED_DIR}/${env_name}")"
   ok "${env_name}: ${snap}"
   printf "       %s\n" "$(snapshot_summary "${snap}")"
 done
@@ -152,16 +164,24 @@ done
 # Step 3: Determinism — re-resolve and assert byte-identical snapshots
 # ---------------------------------------------------------------------------
 banner "Step 3: Determinism check (re-resolve; snapshots must be byte-identical)"
+RECHECK_DIR="${OUT_DIR}/.recheck"
+rm -rf "${RECHECK_DIR}"
+"${CFX}" resolve \
+  --model "${MODEL}" \
+  --manifest "${MANIFEST}" \
+  --all \
+  --out "${RECHECK_DIR}" \
+  > "${OUT_DIR}/recheck.log"
 for env_name in "${ENVIRONMENTS[@]}"; do
-  sel="${OUT_DIR}/.selection.${env_name}.json"
-  recheck="${OUT_DIR}/.recheck.${env_name}.json"
-  "${CFX}" resolve \
-    --model "${MODEL}" \
-    --selection-file "${sel}" \
-    --out "${OUT_DIR}/.recheck.export.${env_name}" \
-    --format json \
-    > "${recheck}"
-  if ! cmp -s "${RESOLVED_DIR}/${env_name}/snapshot.json" "${recheck}"; then
+  first="$(snapshot_path "${RESOLVED_DIR}/${env_name}")"
+  recheck="$(snapshot_path "${RECHECK_DIR}/${env_name}")"
+  # The NAME is part of the contract too: it is derived from the scope and the
+  # selection, so a differing name would mean a differing target.
+  if [[ "$(basename "${recheck}")" != "$(basename "${first}")" ]]; then
+    echo "determinism: ${env_name} snapshot file name differed between two runs" >&2
+    exit 1
+  fi
+  if ! cmp -s "${first}" "${recheck}"; then
     echo "determinism: ${env_name} snapshot differed between two runs" >&2
     exit 1
   fi
@@ -192,7 +212,7 @@ print("  -> log_level valid options in prod:", opts)' "${OPTS}"
 banner "Step 4b: cfx explain — why prod + log_level=debug is unsatisfiable"
 BAD_SEL="${OUT_DIR}/.selection.prod-debug.json"
 python3 -c 'import json,sys
-json.dump({"schema_version":4,"model_hash":"","scope":"component:webapp",
+json.dump({"schema_version":5,"model_hash":"","scope":"component:webapp",
           "context_tags":{},"choices":{"environment":"prod","log_level":"debug"},
           "selection_state_hash":""},open(sys.argv[1],"w"))' "${BAD_SEL}"
 EXPLAIN_OUT="${OUT_DIR}/explain.prod-debug.txt"
@@ -247,7 +267,8 @@ echo "All outputs are in ${OUT_DIR}/"
 echo ""
 echo "Key things to notice:"
 echo "  - ONE model, THREE named environments (dev, staging, prod) resolved as"
-echo "    selections over that model — three deterministic, hash-pinned snapshots."
+echo "    selections over that model — three deterministic, hash-pinned snapshots,"
+echo "    produced by a single 'cfx resolve --manifest environments.json --all'."
 echo "  - prod hardens the shared defaults (request_timeout_ms 30000 -> 5000,"
 echo "    deploy_tier nonprod -> production); dev and staging keep the defaults"
 echo "    but record their own log_level / replica_class / beta_dashboard choices."

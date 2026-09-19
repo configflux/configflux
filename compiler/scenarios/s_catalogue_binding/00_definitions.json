@@ -1,0 +1,35 @@
+{
+    "package": "s_catalogue_binding",
+    "version": "1.0.0",
+    "definitions": {
+        "frame_width": {
+            "type": "integer",
+            "unit": "mm",
+            "doc": "Width of the frame the service crops to",
+            "lifecycle": "construction",
+            "safety": "q_m",
+            "access": "technician"
+        }
+    },
+    "catalogues": {
+        "containers": {
+            "doc": "The physical containers this plant runs on the line.",
+            "fields": {
+                "height_mm": {"type": "integer", "unit": "mm", "doc": "Internal height"},
+                "width_mm": {"type": "integer", "unit": "mm", "doc": "Internal width"}
+            },
+            "entries": {
+                "c1": {"height_mm": 1000, "width_mm": 800},
+                "c2": {"height_mm": 900, "width_mm": 600},
+                "c3": {"height_mm": 400, "width_mm": 400}
+            }
+        }
+    },
+    "bindings": {
+        "line_container": {
+            "catalogue": "containers",
+            "default": "c2",
+            "doc": "The one container every service on this line draws from. Deliberately defaults to the SECOND entry, so the rendered default is a real assertion rather than an artefact of entry order."
+        }
+    }
+}

@@ -1,20 +1,34 @@
 // SPDX-License-Identifier: BUSL-1.1
 
+// configflux-y2ai: the resolve-hash pre-image and the selection-state pre-image
+// live in the leaf `crate::resolve_hash` module, which `runtime_api` imports
+// too, so the loader's emission and the runtime's recomputation cannot drift
+// apart. `SelectionStateCanonical` is also the whole pre-image of
+// `compute_selection_state_hash` below. `ResolveHashCanonical` itself is
+// reached only by the unit test that holds `RESOLVE_HASH_SELECTION_FIELDS` to
+// it, so that module imports it rather than this one.
+use crate::resolve_hash::SelectionStateCanonical;
+
+/// Re-exported so the public path `compiler::loader_api::RESOLVE_HASH_SELECTION_FIELDS`
+/// is unchanged by the configflux-y2ai consolidation. The const itself belongs
+/// beside the pre-image it describes; see `crate::resolve_hash`.
+pub use crate::resolve_hash::RESOLVE_HASH_SELECTION_FIELDS;
+
 /// registry: cause = the request's schema_version is not the version this build implements; remedy = set schema_version to the version this binary reports, or use a binary built for the version your caller targets
 pub const E_LOADER_UNSUPPORTED_SCHEMA_VERSION: &str = "E_LOADER_UNSUPPORTED_SCHEMA_VERSION";
 /// registry: cause = the compiled model package manifest could not be read or parsed as JSON, so the package cannot be opened; remedy = point the model handle at a manifest produced by a successful compile, and recompile the model if the file is damaged
 pub const E_LOADER_MANIFEST_INVALID: &str = "E_LOADER_MANIFEST_INVALID";
 /// registry: cause = the manifest parses but disagrees with the package it describes: an unsupported manifest version, a mismatched IR format, hash algorithm or model hash, or recorded statistics that do not match the index; remedy = recompile the model to regenerate a self-consistent package, and do not hand-edit a manifest or mix files from separate compilations
 pub const E_LOADER_MANIFEST_INCONSISTENT: &str = "E_LOADER_MANIFEST_INCONSISTENT";
-/// registry: cause = the package index failed to load, its recorded config hash does not match the hash computed from its contents, or a chunk file it names is missing or modified; remedy = restore the complete, unmodified package directory or recompile the model: every chunk file the index names must be present and byte-identical
+/// registry: cause = the package index failed to load, its recorded config hash does not match the hash computed from its contents, a chunk file it names is missing or modified, or the package declares a symbol that violates the authored-symbol rule; remedy = restore the complete, unmodified package directory or recompile the model: every chunk file the index names must be present and byte-identical
 pub const E_LOADER_INDEX_INVALID: &str = "E_LOADER_INDEX_INVALID";
 /// registry: cause = the supplied selection state is not consistent with the open model: its model hash or scope differs, its recorded state hash does not match its contents, or a choice contradicts a context tag; remedy = start from a fresh selection state initialized against the model you opened, and pass it back unmodified between calls
 pub const E_SELECTION_STATE_INVALID: &str = "E_SELECTION_STATE_INVALID";
-/// registry: cause = the requested facet name is blank, or no facet by that name is declared or discovered anywhere in the opened model; remedy = check the name for typos and list the model's facets first; a facet must exist in the compiled model before it can be selected
+/// registry: cause = the requested facet name is blank, or no facet by that name is declared or discovered anywhere in the opened model; resolve raises it the same way for an implied_choices entry naming a facet or binding the model does not declare, and every selection operation raises it for a choice the supplied selection state already carries on such a facet; remedy = check the name for typos and list the model's facets first; a facet must exist in the compiled model before it can be selected
 pub const E_SELECTION_UNKNOWN_FACET: &str = "E_SELECTION_UNKNOWN_FACET";
-/// registry: cause = the facet exists, but the requested option is not a member of that facet's declared domain; remedy = choose one of the options the diagnostic lists, or add the value to the facet's domain in the model source and recompile
+/// registry: cause = the facet exists, but the requested option is not a member of that facet's declared domain; resolve raises it the same way for an implied_choices entry carrying such a value, where a binding's domain is its catalogue's entry ids, and every selection operation raises it for a choice the supplied selection state already carries, or for a context tag on a facet whose options the model declares exhaustively; remedy = choose one of the options the diagnostic lists, or add the value to the facet's domain in the model source and recompile
 pub const E_SELECTION_INVALID_OPTION: &str = "E_SELECTION_INVALID_OPTION";
-/// registry: cause = the choice contradicts something already fixed: an immutable context tag, an earlier selection of the same facet, or a declared constraint the choice would violate; remedy = read the conflict the diagnostic names and drop or change the earlier choice; a constraint violation identifies the rule under an entity path of constraints/<id>
+/// registry: cause = the choice contradicts something already fixed: an immutable context tag, an earlier selection of the same facet, or a declared constraint the choice would violate. Also reported when the supplied selection state is one the solver proves unsatisfiable, whether or not the compiler can see the contradiction for itself; remedy = read the conflict the diagnostic names and drop or change the earlier choice; a constraint violation identifies the rule under an entity path of constraints/<id>; for a refused state, run explain with the same selection to see the minimal conflicting set
 pub const E_SELECTION_CONFLICT: &str = "E_SELECTION_CONFLICT";
 /// registry: cause = the option is valid on its own, but once applied no assignment of the remaining facets satisfies the model; remedy = query the valid options for the facet before choosing, or run explain to see the minimal set of choices that conflict
 pub const E_SELECTION_UNSATISFIABLE: &str = "E_SELECTION_UNSATISFIABLE";
@@ -29,15 +43,23 @@ pub const E_SELECTION_UNSATISFIABLE: &str = "E_SELECTION_UNSATISFIABLE";
 // reference, unloadable artifact, or symbol-less stub). ADR-0030 D1.
 /// registry: cause = selection could not reach a usable solver model: the package's solver-model reference is empty, the artifact will not load, or it carries no symbol table; remedy = recompile the model so a complete solver model is emitted beside the package, and keep the two together whenever the package is copied or moved
 pub const E_SELECTION_SOLVER_MODEL_UNAVAILABLE: &str = "E_SELECTION_SOLVER_MODEL_UNAVAILABLE";
-// The selection surface's internal-fault family (ADR-0030). Emitted when the
-// solver rejects a `select` the legacy engine accepts (engine divergence, D3),
-// or when a solver-owned `options`/`select`/`set-parameter` query faults
-// internally (D4). Both fail closed rather than degrade to legacy.
-/// registry: cause = the solver faulted while adjudicating the request, or rejected a selection the model's own semantics accept; the inputs are not at fault; remedy = this is a defect rather than a usage error: re-run with the same inputs to confirm, then report it with the model package and the exact sequence of selections
+// The selection surface's internal-fault family (ADR-0030), with exactly three
+// meanings as narrowed by Amendment 2 (configflux-eclx): a solver-owned
+// `options`/`select`/`set-parameter` query that faults internally (D4), a
+// conflict the solver reports without a labeled core (ADR-0031 D3), and a
+// `.ccm` that cannot hold a value the model sources DECLARE for a closed facet
+// (Amendment 2 Rule 2's skew). All fail closed rather than degrade to legacy.
+//
+// It is NO LONGER what `select` reports when the two engines merely disagree.
+// D3 assumed two complete engines over one formula; after ADR-0057 the
+// compiler's check is three-valued and `Unknown` is never a violation
+// (ADR-0054 §2), so over an unbound derive-only binding it legitimately accepts
+// what the total BDD refuses. That case is now `E_SELECTION_CONFLICT`.
+/// registry: cause = one of exactly three internal faults, none of them a usage error: the solver faulted while adjudicating the request, it reported a conflict without producing the minimal conflicting set, or the compiled model does not carry a value the model sources declare for a closed facet, which the message names; remedy = re-run with the same inputs to confirm. The third case is a stale compiled model and is fixed by recompiling; the other two are defects, to be reported with the model package and the exact sequence of selections
 pub const E_SELECTION_ENGINE_DIVERGENCE: &str = "E_SELECTION_ENGINE_DIVERGENCE";
 /// registry: cause = the scope selector could not be parsed, or names a form the resolver does not recognize; remedy = use a supported selector such as component:<id>, platform:<id>, platform:all, or all
 pub const E_RESOLVE_SCOPE_INVALID: &str = "E_RESOLVE_SCOPE_INVALID";
-/// registry: cause = the model could not be loaded for resolution, or a declared constraint carries an expression the resolver cannot parse, so resolution fails closed rather than skipping the rule; remedy = recompile the model with the current toolchain, and correct any constraint expression the diagnostic names
+/// registry: cause = the model could not be loaded for resolution, a declared constraint carries an expression the resolver cannot parse, or the package declares a symbol that violates the authored-symbol rule, so resolution fails closed rather than skipping the rule; remedy = recompile the model with the current toolchain, and correct any constraint expression the diagnostic names
 pub const E_RESOLVE_MODEL_INVALID: &str = "E_RESOLVE_MODEL_INVALID";
 /// registry: cause = an active condition references a facet or tag that nothing in the selection binds, so the condition cannot be evaluated; remedy = supply the missing facet as an explicit choice or as a context tag before resolving
 pub const E_RESOLVE_CONTEXT_UNSATISFIED: &str = "E_RESOLVE_CONTEXT_UNSATISFIED";
@@ -47,7 +69,7 @@ pub const E_RESOLVE_CONTEXT_UNSATISFIED: &str = "E_RESOLVE_CONTEXT_UNSATISFIED";
 // the facet is bound, so this is a valid-input-but-underspecified USAGE error
 // (cfx exit 2 per ADR-0042), and its message names the facet and its declared
 // domain instead of the generic "unsatisfiable" hint.
-/// registry: cause = a declared facet with no default is left unbound while an active condition requires it, so the model is satisfiable but underspecified; remedy = bind the facet the diagnostic names to one of the values in its reported domain, or give that facet a default in the model source
+/// registry: cause = a declared facet with no default is left unbound while an active condition needs it, or while a component in the resolved closure requires the binding it names, so the model is satisfiable but underspecified; remedy = bind the facet the diagnostic names to one of the values in its reported domain, or give that facet a default or a derive table in the model source; when the message lists requiring components, every one of them was waiting on the same binding
 pub const E_RESOLVE_FACET_UNBOUND: &str = "E_RESOLVE_FACET_UNBOUND";
 /// registry: cause = resolution failed for a reason outside the scope and context families, or the resolved output could not be canonically serialized for hashing; remedy = read the wrapped message for the underlying cause; report a serialization failure with the model package, since deterministic hashing must succeed
 pub const E_RESOLVE_FAILED: &str = "E_RESOLVE_FAILED";
@@ -308,6 +330,18 @@ pub struct ResolveFromSelectionRequest {
     pub model_handle: ModelHandle,
     pub scope: String,
     pub selection_state: SelectionState,
+    // ADR-0057 §D6: facets the SOLVER determined the constraints already decide,
+    // supplied by `session_compose::resolve` — the one seam permitted to consult
+    // the solver (ADR-0003 §2). The compiler seeds the tag environment in the
+    // order declared defaults, implied, context tags, choices, so this sits
+    // ABOVE a default and BELOW anything the user actually stated.
+    //
+    // `#[serde(default)]` keeps every pre-ADR-0057 request valid, and a
+    // compiler-direct caller that passes nothing gets today's behavior exactly —
+    // which is what lets the resolver stay solver-free while still honoring an
+    // inference it did not make.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub implied_choices: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -319,6 +353,17 @@ pub struct ResolveResult {
     pub selection_state_hash: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resolve_hash: Option<String>,
+    // ADR-0059 D3: the identity of the DELIVERED PAYLOAD alone. `resolve_hash`
+    // folds `model_hash` into its pre-image, so it rotates on any model edit —
+    // including one that leaves the bytes a service receives byte-identical.
+    // This hash covers `{schema_version, scope, resolved_output}` and nothing
+    // else, which is what makes "did my change touch this deployment"
+    // answerable by hash comparison. Declared HERE, immediately after
+    // `resolve_hash`, so the two lineage fields serialize side by side.
+    // Present iff `resolved_output` is present; additive and outside every
+    // existing pre-image, so no `schema_version` bump (ADR-0059 D3, M3).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_output_hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resolved_output: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -333,6 +378,45 @@ pub struct ResolveResult {
     // `resolve_hash` pre-image is byte-unchanged by this feature.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub defaulted_choices: BTreeMap<String, String>,
+    // ADR-0057 §D6: provenance for the facets the SOLVER determined the
+    // constraints already decide — the facet's domain had collapsed to a single
+    // value once the user's tags and choices were applied. Declared immediately
+    // after `defaulted_choices` because the two are the resolve-time provenance
+    // PAIR: together they answer "where did this facet's value come from" for
+    // every facet the user did not state. A facet recorded here is NEVER also
+    // recorded in `defaulted_choices` — the model had an opinion, so the default
+    // never applied.
+    //
+    // Folded into `ResolveHashCanonical` with the same skip-if-empty rule
+    // `defaulted_choices` carries, and for the same reason: it is provenance
+    // about THIS resolve's selection, so two resolves that differ only in what
+    // the model forced must not collide. Skip-if-empty keeps every model where
+    // nothing is implied byte-identical.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub implied_choices: BTreeMap<String, String>,
+    // ADR-0060 §6 route (a): the model's CLOSED facet declarations, recorded
+    // here because the resolver is the last party that holds a `ModelHandle`.
+    // A device carries a `.ccm` and a `resolve.result.json`, never the chunk
+    // set, so this envelope is the ONLY channel by which closed-ness reaches
+    // the runtime — where it lets an explain/rejection core that mentions a
+    // closed facet only negatively still name the constraint it breaks
+    // (configflux-pt6v, configflux-tkwt). Declared immediately AFTER the two
+    // resolve-time provenance maps (`defaulted_choices` and, since ADR-0057 §D6,
+    // `implied_choices`) and deliberately not between them: it is not one of
+    // them. ADR-0060's own text called it a third "resolve-time provenance
+    // field" in its migration list while arguing the opposite everywhere else;
+    // the paragraph below is the operative reading (configflux-secb.3).
+    // Skip-if-empty keeps every facet-free model's envelope byte-identical.
+    //
+    // NOT a lineage field, and it MUST NOT be folded into
+    // `ResolveHashCanonical`: unlike `defaulted_choices` it says nothing about
+    // the user's selection, only about static declarations `model_hash`
+    // already covers. Folding it in would rotate `resolve_hash` on every model
+    // with a closed facet — the hard stop ADR-0060 is required to hold. It is a
+    // sibling of both pre-images and a member of neither, exactly as ADR-0059
+    // D3 framed `resolved_output_hash`.
+    #[serde(default, skip_serializing_if = "ClosedFacetDomains::is_empty")]
+    pub closed_facet_domains: ClosedFacetDomains,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub resolved_component_dependencies: BTreeMap<String, BTreeMap<String, Vec<String>>>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -513,38 +597,23 @@ pub struct ExportSoftwareBomResult {
     pub tool_version: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-struct SelectionStateCanonical<'a> {
+/// ADR-0059 D3 pre-image for `resolved_output_hash`. Field order is the
+/// contract and is asserted by `resolved_output_hash_preimage_is_pinned`.
+///
+/// It DELIBERATELY excludes `model_hash`, `selection_state`, `context_tags`,
+/// `choices`, and `defaulted_choices`. That exclusion is the entire point: it
+/// identifies the bytes a service receives and nothing else, which is the
+/// question `resolve_hash` structurally cannot answer. Two resolves of two
+/// DIFFERENT models that deliver the same payload agree here and differ there.
+///
+/// Every field is mandatory — there is no skip-if-empty escape hatch — because
+/// unlike `ResolveHashCanonical` this pre-image has no pre-existing pinned
+/// literals to keep byte-stable.
+#[derive(Debug, Serialize)]
+struct ResolvedOutputHashCanonical<'a> {
     schema_version: u32,
-    model_hash: &'a str,
     scope: &'a str,
-    context_tags: &'a BTreeMap<String, String>,
-    choices: &'a BTreeMap<String, String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct ResolveHashCanonical<'a> {
-    schema_version: u32,
-    model_hash: &'a str,
-    scope: &'a str,
-    selection_state: SelectionStateCanonical<'a>,
     resolved_output: &'a serde_json::Value,
-    // ADR-0047 §5: fold the auto-bound-default provenance into the resolve-hash
-    // pre-image with the SAME skip-if-empty rule the field carries on
-    // `ResolveResult`. Appended LAST and omitted when empty, so a facet-free
-    // model's pre-image bytes are unchanged by this feature. `SelectionState`
-    // (pure user input) is deliberately untouched — the default is a
-    // resolve-time act, recorded here, not a mutation of the user's selection.
-    #[serde(skip_serializing_if = "ref_btreemap_is_empty")]
-    defaulted_choices: &'a BTreeMap<String, String>,
-}
-
-/// `skip_serializing_if` predicate for a borrowed `&BTreeMap` field: serde hands
-/// the closure `&(&BTreeMap)`, so the double reference auto-derefs to the map's
-/// own `is_empty`. Used to keep the resolve-hash pre-image byte-identical for
-/// facet-free models (ADR-0047 §5 skip-if-empty invariant).
-fn ref_btreemap_is_empty(map: &&BTreeMap<String, String>) -> bool {
-    map.is_empty()
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -704,8 +773,26 @@ struct ResolveModel {
     config: crate::schema::Config,
     /// Constraint id → the `source_id` of the chunk that declared it. Total
     /// over `config.constraints` (ingest rejects duplicate ids across chunks,
-    /// so the mapping is a function).
+    /// so the mapping is a function), and over `lowered_conjuncts` — where the
+    /// declaring chunk is the one that declared the binding or the component
+    /// the conjunct came from.
     constraint_sources: BTreeMap<String, String>,
+    /// The ADR-0057 §D4 lowered root conjuncts — `(attribution_id, condition)`
+    /// — in the emitter's fold order: `derive:` conjuncts first, then
+    /// `accepts:`.
+    ///
+    /// Beside `config`, not inside `config.constraints`, for the same reason
+    /// `constraint_sources` is: `Config` is the AUTHORED shape a user writes,
+    /// and `derive`/`accepts` are authored on a binding and a component. Mixing
+    /// synthesized entries into the authored map would make every reader of
+    /// `config.constraints` — the snapshot, the inspect surface, a future
+    /// round-trip — report rules nobody wrote under that namespace.
+    ///
+    /// Evaluated by `resolve_ops::evaluate_constraints` after the authored
+    /// constraints, so a resolve rejects on exactly the conjuncts the `.ccm`
+    /// asserts and names them by the same ids `cfx explain` does. Empty for
+    /// every model that declares no `derive` table and no `accepts` list.
+    lowered_conjuncts: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

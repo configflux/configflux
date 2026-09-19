@@ -54,6 +54,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -354,6 +355,78 @@ pub(crate) fn resolve_ccm_dir(path: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Per-file ceiling for every file on the CCM load path.
+///
+/// The model directory a runtime-open request names (`ccm_ref`, carried
+/// inside the request payload) is untrusted input, so the reads below
+/// are disciplined the same way the two CLI transports discipline a
+/// `--request-file` (configflux-mtmi): settle the file TYPE before
+/// opening the path, then read through a capped reader.
+///
+/// The file-type check is what closes the unbounded-stream vector — a
+/// FIFO, a device or a procfs entry reports a size that understates its
+/// stream, so a size check alone never fires on them. The cap is the
+/// second check so that neither stands alone: a regular file can grow
+/// between the `stat` and the read.
+///
+/// 1 GiB is a sanity ceiling far above any artifact the emitter writes
+/// (a node record is `NODE_RECORD_BYTES` = 16 bytes, so this admits a
+/// ~67M-node partition), not a tuning knob. It is deliberately not
+/// configurable: a bound an operator can raise is a bound an attacker
+/// can ask them to raise.
+pub(crate) const CCM_FILE_SIZE_LIMIT_BYTES: usize = 1 << 30;
+
+/// Read one file on the CCM load path, refusing anything that is not a
+/// regular file before the path is opened and capping the read at
+/// `CCM_FILE_SIZE_LIMIT_BYTES`.
+///
+/// Every read of the on-disk CCM goes through here: the top-level
+/// manifest and the partition manifest (`ccm_multi_part`), and each
+/// partition's manifest, symbols and BDD blob (`load_ccm_from_dir`).
+///
+/// `fs::metadata` FOLLOWS symlinks, deliberately: a symlink to a
+/// regular file inside the model directory is a legitimate layout and
+/// stays accepted, while a symlink to `/dev/zero` is refused as the
+/// character device it resolves to. There is no `lstat` here, because
+/// the link itself is not what gets read.
+///
+/// An ordinary I/O failure keeps the message shape the callers have
+/// always produced (`read <path>: <io error>`), so only the two
+/// refusals below are new text.
+pub(crate) fn read_ccm_file(path: &Path) -> Result<Vec<u8>, ParseError> {
+    let io_err = |e: std::io::Error| ParseError::Io(format!("read {}: {e}", path.display()));
+    let too_large = || {
+        ParseError::Io(format!(
+            "read {}: exceeds {} bytes",
+            path.display(),
+            CCM_FILE_SIZE_LIMIT_BYTES
+        ))
+    };
+
+    let metadata = fs::metadata(path).map_err(io_err)?;
+    if !metadata.file_type().is_file() {
+        return Err(ParseError::Io(format!(
+            "read {}: not a regular file",
+            path.display()
+        )));
+    }
+    if metadata.len() > CCM_FILE_SIZE_LIMIT_BYTES as u64 {
+        return Err(too_large());
+    }
+
+    let file = fs::File::open(path).map_err(io_err)?;
+    let mut bytes = Vec::new();
+    // Stopping one byte PAST the bound is what lets the check below
+    // tell a file sitting exactly on the bound from one that exceeds it.
+    file.take(CCM_FILE_SIZE_LIMIT_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(io_err)?;
+    if bytes.len() > CCM_FILE_SIZE_LIMIT_BYTES {
+        return Err(too_large());
+    }
+    Ok(bytes)
+}
+
 /// Parse the full three-file CCM from a directory. The directory must
 /// contain `ccm.manifest.json`, `ccm.symbols.json`, and `ccm.bdd.bin`
 /// per ADR-0005 §1.
@@ -374,12 +447,9 @@ pub(crate) fn load_ccm_from_dir(dir: &Path) -> Result<ParsedCcm, ParseError> {
     let symbols_path = dir.join("ccm.symbols.json");
     let bdd_path = dir.join("ccm.bdd.bin");
 
-    let manifest_bytes = fs::read(&manifest_path)
-        .map_err(|e| ParseError::Io(format!("read {}: {e}", manifest_path.display())))?;
-    let symbols_bytes = fs::read(&symbols_path)
-        .map_err(|e| ParseError::Io(format!("read {}: {e}", symbols_path.display())))?;
-    let bdd_bytes = fs::read(&bdd_path)
-        .map_err(|e| ParseError::Io(format!("read {}: {e}", bdd_path.display())))?;
+    let manifest_bytes = read_ccm_file(&manifest_path)?;
+    let symbols_bytes = read_ccm_file(&symbols_path)?;
+    let bdd_bytes = read_ccm_file(&bdd_path)?;
 
     // Step 1-4: parse and validate manifest.
     let manifest = parse_manifest(&manifest_bytes)?;
@@ -939,6 +1009,8 @@ pub(crate) fn compute_top_level_ccm_hash(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn hex_round_trip_accepts_lowercase_only() {
@@ -1127,5 +1199,159 @@ mod tests {
         let s = parse_symbols(bad.as_bytes()).expect("bad symbols parses");
         let err = verify_symbols_consistency(&s, 2).unwrap_err();
         assert!(matches!(err, ParseError::ManifestParse(_)));
+    }
+
+    /// Per-process monotonic discriminator for temp-dir names, mirroring
+    /// the sibling helper in `ccm_multi_part`'s test module
+    /// (configflux-rvpb): `fetch_add` hands out a value at most once per
+    /// process, so two names built from it can never be equal; `nanos`
+    /// is a triage aid only. The leaf is created with `create_dir`, not
+    /// `create_dir_all`, so a residual collision fails loudly instead of
+    /// silently sharing a tree.
+    static TEMP_DIR_SEQ: AtomicU64 = AtomicU64::new(0);
+
+    fn tempdir_for(label: &str) -> PathBuf {
+        let seq = TEMP_DIR_SEQ.fetch_add(1, Ordering::Relaxed);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|since_epoch| since_epoch.as_nanos())
+            .unwrap_or(0);
+        let base = std::env::temp_dir().join(format!(
+            "configflux-21g0-unit-{label}-{}-{seq}-{nanos}",
+            std::process::id()
+        ));
+        fs::create_dir(&base).expect("mkdir tempdir");
+        base
+    }
+
+    /// `/dev/zero` is the concrete unbounded-stream case. A sandbox
+    /// without it cannot exercise these tests, and a silent pass would
+    /// be a coverage hole, so the skip is loud.
+    fn dev_zero_is_a_device() -> bool {
+        match fs::metadata("/dev/zero") {
+            Ok(meta) => !meta.file_type().is_file(),
+            Err(_) => false,
+        }
+    }
+
+    #[test]
+    fn ccm_file_size_limit_is_one_gib() {
+        // Pin the bound against an accidental edit. It is a sanity
+        // ceiling, not a tuning knob (see the constant's own doc), and
+        // moving it is a review event.
+        assert_eq!(CCM_FILE_SIZE_LIMIT_BYTES, 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn read_ccm_file_reads_a_regular_file() {
+        let path = tempdir_for("regular").join("ccm.manifest.json");
+        fs::write(&path, b"{\"schema_version\":2}").expect("write");
+        assert_eq!(
+            read_ccm_file(&path).expect("a regular file is readable"),
+            b"{\"schema_version\":2}"
+        );
+    }
+
+    #[test]
+    fn read_ccm_file_refuses_a_directory() {
+        // The `partition_manifest: ""` case used to land here: an empty
+        // value joins to the model directory itself.
+        let dir = tempdir_for("directory");
+        match read_ccm_file(&dir).unwrap_err() {
+            ParseError::Io(msg) => assert!(msg.contains("not a regular file"), "got {msg}"),
+            other => panic!("expected Io, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_ccm_file_follows_a_symlink_to_a_regular_file() {
+        // `fs::metadata` follows symlinks deliberately: a link to a
+        // regular file inside the model directory is a legitimate
+        // layout and must keep working. There is no `lstat` here.
+        let base = tempdir_for("symlink_ok");
+        let target = base.join("ccm.symbols.json");
+        fs::write(&target, b"{}").expect("write target");
+        let link = base.join("link.json");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+        assert_eq!(read_ccm_file(&link).expect("a link to a file is readable"), b"{}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_ccm_file_refuses_a_symlink_to_a_character_device() {
+        if !dev_zero_is_a_device() {
+            eprintln!("[skip] /dev/zero unavailable; the device case did not run");
+            return;
+        }
+        let link = tempdir_for("symlink_dev").join("ccm.symbols.json");
+        std::os::unix::fs::symlink("/dev/zero", &link).expect("symlink /dev/zero");
+        // Reaching the assertion at all is half the point: before
+        // configflux-21g0 this read the device until the process ran out
+        // of address space.
+        match read_ccm_file(&link).unwrap_err() {
+            ParseError::Io(msg) => assert!(msg.contains("not a regular file"), "got {msg}"),
+            other => panic!("expected Io, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_ccm_file_refuses_an_oversized_regular_file() {
+        let path = tempdir_for("oversize").join("ccm.bdd.bin");
+        let file = fs::File::create(&path).expect("create");
+        // A SPARSE file: `set_len` records the length without writing a
+        // byte, so the recorded-size refusal is exercised without
+        // putting a gigabyte on disk or in memory.
+        if file.set_len(CCM_FILE_SIZE_LIMIT_BYTES as u64 + 1).is_err() {
+            eprintln!("[skip] no sparse-file support here; the size case did not run");
+            return;
+        }
+        drop(file);
+        let outcome = read_ccm_file(&path);
+        let _ = fs::remove_file(&path);
+        match outcome.unwrap_err() {
+            ParseError::Io(msg) => {
+                assert!(msg.contains("exceeds"), "got {msg}");
+                assert!(
+                    msg.contains(&CCM_FILE_SIZE_LIMIT_BYTES.to_string()),
+                    "the refusal names the bound: {msg}"
+                );
+            }
+            other => panic!("expected Io, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_ccm_from_dir_refuses_a_non_regular_payload_file() {
+        // The per-partition triple is read here, and the symbols and BDD
+        // files had no file-type check at all. All three reads happen
+        // before any of them is parsed, so each case only needs the
+        // files ahead of it in that order to be regular.
+        if !dev_zero_is_a_device() {
+            eprintln!("[skip] /dev/zero unavailable; the payload cases did not run");
+            return;
+        }
+        for (label, replaced) in [
+            ("payload_symbols", "ccm.symbols.json"),
+            ("payload_bdd", "ccm.bdd.bin"),
+        ] {
+            let dir = tempdir_for(label);
+            for name in ["ccm.manifest.json", "ccm.symbols.json", "ccm.bdd.bin"] {
+                if name == replaced {
+                    std::os::unix::fs::symlink("/dev/zero", dir.join(name))
+                        .expect("symlink /dev/zero");
+                } else {
+                    fs::write(dir.join(name), b"{}").expect("write placeholder");
+                }
+            }
+            match load_ccm_from_dir(&dir).unwrap_err() {
+                ParseError::Io(msg) => {
+                    assert!(msg.contains("not a regular file"), "got {msg}");
+                    assert!(msg.contains(replaced), "the refusal names the file: {msg}");
+                }
+                other => panic!("expected Io for {replaced}, got {other:?}"),
+            }
+        }
     }
 }

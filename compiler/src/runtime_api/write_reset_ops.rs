@@ -372,12 +372,33 @@ pub fn set_parameters_atomically(
             );
         }
     };
-    if let Some(expected_working_configuration_id) = request
-        .expected_working_configuration_id
-        .as_ref()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
+    if let Some(expected_working_configuration_id) =
+        request.expected_working_configuration_id.as_deref()
     {
+        // Ahead of the comparison and behind nothing — the same placement as the
+        // commit gate (configflux-11wx), and like it holding a PRESENT field to
+        // the gate exactly as sent rather than trimming a blank into an absence
+        // or a padded digest into a match (configflux-8gah). This operation
+        // answers both faults with one code, so the message is what tells a
+        // malformed value apart from a working configuration that genuinely moved.
+        if !is_sha256_hex(expected_working_configuration_id) {
+            return set_parameters_atomically_failed(
+                model_hash,
+                resolve_hash,
+                scope,
+                Vec::new(),
+                vec![Diagnostic {
+                    code: E_RUNTIME_DIRTY_INVALID.to_string(),
+                    severity: DiagnosticSeverity::Error,
+                    message:
+                        "request.expected_working_configuration_id must be a 64-char lowercase sha256 hex string"
+                            .to_string(),
+                    source_id: None,
+                    entity_path: Some("request.expected_working_configuration_id".to_string()),
+                    hint: Some("Use configuration IDs returned by get_configuration_identity".to_string()),
+                }],
+            );
+        }
         if expected_working_configuration_id != identity_before.working_configuration_id {
             return set_parameters_atomically_failed(
                 model_hash,

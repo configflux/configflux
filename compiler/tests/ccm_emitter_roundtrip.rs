@@ -79,6 +79,7 @@ fn emitted_ccm_with_a_constraint_roster_loads_into_solver() {
             "exactly_one_of(environment == 'dev', environment == 'prod')".to_string(),
             "exactly_one_of(log_level == 'info', log_level == 'debug')".to_string(),
         ],
+        facet_domains: Default::default(),
     };
 
     emit_ccm_dir(&model, &ccm_dir).expect("emit solver-loadable CCM");

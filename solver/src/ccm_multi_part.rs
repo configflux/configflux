@@ -30,12 +30,11 @@
 // `PartitionCcm` records. The `Session::new` constructor in
 // `session.rs` builds one backend per `PartitionCcm` it sees.
 
-use std::fs;
-use std::path::Path;
+use std::path::{Component, Path};
 
 use crate::ccm_format::{
-    compute_top_level_ccm_hash, decode_hex32, load_ccm_from_dir, parse_manifest, BddPayload,
-    ConstraintRosterEntry, Manifest, ParseError, Symbols, CCM_MANIFEST_SCHEMA_MAX,
+    compute_top_level_ccm_hash, decode_hex32, load_ccm_from_dir, parse_manifest, read_ccm_file,
+    BddPayload, ConstraintRosterEntry, Manifest, ParseError, Symbols, CCM_MANIFEST_SCHEMA_MAX,
     CCM_MANIFEST_SCHEMA_MIN, RECOGNIZED_ALGORITHMS,
 };
 use crate::partition_manifest::{PartitionManifest, PARTITION_MANIFEST_SCHEMA_MAX};
@@ -110,9 +109,7 @@ impl MultiPartCcm {
 pub(crate) fn load_multi_part(dir: &Path) -> Result<MultiPartCcm, ParseError> {
     // --- Step 1: top-level manifest ---
     let top_manifest_path = dir.join("ccm.manifest.json");
-    let top_manifest_bytes = fs::read(&top_manifest_path).map_err(|e| {
-        ParseError::Io(format!("read {}: {e}", top_manifest_path.display()))
-    })?;
+    let top_manifest_bytes = read_ccm_file(&top_manifest_path)?;
     let top_manifest = parse_manifest(&top_manifest_bytes)?;
 
     if top_manifest.schema_version < CCM_MANIFEST_SCHEMA_MIN
@@ -130,9 +127,13 @@ pub(crate) fn load_multi_part(dir: &Path) -> Result<MultiPartCcm, ParseError> {
     };
 
     // --- Step 2: partition manifest ---
+    if !is_plain_filename(pm_filename) {
+        return Err(ParseError::ManifestParse(format!(
+            "top-level ccm.manifest.json field 'partition_manifest' must be a plain filename, got {pm_filename:?}"
+        )));
+    }
     let pm_path = dir.join(pm_filename);
-    let pm_bytes = fs::read(&pm_path)
-        .map_err(|e| ParseError::Io(format!("read {}: {e}", pm_path.display())))?;
+    let pm_bytes = read_ccm_file(&pm_path)?;
     let pm: PartitionManifest = serde_json::from_slice(&pm_bytes).map_err(|e| {
         ParseError::ManifestParse(format!("partition-manifest.json: {e}"))
     })?;
@@ -156,6 +157,22 @@ pub(crate) fn load_multi_part(dir: &Path) -> Result<MultiPartCcm, ParseError> {
         return Err(ParseError::ManifestParse(
             "partition-manifest.partitions is empty (v2 always has at least 1)".into(),
         ));
+    }
+    // Every entry becomes a directory name joined onto the model
+    // directory in step 3-4 below, and those joins run BEFORE the
+    // step-5 chain check, so the values are still unauthenticated when
+    // they are used. The field is a bare `Vec<String>` off the same
+    // untrusted `partition-manifest.json`, so it escapes exactly the way
+    // the sibling `partition_manifest` field did — absolute replaces the
+    // base, `..` traverses (configflux-w64h). Refuse the whole manifest
+    // here rather than per-join, so no entry is reachable by either the
+    // cluster loop or the bridge branch.
+    for name in &pm.partitions {
+        if !is_plain_filename(name) {
+            return Err(ParseError::ManifestParse(format!(
+                "partition-manifest.json field 'partitions' entry must be a plain filename, got {name:?}"
+            )));
+        }
     }
 
     // --- Step 3-4: load each partition ---
@@ -269,6 +286,41 @@ fn load_partition(
     })
 }
 
+/// Is `name` a single plain filename — something that can only name a
+/// file INSIDE the directory it is joined onto?
+///
+/// Both callers take their value out of the model directory's own
+/// manifests — `partition_manifest` from `ccm.manifest.json`
+/// (configflux-1m0g) and every `partitions` entry from
+/// `partition-manifest.json` (configflux-w64h) — which a runtime-open
+/// request points at by path and which are therefore untrusted input.
+/// `Path::join` REPLACES the base when the joined value is absolute, so
+/// `partition_manifest: "/dev/zero"` resolved to the device rather than
+/// to a file under the model directory, and a `..` in either field
+/// traversed out of it the same way. Neither gate ahead of the joins
+/// constrains these fields: `resolve_ccm_dir` only requires the
+/// top-level `ccm.manifest.json` to be a regular file, and
+/// `looks_like_multi_part_dir` only requires a file literally named
+/// `partition-manifest.json` to exist, which a decoy satisfies.
+///
+/// Accepted is exactly one `Component::Normal`: no root, no prefix, no
+/// `.`, no `..`, non-empty. The separator check is explicit because a
+/// backslash is not a separator on Unix, so `a\b` is one `Normal`
+/// component here and must still be refused rather than being handed to
+/// a reader on some other platform.
+///
+/// The emitter only ever writes `PARTITION_MANIFEST_FILENAME` and, for
+/// the partition names, `partition-NNNN` plus `BRIDGE_PARTITION_DIR`
+/// (`compiler/src/ccm_emitter/multi_part.rs`), so no artifact
+/// ConfigFlux produces is affected by this.
+fn is_plain_filename(name: &str) -> bool {
+    if name.is_empty() || name.contains('/') || name.contains('\\') {
+        return false;
+    }
+    let mut components = Path::new(name).components();
+    matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
+}
+
 /// Public-ish helper for the `Ccm` constructor: detect whether a CCM
 /// directory follows the v2 multi-part layout by looking for the
 /// `partition-manifest.json` sentinel file. The v0.3.0 no-backcompat
@@ -282,6 +334,7 @@ pub(crate) fn looks_like_multi_part_dir(dir: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -366,5 +419,290 @@ mod tests {
             bridge: Some(p),
         };
         assert_eq!(with_bridge.partition_count(), 3);
+    }
+
+    /// A top-level v2 `ccm.manifest.json` whose `partition_manifest`
+    /// field carries `pm` verbatim. The two hashes are placeholders:
+    /// every test built on this fixture is refused before the step-5
+    /// chain check runs, so no hash math is needed to exercise the
+    /// refusal (configflux-21g0, configflux-1m0g).
+    fn top_manifest_json(pm: &str) -> String {
+        let zero = "0".repeat(64);
+        let pm_json = serde_json::to_string(pm).expect("encode partition_manifest");
+        format!(
+            r#"{{"algorithm":"robdd-cudd-v1","algorithm_params":{{}},"bound_model_hash":"{zero}","ccm_hash":"{zero}","construction_wall_time_us":0,"emitted_at":"1970-01-01T00:00:00Z","node_count":0,"partition_manifest":{pm_json},"schema_version":2,"var_count":0}}"#
+        )
+    }
+
+    /// A single-cluster `partition-manifest.json`. Same placeholder-hash
+    /// reasoning as `top_manifest_json`.
+    fn partition_manifest_json() -> String {
+        let zero = "0".repeat(64);
+        format!(
+            r#"{{"has_bridge":false,"partitions":["partition-0000"],"schema_version":2,"top_level_ccm_hash":"{zero}"}}"#
+        )
+    }
+
+    /// A `<label>/ccm/` directory holding only the top-level manifest,
+    /// with `partition_manifest` set to `pm`.
+    fn ccm_dir_naming_partition_manifest(label: &str, pm: &str) -> PathBuf {
+        let ccm = tempdir_for(label).join("ccm");
+        fs::create_dir(&ccm).expect("mkdir ccm");
+        fs::write(ccm.join("ccm.manifest.json"), top_manifest_json(pm))
+            .expect("write top-level manifest");
+        ccm
+    }
+
+    /// `/dev/zero` is the concrete unbounded-stream case these tests are
+    /// about. A sandbox without it cannot exercise them, and a silent
+    /// pass would be a coverage hole, so the skip is loud.
+    fn dev_zero_is_a_device() -> bool {
+        match fs::metadata("/dev/zero") {
+            Ok(meta) => !meta.file_type().is_file(),
+            Err(_) => false,
+        }
+    }
+
+    #[test]
+    fn load_multi_part_refuses_an_absolute_partition_manifest() {
+        // `Path::join` REPLACES the base when the joined value is
+        // absolute, so this value used to resolve to /dev/zero rather
+        // than to a file inside the model directory — and was then read
+        // unbounded. The VARIANT is the assertion that matters:
+        // `ManifestParse` is reachable only if the value was refused
+        // BEFORE the join, which is what proves the device was never
+        // opened. An `Io` here would mean the loader went to it.
+        let ccm = ccm_dir_naming_partition_manifest("pm_absolute", "/dev/zero");
+        match load_multi_part(&ccm).unwrap_err() {
+            ParseError::ManifestParse(msg) => {
+                assert!(msg.contains("must be a plain filename"), "got {msg}");
+                assert!(msg.contains("/dev/zero"), "the refusal names the value: {msg}");
+            }
+            other => panic!("expected ManifestParse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_multi_part_refuses_a_traversing_partition_manifest() {
+        let ccm = ccm_dir_naming_partition_manifest("pm_traverse", "../x.json");
+        match load_multi_part(&ccm).unwrap_err() {
+            ParseError::ManifestParse(msg) => {
+                assert!(msg.contains("must be a plain filename"), "got {msg}");
+            }
+            other => panic!("expected ManifestParse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_multi_part_refuses_an_empty_partition_manifest() {
+        // An empty value joins to the directory itself, so the read
+        // would land on a directory rather than on a manifest.
+        let ccm = ccm_dir_naming_partition_manifest("pm_empty", "");
+        match load_multi_part(&ccm).unwrap_err() {
+            ParseError::ManifestParse(msg) => {
+                assert!(msg.contains("must be a plain filename"), "got {msg}");
+            }
+            other => panic!("expected ManifestParse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_multi_part_refuses_a_fifo_top_manifest() {
+        // `stat()` on a FIFO does not block, so the file-type refusal
+        // fires without the path ever being opened. `open()` on a FIFO
+        // with no writer blocks forever — which is exactly why the
+        // timeout below is a FAILURE and not a flake: reaching it means
+        // the loader opened the path before settling its type.
+        let ccm = tempdir_for("fifo_top").join("ccm");
+        fs::create_dir(&ccm).expect("mkdir ccm");
+        let made = std::process::Command::new("mkfifo")
+            .arg(ccm.join("ccm.manifest.json"))
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if !made {
+            eprintln!("[skip] mkfifo unavailable; the FIFO case did not run");
+            return;
+        }
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let probe = ccm.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(load_multi_part(&probe).map(|_| ()));
+        });
+        let outcome = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("load_multi_part blocked: it opened the FIFO before checking its type");
+        match outcome.expect_err("a FIFO is not a readable CCM manifest") {
+            ParseError::Io(msg) => {
+                assert!(msg.contains("not a regular file"), "got {msg}");
+            }
+            other => panic!("expected Io, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_multi_part_refuses_a_non_regular_partition_file() {
+        // The per-partition triple is the deepest read on the load path
+        // and had no file-type check at all: a symlink to /dev/zero in
+        // place of either payload file was read until the process ran
+        // out of address space. `fs::metadata` FOLLOWS the symlink, so
+        // the refusal here is about what the link points AT, not about
+        // the link itself.
+        if !dev_zero_is_a_device() {
+            eprintln!("[skip] /dev/zero unavailable; the symlink case did not run");
+            return;
+        }
+        // `load_ccm_from_dir` reads manifest, then symbols, then bdd,
+        // all before it parses any of them, so each case only needs the
+        // files ahead of it in that order to be regular.
+        for (label, replaced) in [
+            ("sym_symbols", "ccm.symbols.json"),
+            ("sym_bdd", "ccm.bdd.bin"),
+        ] {
+            let ccm = tempdir_for(label).join("ccm");
+            fs::create_dir(&ccm).expect("mkdir ccm");
+            fs::write(
+                ccm.join("ccm.manifest.json"),
+                top_manifest_json("partition-manifest.json"),
+            )
+            .expect("write top-level manifest");
+            fs::write(ccm.join("partition-manifest.json"), partition_manifest_json())
+                .expect("write partition manifest");
+            let part = ccm.join("partition-0000");
+            fs::create_dir(&part).expect("mkdir partition-0000");
+            for name in ["ccm.manifest.json", "ccm.symbols.json", "ccm.bdd.bin"] {
+                if name == replaced {
+                    std::os::unix::fs::symlink("/dev/zero", part.join(name))
+                        .expect("symlink /dev/zero");
+                } else {
+                    fs::write(part.join(name), b"{}").expect("write placeholder");
+                }
+            }
+
+            match load_multi_part(&ccm).unwrap_err() {
+                ParseError::Io(msg) => {
+                    assert!(msg.contains("not a regular file"), "got {msg}");
+                    assert!(msg.contains(replaced), "the refusal names the file: {msg}");
+                }
+                other => panic!("expected Io for {replaced}, got {other:?}"),
+            }
+        }
+    }
+
+    /// A `<label>/ccm/` directory whose `partition-manifest.json` carries
+    /// `partitions` verbatim. Same placeholder-hash reasoning as
+    /// `top_manifest_json`: every test built on this fixture is refused
+    /// before the step-5 chain check runs (configflux-w64h).
+    fn ccm_dir_naming_partitions(label: &str, partitions: &[&str]) -> PathBuf {
+        let ccm = tempdir_for(label).join("ccm");
+        fs::create_dir(&ccm).expect("mkdir ccm");
+        fs::write(
+            ccm.join("ccm.manifest.json"),
+            top_manifest_json("partition-manifest.json"),
+        )
+        .expect("write top-level manifest");
+        let zero = "0".repeat(64);
+        let list = serde_json::to_string(partitions).expect("encode partitions");
+        fs::write(
+            ccm.join("partition-manifest.json"),
+            format!(
+                r#"{{"has_bridge":false,"partitions":{list},"schema_version":2,"top_level_ccm_hash":"{zero}"}}"#
+            ),
+        )
+        .expect("write partition manifest");
+        ccm
+    }
+
+    #[test]
+    fn load_multi_part_refuses_an_absolute_partitions_entry() {
+        // `Path::join` REPLACES the base when the joined value is
+        // absolute, so this entry used to resolve to `/dev/zero` and the
+        // loader went looking for a partition triple under a character
+        // device instead of under the model directory. The VARIANT is
+        // the assertion that matters: `ManifestParse` is reachable only
+        // if the entry was refused BEFORE the join, which is what proves
+        // the path outside the directory was never visited. An `Io` here
+        // would mean the loader went to it.
+        let ccm = ccm_dir_naming_partitions("parts_absolute", &["/dev/zero"]);
+        match load_multi_part(&ccm).unwrap_err() {
+            ParseError::ManifestParse(msg) => {
+                assert!(msg.contains("must be a plain filename"), "got {msg}");
+                assert!(msg.contains("/dev/zero"), "the refusal names the value: {msg}");
+            }
+            other => panic!("expected ManifestParse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_multi_part_refuses_a_traversing_partitions_entry() {
+        // The decoy below is a complete partition triple one level
+        // OUTSIDE the model directory, sitting exactly where this entry
+        // traverses to. Reading it would fail on its CONTENT — a serde
+        // message naming the manifest's fields — so the plain-filename
+        // refusal arriving instead is what proves nothing outside the
+        // model directory was read.
+        let ccm = ccm_dir_naming_partitions("parts_traverse", &["../outside-partition"]);
+        let decoy = ccm
+            .parent()
+            .expect("the ccm dir has a parent")
+            .join("outside-partition");
+        fs::create_dir(&decoy).expect("mkdir decoy partition");
+        for name in ["ccm.manifest.json", "ccm.symbols.json", "ccm.bdd.bin"] {
+            fs::write(decoy.join(name), b"{}").expect("write decoy file");
+        }
+        match load_multi_part(&ccm).unwrap_err() {
+            ParseError::ManifestParse(msg) => {
+                assert!(msg.contains("must be a plain filename"), "got {msg}");
+                assert!(
+                    msg.contains("../outside-partition"),
+                    "the refusal names the value: {msg}"
+                );
+            }
+            other => panic!("expected ManifestParse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_multi_part_refuses_an_empty_partitions_entry() {
+        // An empty entry joins to the model directory itself, so the
+        // loader would read the TOP-level manifest back as if it were a
+        // partition's own.
+        let ccm = ccm_dir_naming_partitions("parts_empty", &[""]);
+        match load_multi_part(&ccm).unwrap_err() {
+            ParseError::ManifestParse(msg) => {
+                assert!(msg.contains("must be a plain filename"), "got {msg}");
+            }
+            other => panic!("expected ManifestParse, got {other:?}"),
+        }
+    }
+
+    /// The accept/reject table for `partition_manifest`. The emitter
+    /// only ever writes `partition-manifest.json`, so the accepted set
+    /// is deliberately just "one plain filename" (configflux-1m0g).
+    #[test]
+    fn plain_filename_accepts_only_a_single_normal_component() {
+        assert!(is_plain_filename("partition-manifest.json"));
+        assert!(is_plain_filename("x"));
+        for rejected in [
+            "",
+            ".",
+            "..",
+            "../x.json",
+            "../../etc/passwd",
+            "/dev/zero",
+            "/",
+            "a/b",
+            "sub/partition-manifest.json",
+            "./partition-manifest.json",
+            "a\\b",
+            "..\\x.json",
+        ] {
+            assert!(
+                !is_plain_filename(rejected),
+                "{rejected:?} must not be accepted as a plain filename"
+            );
+        }
     }
 }

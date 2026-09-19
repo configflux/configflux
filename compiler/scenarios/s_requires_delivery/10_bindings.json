@@ -1,0 +1,16 @@
+{
+    "package": "line_unit",
+    "version": "1.0.0",
+    "bindings": {
+        "line_container": {
+            "catalogue": "containers",
+            "doc": "The one container every service on this line draws from. Derived from the site rather than defaulted, so an environment that names its site never repeats the container decision — and a site the table does not cover leaves it genuinely undecided.",
+            "derive": {
+                "site": {
+                    "factory_a": "c1",
+                    "factory_b": "c2"
+                }
+            }
+        }
+    }
+}

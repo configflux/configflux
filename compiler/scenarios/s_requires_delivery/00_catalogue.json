@@ -1,0 +1,58 @@
+{
+    "package": "site_catalogue",
+    "version": "1.0.0",
+    "definitions": {
+        "grid_cell_mm": {
+            "type": "integer",
+            "unit": "mm",
+            "doc": "A length a service computes over the container footprint.",
+            "lifecycle": "startup",
+            "safety": "q_m",
+            "access": "integrator"
+        }
+    },
+    "facets": {
+        "site": {
+            "values": [
+                "factory_a",
+                "factory_b",
+                "factory_c"
+            ],
+            "doc": "Which plant this deployment runs at. factory_c is deliberately NOT covered by the container derive table, so a resolve that names it leaves the binding unbound and every requirement on it is reported at once."
+        }
+    },
+    "catalogues": {
+        "containers": {
+            "doc": "The physical containers this plant runs on the line.",
+            "fields": {
+                "length_mm": {
+                    "type": "integer",
+                    "unit": "mm",
+                    "doc": "Outside length"
+                },
+                "width_mm": {
+                    "type": "integer",
+                    "unit": "mm",
+                    "doc": "Outside width"
+                },
+                "height_mm": {
+                    "type": "integer",
+                    "unit": "mm",
+                    "doc": "Outside height"
+                }
+            },
+            "entries": {
+                "c1": {
+                    "length_mm": 1200,
+                    "width_mm": 800,
+                    "height_mm": 1000
+                },
+                "c2": {
+                    "length_mm": 800,
+                    "width_mm": 600,
+                    "height_mm": 700
+                }
+            }
+        }
+    }
+}

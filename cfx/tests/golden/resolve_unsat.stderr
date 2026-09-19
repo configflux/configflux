@@ -1,2 +1,2 @@
 cfx: E_SELECTION_CONFLICT: Selection 'region'='eu' conflicts with immutable context tag value 'us'
-selection is unsatisfiable; run: cfx explain --model __MODEL__ --selection-file __SELECTION_FILE__ --select region=eu
+selection is unsatisfiable; run: cfx explain --model '__MODEL__' --selection-file '__SELECTION_FILE__' --select 'region=eu'

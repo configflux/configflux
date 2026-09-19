@@ -1,0 +1,102 @@
+{
+  "schema_version": 5,
+  "status": "ok",
+  "model_hash": "759aabbd00e78b7d28c24647f5f7ad2fc2ea1b4003adc4c5d7d57231854db3ab",
+  "scope": "all",
+  "selection_state_hash": "13377f141e8edd6c3a8e13f50b318004ff4a3cd9060578530c9994312c52f509",
+  "resolve_hash": "8753cc83b40aabb61fa65571f3bde8787ec8ee2dab0a4267bd164596a13eaa8f",
+  "resolved_output_hash": "f7af5a7d44d5d9204f3ce51151ff7cf791747893458462f220f349a5f8512830",
+  "resolved_output": {
+    "all": {
+      "components": {
+        "compute_service": {
+          "params": {
+            "grid_cell_mm": {
+              "access": "integrator",
+              "doc": "Edge length of one occupancy-grid cell over the container footprint.",
+              "lifecycle": "startup",
+              "limits": null,
+              "req_id": null,
+              "safety": "q_m",
+              "type": "integer",
+              "unit": "mm",
+              "value": 50
+            }
+          },
+          "requires": {
+            "container": {
+              "binding": "line_container",
+              "entry": "c1",
+              "fields": {
+                "height_mm": 1000,
+                "length_mm": 1200,
+                "width_mm": 800
+              }
+            }
+          },
+          "type": "service"
+        },
+        "vision_service": {
+          "params": {
+            "roi_margin_mm": {
+              "access": "integrator",
+              "doc": "Margin held around the container when framing the region of interest.",
+              "lifecycle": "startup",
+              "limits": null,
+              "req_id": null,
+              "safety": "q_m",
+              "type": "integer",
+              "unit": "mm",
+              "value": 40
+            }
+          },
+          "requires": {
+            "container": {
+              "binding": "line_container",
+              "entry": "c1",
+              "fields": {
+                "height_mm": 1000,
+                "length_mm": 1200,
+                "width_mm": 800
+              }
+            }
+          },
+          "type": "service"
+        }
+      },
+      "package": "merged_root",
+      "version": "0.0.0"
+    }
+  },
+  "choices": {
+    "site": "factory_a"
+  },
+  "implied_choices": {
+    "line_container": "c1"
+  },
+  "closed_facet_domains": {
+    "line_container": [
+      "c1",
+      "c2"
+    ],
+    "site": [
+      "factory_a",
+      "factory_b",
+      "factory_c"
+    ]
+  },
+  "resolved_component_dependencies": {
+    "all": {
+      "compute_service": [],
+      "vision_service": []
+    }
+  },
+  "error_count": 0,
+  "warning_count": 0,
+  "diagnostics": {
+    "schema_version": 5,
+    "diagnostics": [],
+    "error_count": 0,
+    "warning_count": 0
+  }
+}

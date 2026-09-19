@@ -1,18 +1,34 @@
 // SPDX-License-Identifier: BUSL-1.1
 
+// configflux-y2ai: the resolve-hash pre-image lives in the leaf
+// `crate::resolve_hash` module, which `loader_api` imports too. This module used
+// to carry a transcribed copy of it whose comments told the next editor to keep
+// the two in lockstep by hand; there is now one pre-image and nothing to keep in
+// lockstep.
+use crate::resolve_hash::SelectionStateCanonical;
+
 /// registry: cause = the request's schema_version, or a persisted snapshot's schema_version, is not the version this build implements; remedy = set schema_version to the version this binary reports; a snapshot written by an older build must be re-opened from a fresh resolve rather than replayed
 pub const E_RUNTIME_UNSUPPORTED_SCHEMA_VERSION: &str = "E_RUNTIME_UNSUPPORTED_SCHEMA_VERSION";
 /// registry: cause = the open request or the snapshot it produces is malformed: a hash field that is not a 64-character hexadecimal digest, an unusable scope, undecodable resolved output, a dependency list that is unsorted or names an unknown component, or a parameter path that is ambiguous across scope roots; remedy = open with the unmodified output of a successful resolve, and qualify any parameter path the diagnostic reports as ambiguous with its scope root
 pub const E_RUNTIME_OPEN_INVALID: &str = "E_RUNTIME_OPEN_INVALID";
-// ADR-0030 D2 frozen code: `runtime-open` fails closed when the snapshot's
-// `ccm_ref` does not resolve to a usable solver model (empty reference,
-// unloadable artifact, or symbol-less stub). The check is enforced by the
-// runtime CLI wrapper (`runtime::cli_adapter`), which can import `solver`;
-// the code is defined here so the whole `E_RUNTIME_OPEN_*` family stays in
-// one place for the interface contract.
-/// registry: cause = the snapshot's solver-model reference is empty, will not load, or carries no symbol table, so the session cannot be opened; remedy = recompile the model so a complete solver model is emitted beside the package, and keep it reachable from the snapshot's reference
+// ADR-0030 D2 frozen code: `runtime-open` fails closed when `ccm_ref` does not
+// resolve to a usable solver model (empty reference, unloadable artifact,
+// symbol-less stub) or — since configflux-nnwa — resolves to one bound to a
+// different model than the snapshot's `model_hash`; one code covers both, the
+// model asked for being unavailable either way. Enforced by the runtime wrapper
+// (which may import `solver`), defined here to keep the family in one place.
+/// registry: cause = the snapshot's solver-model reference is empty, will not load, carries no symbol table, or points at a solver model belonging to a different model than the snapshot, so the session cannot be opened; remedy = recompile the model so a complete solver model is emitted beside the package, and open against the solver model emitted beside the package the snapshot came from
 pub const E_RUNTIME_OPEN_SOLVER_MODEL_UNAVAILABLE: &str =
     "E_RUNTIME_OPEN_SOLVER_MODEL_UNAVAILABLE";
+// ADR-0060 D6 frozen code: `runtime-open` fails closed when a supplied
+// `closed_facet_domains` names a facet or value the bound solver model does not
+// carry. Enforced by the runtime wrapper beside the D2 precondition (the
+// compiler may not import `solver`, ADR-0003 §2); the code is defined here so
+// the whole `E_RUNTIME_OPEN_*` family stays in one place for the interface
+// contract. An ABSENT table is not an error — it degrades to asserted-only
+// attribution (D7); only a table the model cannot account for is.
+/// registry: cause = the open request supplies a closed-facet domain table naming a facet or value that the solver model bound to this session does not carry, so the table describes a different model than the one that will decide writes; remedy = project the table from the same resolve result the rest of the open request came from, and open against the solver model that resolve was compiled with
+pub const E_RUNTIME_OPEN_FACET_DOMAIN_UNKNOWN: &str = "E_RUNTIME_OPEN_FACET_DOMAIN_UNKNOWN";
 /// registry: cause = the resolve hash recomputed at open time does not match the hash supplied with the request, so the selection fields and the hash no longer agree; remedy = pass the resolve result through to open unmodified: dropping or editing the choices, context tags, or defaulted choices invalidates the hash
 pub const E_RUNTIME_HASH_MISMATCH: &str = "E_RUNTIME_HASH_MISMATCH";
 /// registry: cause = the scope root is blank, or it is not present in the resolved output the session was opened with; remedy = use a scope root that appears in the opened snapshot, or re-open the session against a resolve that covers the scope you need
@@ -27,11 +43,11 @@ pub const E_RUNTIME_LIMIT_VIOLATION: &str = "E_RUNTIME_LIMIT_VIOLATION";
 pub const E_RUNTIME_LIFECYCLE_IMMUTABLE: &str = "E_RUNTIME_LIFECYCLE_IMMUTABLE";
 /// registry: cause = an artifact-typed parameter holds a blank or non-string value, or names an artifact that the session's resolved artifact catalog does not contain; remedy = open the session with a resolve result that carries every artifact its parameters reference, so the catalog is complete
 pub const E_RUNTIME_ARTIFACT_UNKNOWN: &str = "E_RUNTIME_ARTIFACT_UNKNOWN";
-/// registry: cause = an override operation is inconsistent with the session's override state: a blank actor, a rollback of a path that is not overridden, a generation that disagrees with the recorded one, or a working-configuration identifier that no longer matches; remedy = re-read the current override state before acting on it; a working-configuration mismatch means another writer changed the session first, so refresh and retry
+/// registry: cause = an override operation is inconsistent with the session's override state: a blank actor, a rollback of a path that is not overridden, a generation that disagrees with the recorded one, a working-configuration identifier that is not a 64-character lowercase sha256 hex string, or one that no longer matches; remedy = re-read the current override state before acting on it; a working-configuration mismatch means another writer changed the session first, so refresh and retry, while a malformed identifier is your own value, so resend the one the identity query returned
 pub const E_RUNTIME_DIRTY_INVALID: &str = "E_RUNTIME_DIRTY_INVALID";
 /// registry: cause = the session's event buffer is malformed: a zero capacity or sequence, or buffered events that are not in strict ascending sequence order; remedy = re-open the session from a fresh resolve; a persisted snapshot whose event buffer fails these checks has been truncated or edited outside the runtime
 pub const E_RUNTIME_EVENT_INVALID: &str = "E_RUNTIME_EVENT_INVALID";
-/// registry: cause = the commit request is unusable: a blank actor, or a changed-path hint naming a path that is not currently overridden; remedy = supply a non-empty actor and list only paths that are actually overridden, or omit the hint and let the commit determine the changed set itself
+/// registry: cause = the commit request is unusable: a blank actor, a changed-path hint naming a path that is not currently overridden, or an expected base configuration identifier that is not a 64-character lowercase sha256 hex string; remedy = supply a non-empty actor, list only paths that are actually overridden or omit the hint and let the commit determine the changed set itself, and send the expected base identifier exactly as the identity query returned it
 pub const E_RUNTIME_COMMIT_INVALID: &str = "E_RUNTIME_COMMIT_INVALID";
 /// registry: cause = the commit supplied an expected base configuration identifier that no longer matches the session's committed configuration, so another commit landed first; remedy = re-read the current configuration identity, reconcile your changes against it, and retry the commit
 pub const E_RUNTIME_COMMIT_BASE_MISMATCH: &str = "E_RUNTIME_COMMIT_BASE_MISMATCH";
@@ -408,6 +424,32 @@ pub struct RuntimeOpenRequest {
     // pre-ADR-0047 open payload (empty map) stays valid and byte-identical.
     #[serde(default)]
     pub defaulted_choices: BTreeMap<String, String>,
+    // ADR-0057 §D6 lockstep: the solver-inferred bindings this resolve recorded,
+    // copied from `resolve_result.implied_choices` by the same projection that
+    // copies `defaulted_choices`. A caller bridging a `ResolveResult` into a
+    // runtime open MUST carry it, or `runtime_open` recomputes a different
+    // `resolve_hash` and rejects a snapshot the loader just produced.
+    //
+    // `#[serde(default)]` so every pre-ADR-0057 open payload stays valid and
+    // byte-identical.
+    #[serde(default)]
+    pub implied_choices: BTreeMap<String, String>,
+    // ADR-0060 D2: the model's CLOSED facet declarations, copied from
+    // `resolve_result.closed_facet_domains` by the same projection that copies
+    // `defaulted_choices`. A device holds a `.ccm` and a resolve result, never
+    // the chunk set the `facets:` declarations live in, so this field is the
+    // only way closed-ness reaches the runtime — and it is what lets a rejection
+    // whose core mentions a closed facet ONLY negatively name the constraint it
+    // breaks instead of reporting the model as over-constrained
+    // (configflux-pt6v, configflux-tkwt).
+    //
+    // `#[serde(default)]` so every pre-ADR-0060 open payload stays valid and
+    // keeps today's asserted-only attribution (D7). An absent table is honest
+    // degradation; a table the bound `.ccm` cannot account for FAILS the open
+    // (D6, enforced in the runtime crate — the compiler may not import
+    // `solver`, ADR-0003 §2).
+    #[serde(default)]
+    pub closed_facet_domains: crate::loader_api::ClosedFacetDomains,
     #[serde(default)]
     pub committed_overlay: BTreeMap<String, BTreeMap<String, crate::schema::Value>>,
     #[serde(default)]
@@ -455,6 +497,25 @@ pub struct RuntimeSnapshot {
     pub context_tags: BTreeMap<String, String>,
     #[serde(default)]
     pub choices: BTreeMap<String, String>,
+    /// The model's CLOSED facet declarations, copied VERBATIM from the open
+    /// request (ADR-0060 D3) — never derived, never inferred from the symbol
+    /// table, never partially populated. The snapshot is the channel because it
+    /// is the only thing that reaches both the stateless CLI (every post-open
+    /// request embeds one) and the C ABI (`RuntimeSessionState` holds exactly
+    /// one piece of session state, and it is this).
+    ///
+    /// Read by `runtime::explain_rejection` and `runtime::write_enforcement` so
+    /// a core clause mentioning a closed facet only negatively is completed by
+    /// entailment and names the constraint it breaks (configflux-pt6v). Empty
+    /// when the opener supplied none, which is byte-for-byte the asserted-only
+    /// attribution this surface had before (D7).
+    ///
+    /// Unlike `ResolveResult`'s copy this field is NOT skip-if-empty: no
+    /// `RuntimeSnapshot` field is, no committed golden carries a serialized
+    /// snapshot, and consistency with the surrounding contract (`ccm_ref`
+    /// serializes as `""` on every snapshot) beats a one-field exception.
+    #[serde(default)]
+    pub closed_facet_domains: crate::loader_api::ClosedFacetDomains,
     pub resolved_output: BTreeMap<String, crate::resolved_models::ResolvedConfig>,
     #[serde(default)]
     pub resolved_component_dependencies: BTreeMap<String, BTreeMap<String, Vec<String>>>,
@@ -558,6 +619,12 @@ pub struct RuntimeParameterPayload {
     pub param_key: String,
     pub r#type: String,
     pub value: crate::schema::Value,
+    /// The facet this parameter is the declared handle for (ADR-0064 D4), so
+    /// `get-parameter` shows the binding. Absent — and therefore byte-invisible
+    /// on every existing read envelope — for a parameter that declares none,
+    /// which is the same rule `requires` below states.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facet: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unit: Option<String>,
     pub safety: crate::schema::SafetyLevel,
@@ -571,6 +638,27 @@ pub struct RuntimeParameterPayload {
     pub limits: Option<crate::schema::Limits>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub artifact: Option<RuntimeArtifactBinding>,
+    /// Present only when this payload describes a requirement field read at
+    /// `component.<c>.requires.<slot>.<field>` (ADR-0057 §D7). Absent — and
+    /// therefore byte-invisible — for every parameter read, which is what keeps
+    /// existing read envelopes unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requires: Option<RuntimeRequirementBinding>,
+}
+
+/// Which requirement a `RuntimeParameterPayload` came from (ADR-0057 §D7): the
+/// component's slot, the binding that slot named, and the catalogue entry the
+/// binding took in this deployment.
+///
+/// A reader that only wants the value never needs this. It is here so a
+/// diagnostic, a log line, or an operator UI can say *why* the value is what it
+/// is — "slot `container`, binding `line_container`, entry `c1`" — without
+/// re-reading the snapshot.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RuntimeRequirementBinding {
+    pub slot: String,
+    pub binding: String,
+    pub entry: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -620,7 +708,11 @@ pub struct ListParametersResult {
     pub diagnostics: DiagnosticsReport,
 }
 
+// configflux-8zcp: refuses an undeclared field, for the reason recorded on
+// `AtomicParameterWrite` below. This operation declares no compare-and-swap
+// field of any name, so a caller who believes one guards the write gets none.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SetParameterRequest {
     pub schema_version: u32,
     pub runtime_snapshot: RuntimeSnapshot,
@@ -664,10 +756,10 @@ pub struct SetParameterResult {
     /// assignment violates a declared constraint; `None` on every other outcome,
     /// success and non-constraint rejection alike. Omitted from the wire when
     /// `None`, so no previously-serialized payload changes a byte — which is why
-    /// neither `PRODUCT_SCHEMA_VERSION` nor the Runtime envelope version moves.
-    /// It lives on the result envelope rather than on `Diagnostic`, which is
-    /// shared across the whole compiler surface and must not grow a
-    /// selection-specific field.
+    /// `PRODUCT_SCHEMA_VERSION`, the `schema_version` every runtime request and
+    /// result envelope carries, does not move. It lives on the result envelope
+    /// rather than on `Diagnostic`, which is shared across the whole compiler
+    /// surface and must not grow a selection-specific field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unsat_core: Option<crate::loader_api::UnsatCore>,
     pub error_count: u32,
@@ -730,13 +822,32 @@ pub struct RuntimeExplainRejectionResult {
     pub diagnostics: DiagnosticsReport,
 }
 
+// configflux-8gah, extended by configflux-8zcp: the five contract structs that
+// refuse an undeclared field, and the only five. The two compare-and-swap
+// expectations are named differently and live on different operations, so an
+// expected id aimed at the wrong one was dropped by serde and the write
+// proceeded with no guard enforced, status ok — a mis-aimed guard was
+// indistinguishable from no guard. The same guard aimed at the wrong DEPTH,
+// nested inside the write entry it was meant to guard, was dropped just as
+// silently (8zcp), so the three write shapes a caller authors by hand are strict
+// too: this struct, `PullUpdateWrite`, and `SetParameterRequest`, which declares
+// no compare-and-swap field of any name at all.
+//
+// Strictness stops there, and the line is authorship. A caller hand-writes a
+// write entry, so an undeclared key in one is a mistake worth reporting;
+// `RuntimeSnapshot` is handed back from a previous response and must stay
+// tolerant so a caller can round-trip a payload from a newer runtime.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AtomicParameterWrite {
     pub path: String,
     pub value: crate::schema::Value,
 }
 
+// configflux-8gah: refuses an undeclared field, for the reason recorded on
+// `AtomicParameterWrite` above.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SetParametersAtomicallyRequest {
     pub schema_version: u32,
     pub runtime_snapshot: RuntimeSnapshot,
@@ -911,7 +1022,12 @@ pub struct CheckForUpdatesResult {
     pub diagnostics: DiagnosticsReport,
 }
 
+// configflux-8zcp: refuses an undeclared field, for the reason recorded on
+// `AtomicParameterWrite` above. Its two leaf hashes decide whether an incoming
+// update conflicts with a local edit, so one under a key this struct does not
+// declare is no conflict check at all.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PullUpdateWrite {
     pub path: String,
     pub value: crate::schema::Value,
@@ -1242,7 +1358,10 @@ pub struct RuntimeDeltaManifest {
     pub reason: Option<String>,
 }
 
+// configflux-8gah: refuses an undeclared field, for the reason recorded on
+// `AtomicParameterWrite` above.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CommitConfigurationRequest {
     pub schema_version: u32,
     pub runtime_snapshot: RuntimeSnapshot,
@@ -1326,41 +1445,6 @@ pub struct RollbackDirtyResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diagnostics_ref: Option<String>,
     pub diagnostics: DiagnosticsReport,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct SelectionStateCanonical<'a> {
-    schema_version: u32,
-    model_hash: &'a str,
-    scope: &'a str,
-    context_tags: &'a BTreeMap<String, String>,
-    choices: &'a BTreeMap<String, String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct ResolveHashCanonical<'a> {
-    schema_version: u32,
-    model_hash: &'a str,
-    scope: &'a str,
-    selection_state: SelectionStateCanonical<'a>,
-    resolved_output: &'a serde_json::Value,
-    // ADR-0047 §5 lockstep: this runtime-side recipe is a SEPARATE, independent
-    // duplicate of the loader_api one, cross-validated at `runtime_open`. It
-    // MUST fold `defaulted_choices` with byte-identical skip-if-empty
-    // serialization, or a model with an auto-bound default AND a non-empty
-    // context_tags/choices would produce a `resolve_hash` the runtime cannot
-    // reproduce → spurious `E_RUNTIME_HASH_MISMATCH`. Appended LAST + skipped
-    // when empty keeps facet-free models byte-identical across both recipes.
-    #[serde(skip_serializing_if = "ref_btreemap_is_empty")]
-    defaulted_choices: &'a BTreeMap<String, String>,
-}
-
-/// `skip_serializing_if` predicate for a borrowed `&BTreeMap` field (serde hands
-/// the closure `&(&BTreeMap)`; the double reference auto-derefs to the map's own
-/// `is_empty`). Keeps the runtime resolve-hash pre-image byte-identical to the
-/// loader recipe for facet-free models (ADR-0047 §5 lockstep).
-fn ref_btreemap_is_empty(map: &&BTreeMap<String, String>) -> bool {
-    map.is_empty()
 }
 
 fn default_persistence_format_version() -> u32 {

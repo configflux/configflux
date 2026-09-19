@@ -86,6 +86,12 @@ echo "== schema compiles =="
 echo "== positive #Config: scenario chunks + examples + full-surface fixture =="
 while IFS= read -r f; do vet_pos "$f" '#Config'; done < <(find "$SCENARIOS" -path '*/chunks/*.toml' | sort)
 while IFS= read -r f; do vet_pos "$f" '#Config'; done < <(find "$EXAMPLES" -name '*.toml' | sort)
+# The flat JSON packs (s_catalogue_binding, s_facet_equality, s_labeled_mus,
+# s_requires_accepts) are authored as .json directly rather than exported from
+# .cue, so they are not reached by the `*/chunks/*.toml` sweep above. They are
+# still #Config documents and must satisfy the schema — a pack that only the
+# Rust ingest ever validated would let the two front-ends drift.
+while IFS= read -r f; do vet_pos "$f" '#Config'; done < <(find "$SCENARIOS" -mindepth 2 -maxdepth 2 -name '*.json' | sort)
 vet_pos "$HERE/testdata/full_surface.json" '#Config'
 
 echo "== positive #Profile: every scenario profile =="
@@ -147,6 +153,57 @@ accept_inline "constraint with doc"          '{"package":"p","version":"1","cons
 accept_inline "constraint without doc"       '{"package":"p","version":"1","constraints":{"eu_needs_tls":{"condition":"region != '"'"'eu'"'"' || tls_mode == '"'"'strict'"'"'"}}}' '#Config'
 accept_inline "unparseable constraint passes cue (Rust rejects)" '{"package":"p","version":"1","constraints":{"bogus":{"condition":"this is not <> a condition"}}}' '#Config'
 
+# ADR-0057 §D2/§D3: first-class `catalogues` and `bindings`. CUE owns the SHAPE
+# (four literal field types, #snakeId keys, closed structs); everything that
+# needs to look ACROSS namespaces or compare a value against its own declared
+# type is Rust's, in link_verify (`E_CATALOGUE_INVALID`, `E_BINDING_INVALID`).
+# CUE validates one chunk at a time and cannot express "these keys are exactly
+# those keys", so each cross-namespace fixture below is asserted to PASS here
+# and is rejected by the Rust twin in compiler/src/link_verify_catalogue_tests.rs.
+accept_inline "catalogue with all field metadata" '{"package":"p","version":"1","catalogues":{"containers":{"fields":{"width_mm":{"type":"integer","unit":"mm","doc":"width"}},"entries":{"c1":{"width_mm":800}}}}}' '#Config'
+accept_inline "binding with default"              '{"package":"p","version":"1","bindings":{"line_container":{"catalogue":"containers","default":"c1","doc":"the line container"}}}' '#Config'
+accept_inline "binding with derive table"         '{"package":"p","version":"1","bindings":{"line_container":{"catalogue":"containers","derive":{"site":{"factory_a":"c1","factory_b":"c2"}}}}}' '#Config'
+accept_inline "entry missing a declared field passes cue (Rust rejects)"  '{"package":"p","version":"1","catalogues":{"containers":{"fields":{"width_mm":{"type":"integer"},"height_mm":{"type":"integer"}},"entries":{"c1":{"width_mm":800}}}}}' '#Config'
+accept_inline "entry with an undeclared field passes cue (Rust rejects)"  '{"package":"p","version":"1","catalogues":{"containers":{"fields":{"width_mm":{"type":"integer"}},"entries":{"c1":{"width_mm":800,"depth_mm":400}}}}}' '#Config'
+accept_inline "entry value of the wrong type passes cue (Rust rejects)"   '{"package":"p","version":"1","catalogues":{"containers":{"fields":{"width_mm":{"type":"integer"}},"entries":{"c1":{"width_mm":"wide"}}}}}' '#Config'
+accept_inline "binding default not an entry passes cue (Rust rejects)"    '{"package":"p","version":"1","catalogues":{"containers":{"fields":{"w":{"type":"integer"}},"entries":{"c1":{"w":1}}}},"bindings":{"line_container":{"catalogue":"containers","default":"c9"}}}' '#Config'
+accept_inline "binding default + derive passes cue (Rust rejects)"        '{"package":"p","version":"1","bindings":{"line_container":{"catalogue":"containers","default":"c1","derive":{"site":{"factory_a":"c1"}}}}}' '#Config'
+accept_inline "derive key outside the source domain passes cue (Rust rejects)" '{"package":"p","version":"1","facets":{"site":{"values":["factory_a"]}},"catalogues":{"containers":{"fields":{"w":{"type":"integer"}},"entries":{"c1":{"w":1}}}},"bindings":{"line_container":{"catalogue":"containers","derive":{"site":{"factory_z":"c1"}}}}}' '#Config'
+accept_inline "binding naming an unknown catalogue passes cue (Rust rejects)"  '{"package":"p","version":"1","bindings":{"line_container":{"catalogue":"nowhere"}}}' '#Config'
+
+# ADR-0057 §D4: component `requires`. CUE owns the SHAPE — the bare form is a
+# #snakeId, the explicit form is a closed struct with a required `binding` and a
+# non-empty `accepts` list of #snakeId. Everything cross-namespace is Rust's, in
+# link_verify::validate_requirements (`E_REQUIRES_INVALID`,
+# `E_BINDING_NO_ACCEPTABLE_ENTRY`): whether the binding is declared, whether an
+# accepted entry is in its catalogue, whether the list repeats an entry, and
+# whether the lists of two components intersect to nothing. Each of those
+# fixtures is asserted to PASS here and is rejected by the Rust twin in
+# compiler/src/link_verify_requires_tests.rs.
+accept_inline "bare requirement"                  '{"package":"p","version":"1","components":{"c":{"requires":{"container":"line_container"}}}}' '#Config'
+accept_inline "requirement with accepts"          '{"package":"p","version":"1","components":{"c":{"requires":{"container":{"binding":"line_container","accepts":["c1","c2"]}}}}}' '#Config'
+accept_inline "two slots on one component"        '{"package":"p","version":"1","components":{"c":{"requires":{"primary":"line_container","secondary":{"binding":"sorter_container","accepts":["c3"]}}}}}' '#Config'
+accept_inline "requirement naming an undeclared binding passes cue (Rust rejects)" '{"package":"p","version":"1","components":{"c":{"requires":{"container":"nowhere"}}}}' '#Config'
+accept_inline "accepts entry outside the catalogue passes cue (Rust rejects)"      '{"package":"p","version":"1","components":{"c":{"requires":{"container":{"binding":"line_container","accepts":["c9"]}}}}}' '#Config'
+accept_inline "duplicate accepts entry passes cue (Rust rejects)"                  '{"package":"p","version":"1","components":{"c":{"requires":{"container":{"binding":"line_container","accepts":["c1","c1"]}}}}}' '#Config'
+accept_inline "disjoint accepts lists pass cue (Rust rejects)"                     '{"package":"p","version":"1","components":{"a":{"requires":{"container":{"binding":"line_container","accepts":["c1"]}}},"b":{"requires":{"container":{"binding":"line_container","accepts":["c2"]}}}}}' '#Config'
+
+# ADR-0064 D1: a parameter may declare `facet: <name>`, making it that facet's
+# runtime handle. CUE owns the SHAPE — the value is a #snakeId, and
+# `#ConditionalBlock` closes the field off so a variant cannot rebind (the
+# rejects below). Everything that needs to look ACROSS namespaces or at the
+# whole model is Rust's, in link_verify::validate_facet_bindings_scoped: whether
+# the facet is declared, whether the effective type is `string`, whether the
+# parameter also authors a `value`, and whether a second parameter binds the
+# same facet. Each of those is asserted to PASS here and to be rejected by the
+# Rust twin in compiler/tests/facet_binding.rs.
+accept_inline "facet binding on a component param" '{"package":"p","version":"1","facets":{"tier":{"values":["basic"]}},"components":{"c":{"params":{"h":{"type":"string","facet":"tier"}}}}}' '#Config'
+accept_inline "facet binding on a definition"      '{"package":"p","version":"1","definitions":{"d":{"type":"string","facet":"tier"}}}' '#Config'
+accept_inline "binding an undeclared facet passes cue (Rust rejects)"   '{"package":"p","version":"1","components":{"c":{"params":{"h":{"type":"string","facet":"nowhere"}}}}}' '#Config'
+accept_inline "non-string bound param passes cue (Rust rejects)"        '{"package":"p","version":"1","components":{"c":{"params":{"h":{"type":"integer","facet":"tier"}}}}}' '#Config'
+accept_inline "bound param with its own value passes cue (Rust rejects)" '{"package":"p","version":"1","components":{"c":{"params":{"h":{"type":"string","facet":"tier","value":"basic"}}}}}' '#Config'
+accept_inline "two params binding one facet passes cue (Rust rejects)"  '{"package":"p","version":"1","components":{"a":{"params":{"h":{"type":"string","facet":"tier"}}},"b":{"params":{"h":{"type":"string","facet":"tier"}}}}}' '#Config'
+
 echo "  positives: $pos ok, $pos_fail failed"
 
 echo "== negative: malformed input must be rejected =="
@@ -200,10 +257,49 @@ check_reject "facet id with __"            '{"package":"p","version":"1","facets
 # invariants — the expression parses, its facets/values exist — are Rust's, see
 # the positive block above.)
 check_reject "constraint missing condition" '{"package":"p","version":"1","constraints":{"c":{"doc":"no condition"}}}' '#Config'
+
+# ADR-0057 §D4: requirement-shape violations CUE catches structurally. (The
+# semantic invariants — the binding is declared, the entries exist, the lists
+# intersect — are Rust's, see the positive block above.)
+check_reject "requirement empty accepts"        '{"package":"p","version":"1","components":{"c":{"requires":{"container":{"binding":"line_container","accepts":[]}}}}}' '#Config'
+check_reject "requirement missing binding"      '{"package":"p","version":"1","components":{"c":{"requires":{"container":{"accepts":["c1"]}}}}}' '#Config'
+check_reject "requirement unknown field"        '{"package":"p","version":"1","components":{"c":{"requires":{"container":{"binding":"line_container","bogus":1}}}}}' '#Config'
+check_reject "requirement accepts non-string"   '{"package":"p","version":"1","components":{"c":{"requires":{"container":{"binding":"line_container","accepts":[1]}}}}}' '#Config'
+check_reject "requirement binding not snake"    '{"package":"p","version":"1","components":{"c":{"requires":{"container":"Line__Container"}}}}' '#Config'
+check_reject "requirement slot key with __"     '{"package":"p","version":"1","components":{"c":{"requires":{"foo__bar":"line_container"}}}}' '#Config'
+
+# ADR-0064 D1: CUE's OWN share of the binding rules. A binding is a property of
+# the parameter, not of a variant of it, so `#ConditionalBlock` closes the field
+# off; and the value names a facet, so it carries the #snakeId charset CUE
+# already owns. The JSON-direct path never evaluates CUE, so both are re-checked
+# in Rust (compiler/tests/facet_binding.rs).
+check_reject "facet inside an override"     '{"package":"p","version":"1","components":{"c":{"params":{"h":{"type":"string","facet":"tier","overrides":[{"condition":"x","facet":"site"}]}}}}}' '#Config'
+check_reject "facet binding with __"        '{"package":"p","version":"1","components":{"c":{"params":{"h":{"type":"string","facet":"foo__bar"}}}}}' '#Config'
+check_reject "facet binding non-string"     '{"package":"p","version":"1","components":{"c":{"params":{"h":{"type":"string","facet":1}}}}}' '#Config'
 check_reject "constraint condition non-string" '{"package":"p","version":"1","constraints":{"c":{"condition":1}}}' '#Config'
 check_reject "constraint doc non-string"    '{"package":"p","version":"1","constraints":{"c":{"condition":"a == '"'"'b'"'"'","doc":1}}}' '#Config'
 check_reject "constraint unknown field"     '{"package":"p","version":"1","constraints":{"c":{"condition":"a == '"'"'b'"'"'","bogus":1}}}' '#Config'
 check_reject "constraint id with __"        '{"package":"p","version":"1","constraints":{"foo__bar":{"condition":"a == '"'"'b'"'"'"}}}' '#Config'
+
+# ADR-0057 §D2/§D3: catalogue/binding SHAPE violations CUE catches
+# structurally. (The semantic invariants — entry completeness, type
+# agreement, catalogue existence, default/derive membership — are Rust's;
+# see the accept_inline block above.)
+check_reject "catalogue missing fields" '{"package":"p","version":"1","catalogues":{"c":{"entries":{"e":{"w":1}}}}}' '#Config'
+check_reject "catalogue missing entries" '{"package":"p","version":"1","catalogues":{"c":{"fields":{"w":{"type":"integer"}}}}}' '#Config'
+check_reject "catalogue field unknown type" '{"package":"p","version":"1","catalogues":{"c":{"fields":{"w":{"type":"decimal"}},"entries":{"e":{"w":1}}}}}' '#Config'
+check_reject "catalogue field missing type" '{"package":"p","version":"1","catalogues":{"c":{"fields":{"w":{"unit":"mm"}},"entries":{"e":{"w":1}}}}}' '#Config'
+check_reject "catalogue field unknown key" '{"package":"p","version":"1","catalogues":{"c":{"fields":{"w":{"type":"integer","bogus":1}},"entries":{"e":{"w":1}}}}}' '#Config'
+check_reject "catalogue unknown top-level key" '{"package":"p","version":"1","catalogues":{"c":{"fields":{"w":{"type":"integer"}},"entries":{"e":{"w":1}},"bogus":1}}}' '#Config'
+check_reject "catalogue id with __" '{"package":"p","version":"1","catalogues":{"foo__bar":{"fields":{"w":{"type":"integer"}},"entries":{"e":{"w":1}}}}}' '#Config'
+check_reject "catalogue entry id not snake_case" '{"package":"p","version":"1","catalogues":{"c":{"fields":{"w":{"type":"integer"}},"entries":{"C1":{"w":1}}}}}' '#Config'
+check_reject "catalogue entry value is a list" '{"package":"p","version":"1","catalogues":{"c":{"fields":{"w":{"type":"integer"}},"entries":{"e":{"w":[1]}}}}}' '#Config'
+check_reject "binding missing catalogue" '{"package":"p","version":"1","bindings":{"b":{"default":"c1"}}}' '#Config'
+check_reject "binding catalogue not snake_case" '{"package":"p","version":"1","bindings":{"b":{"catalogue":"Containers"}}}' '#Config'
+check_reject "binding unknown field" '{"package":"p","version":"1","bindings":{"b":{"catalogue":"c","bogus":1}}}' '#Config'
+check_reject "binding derive entry not snake_case" '{"package":"p","version":"1","bindings":{"b":{"catalogue":"c","derive":{"site":{"factory_a":"C1"}}}}}' '#Config'
+check_reject "binding derive source not snake_case" '{"package":"p","version":"1","bindings":{"b":{"catalogue":"c","derive":{"Site":{"factory_a":"c1"}}}}}' '#Config'
+check_reject "binding id with __" '{"package":"p","version":"1","bindings":{"foo__bar":{"catalogue":"c"}}}' '#Config'
 
 echo "== summary =="
 if [ "$pos_fail" -eq 0 ] && [ "$neg_fail" -eq 0 ]; then

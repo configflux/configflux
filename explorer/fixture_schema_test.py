@@ -26,6 +26,10 @@ is asserted against the derived value below.
 Its ``model_hash`` and ``selection_state_hash`` are documented stand-ins and are
 deliberately left unguarded — see the coupling block below.
 
+The same value is quoted in ``explorer/fixtures/README.md``, which explains its
+provenance, and that quotation is pinned to the fixture here too: prose that
+names a hash can rot as easily as a fixture can, and did.
+
 This test is wired into ``//...``; the Playwright smoke suite
 (``tools/explorer_smoke_test.py``) is deliberately NOT (ADR-0043 §4).
 """
@@ -50,6 +54,7 @@ FIXTURES = {
     "s1-facets.json": "array",
     "s1-resolve-snapshot.json": "object",
     "s1-explain-conflict.json": "object",
+    "s-requires-resolve-snapshot.json": "object",
 }
 
 # Minimal structural expectations per fixture (a light shape check on top of the
@@ -58,7 +63,20 @@ REQUIRED_KEYS = {
     "s1-model-summary.json": ("status", "source_digest", "query", "summary"),
     "s1-resolve-snapshot.json": ("status", "model_hash", "selection_state_hash", "resolve_hash", "resolved_output"),
     "s1-explain-conflict.json": ("status", "model_hash", "facet", "option", "rejection"),
+    "s-requires-resolve-snapshot.json": ("status", "model_hash", "selection_state_hash", "resolve_hash", "resolved_output"),
 }
+
+# --- requirement delivery (ADR-0057 D7, configflux-secb.6) -------------------
+#
+# The Resolution view renders a requirements table, and a table with nothing to
+# render is no evidence that it works. ``s-requires-resolve-snapshot.json`` is
+# real ``cfx resolve`` output over ``compiler/scenarios/s_requires_delivery``, so
+# the block below is the pipeline's rather than an illustration: every field
+# traces to the catalogue entry the binding resolved to.
+REQUIRES_FIXTURE = "s-requires-resolve-snapshot.json"
+REQUIRES_EXPECTED_BINDING = ("container", "line_container", "c1")
+REQUIRES_EXPECTED_COMPONENTS = ("compute_service", "vision_service")
+REQUIRES_EXPECTED_FIELDS = {"height_mm": 1000, "length_mm": 1200, "width_mm": 800}
 
 # --- byte-stability coupling (configflux-6zvh) -------------------------------
 #
@@ -78,7 +96,41 @@ SNAPSHOT_FIXTURE = "s1-resolve-snapshot.json"
 BASELINE_SCENARIO = "s1-smoke"
 BASELINE_FIXTURE = "compiler/tests/fixtures/byte-stability-baselines.json"
 GUARDED_HASHES = frozenset({"resolve_hash"})
-STAND_IN_HASHES = frozenset({"model_hash", "selection_state_hash"})
+# resolved_output_hash (ADR-0059 D3) is classified as UNGUARDED deliberately,
+# and this is the decision test_hash_lineage_fields_are_classified exists to
+# force. It cannot be guarded against the baseline: the baseline records a
+# `component:thermal_control`-scoped resolve, while this fixture's payload is
+# `all`-scoped, so the two hashes are of different payloads by construction and
+# pinning one to the other would be a false failure on every run — the same
+# reason model_hash and selection_state_hash sit here. Unlike those two it is
+# not a label digest: it is the real sha256 of THIS fixture's own
+# {schema_version, scope, resolved_output}, which is self-consistent with the
+# bytes the explorer renders. Adding a resolved_output_hash column to
+# byte-stability-baselines.json would make it guardable and is the way to
+# promote it into GUARDED_HASHES later.
+STAND_IN_HASHES = frozenset(
+    {"model_hash", "selection_state_hash", "resolved_output_hash"}
+)
+
+# --- README quotation coupling (configflux-p6sw) -----------------------------
+#
+# fixtures/README.md quotes the snapshot's resolve_hash in abbreviated form
+# while explaining why that one value is authentic. Nothing tied the quotation
+# to the fixture, so a rotation that regenerated the snapshot left the prose
+# citing a hash the file no longer carries — which is how the README came to
+# name a value from two rotations earlier. The guard below closes that gap: the
+# prefix the prose quotes must still be a prefix of the fixture's hash.
+#
+# fixtures/README.md is a ``data`` dep of this target for the same
+# cache-invalidation reason as product_api.rs and the baselines: without the
+# edge, editing the prose alone leaves this test cached PASSED.
+SNAPSHOT_README = "README.md"
+# ``Its `resolve_hash` (`9b3e63b9…`) is the authentic S1 smoke value`` — the
+# quotation is deliberately matched in place rather than searched for loosely,
+# so rewording the sentence fails the parse instead of silently unhooking it.
+_README_QUOTED_HASH = re.compile(
+    r"`resolve_hash`\s*\(\s*`([0-9a-f]{8,64})(?:\u2026|\.\.\.)?`\s*\)"
+)
 
 # ADR-0054 gives every declared constraint an identity the solver carries into
 # the labeled core, so a model_rule with no constraint_id was never emitted.
@@ -234,6 +286,32 @@ def _baseline_hash(source: str, scenario: str, field: str) -> str:
     return value
 
 
+def _readme_quoted_resolve_hash(source: str) -> str:
+    """Return the resolve_hash prefix quoted in ``fixtures/README.md``.
+
+    Exactly one quotation is expected. Zero means the sentence was reworded and
+    the coupling is no longer anchored; more than one means the prose grew a
+    second claim this guard does not cover. Both raise, for the reason
+    ``_baseline_hash`` raises: a guard that quietly stops matching still reports
+    green, which is worse than no guard at all.
+    """
+    found = _README_QUOTED_HASH.findall(source)
+    if not found:
+        raise AssertionError(
+            f"fixtures/{SNAPSHOT_README} no longer quotes the snapshot's "
+            "resolve_hash in the form `resolve_hash` (`<prefix>\u2026`); the "
+            "prose-to-fixture guard is unanchored until the sentence or this "
+            "pattern is restored"
+        )
+    if len(found) > 1:
+        raise AssertionError(
+            f"fixtures/{SNAPSHOT_README} quotes {len(found)} resolve_hash "
+            "values; this guard checks one, so the extra quotation is "
+            "unguarded prose"
+        )
+    return found[0]
+
+
 def _parse_product_schema_version(source: str) -> int:
     """Return PRODUCT_SCHEMA_VERSION as declared in product_api.rs source text.
 
@@ -320,6 +398,25 @@ class FixtureSchemaTest(unittest.TestCase):
                     f"(explorer/fixtures/README.md)",
                 )
 
+    def test_readme_quotes_the_hash_the_fixture_carries(self) -> None:
+        """The prose must quote the hash the fixture actually holds.
+
+        The README explains the snapshot's provenance by naming its
+        resolve_hash, and that quotation was free to rot: it named a value from
+        an earlier rotation while every automated check stayed green. Pinning
+        the quoted prefix to the fixture makes the next rotation fail here.
+        """
+        snapshot = json.loads((self.fixtures / SNAPSHOT_FIXTURE).read_text(encoding="utf-8"))
+        readme = (self.fixtures / SNAPSHOT_README).read_text(encoding="utf-8")
+        quoted = _readme_quoted_resolve_hash(readme)
+        actual = snapshot.get("resolve_hash")
+        self.assertTrue(
+            isinstance(actual, str) and actual.startswith(quoted),
+            f"fixtures/{SNAPSHOT_README} quotes resolve_hash {quoted!r}, but "
+            f"{SNAPSHOT_FIXTURE} carries {actual!r}; correct the prose when the "
+            "fixture is regenerated (the abbreviation must stay a prefix)",
+        )
+
     def test_hash_lineage_fields_are_classified(self) -> None:
         """Every top-level ``*_hash`` field is guarded or a known stand-in.
 
@@ -338,6 +435,48 @@ class FixtureSchemaTest(unittest.TestCase):
             "decide whether the new field is authentic (guard it against "
             f"{BASELINE_FIXTURE}) or a stand-in (add it to STAND_IN_HASHES)",
         )
+
+    def test_requires_fixture_carries_a_delivered_catalogue_entry(self) -> None:
+        """The Resolution view's requirements table must have real data to show.
+
+        Without this, the fixture set would demonstrate schema 5 while showing
+        nothing the schema bump was for, and a regression that stopped emitting
+        the block would leave every explorer check green.
+        """
+        snapshot = json.loads((self.fixtures / REQUIRES_FIXTURE).read_text(encoding="utf-8"))
+        scopes = snapshot["resolved_output"]
+        self.assertTrue(scopes, f"{REQUIRES_FIXTURE} carries no resolved scope")
+        slot, binding, entry = REQUIRES_EXPECTED_BINDING
+        for scope_root, scope in scopes.items():
+            components = scope["components"]
+            for component_id in REQUIRES_EXPECTED_COMPONENTS:
+                with self.subTest(scope=scope_root, component=component_id):
+                    requires = components[component_id].get("requires")
+                    self.assertIsNotNone(
+                        requires,
+                        f"{component_id} carries no requires block; regenerate the "
+                        "fixture (explorer/fixtures/README.md)",
+                    )
+                    delivered = requires[slot]
+                    self.assertEqual(delivered["binding"], binding)
+                    self.assertEqual(delivered["entry"], entry)
+                    self.assertEqual(delivered["fields"], REQUIRES_EXPECTED_FIELDS)
+
+    def test_requires_view_renders_every_field_of_a_delivered_entry(self) -> None:
+        """resolution_view.js must read the block the fixture carries.
+
+        Read out of the JS rather than restated, for the same reason the explain
+        wording is: a renamed key in the view would otherwise leave the fixture
+        guard green while the table rendered empty cells.
+        """
+        js = (self.root / "js" / "resolution_view.js").read_text(encoding="utf-8")
+        for key in ("requires", "binding", "entry", "fields"):
+            self.assertIn(
+                key,
+                js,
+                f"resolution_view.js no longer reads '{key}'; the requirements "
+                "table cannot render a delivered catalogue entry without it",
+            )
 
     def test_explain_core_names_the_constraint_it_came_from(self) -> None:
         """The checks above pass on any well-formed object; this one is what stops
@@ -524,14 +663,67 @@ class BaselineHashParseTest(unittest.TestCase):
         )
 
     def test_stand_ins_are_not_guarded(self) -> None:
-        """The two stand-in fields must stay out of the guarded set.
+        """The unguarded fields must stay out of the guarded set.
 
-        README.md documents them as sha256 of a stable label, not pipeline
-        output. Guarding them against the baseline would fail on every run.
+        model_hash and selection_state_hash are documented in README.md as
+        sha256 of a stable label, not pipeline output. resolved_output_hash IS
+        pipeline-shaped but is unguardable here for a different reason: the
+        baseline records a component:thermal_control resolve while this fixture
+        is all-scoped, so the two hash different payloads by construction.
+        Guarding any of the three against the baseline would fail on every run.
+
+        Pinning the exact set is what makes adding a field a decision: a new
+        lineage field cannot reach STAND_IN_HASHES without this assertion — and
+        so a human — being updated.
         """
         self.assertFalse(GUARDED_HASHES & STAND_IN_HASHES)
-        self.assertEqual(STAND_IN_HASHES, frozenset({"model_hash", "selection_state_hash"}))
+        self.assertEqual(
+            STAND_IN_HASHES,
+            frozenset({"model_hash", "selection_state_hash", "resolved_output_hash"}),
+        )
 
+
+class ReadmeQuotedHashParseTest(unittest.TestCase):
+    """The parse that couples the fixture to the prose describing it."""
+
+    def test_reads_an_abbreviated_quotation(self) -> None:
+        self.assertEqual(
+            _readme_quoted_resolve_hash("Its `resolve_hash` (`9b3e63b9\u2026`) is the"),
+            "9b3e63b9",
+        )
+
+    def test_reads_an_ascii_abbreviation(self) -> None:
+        self.assertEqual(
+            _readme_quoted_resolve_hash("Its `resolve_hash` (`9b3e63b9...`) is the"),
+            "9b3e63b9",
+        )
+
+    def test_reads_a_full_hash(self) -> None:
+        full = "9b3e63b9" * 8
+        self.assertEqual(
+            _readme_quoted_resolve_hash(f"Its `resolve_hash` (`{full}`) is the"), full
+        )
+
+    def test_rejects_a_reworded_sentence(self) -> None:
+        """A rewrite that drops the quotation must fail loudly, never disable
+        the guard."""
+        with self.assertRaises(AssertionError):
+            _readme_quoted_resolve_hash("Its resolve_hash is the authentic value.")
+
+    def test_rejects_a_second_quotation(self) -> None:
+        with self.assertRaises(AssertionError):
+            _readme_quoted_resolve_hash(
+                "`resolve_hash` (`9b3e63b9\u2026`) and `resolve_hash` (`0a6a3d6e\u2026`)"
+            )
+
+    def test_bites_on_a_stale_quotation(self) -> None:
+        """The assertion the guard exists for: a prefix from an earlier
+        rotation is not a prefix of the hash the fixture now carries."""
+        snapshot = json.loads(
+            (_explorer_dir() / "fixtures" / SNAPSHOT_FIXTURE).read_text(encoding="utf-8")
+        )
+        stale = _readme_quoted_resolve_hash("`resolve_hash` (`1f93f566\u2026`)")
+        self.assertFalse(snapshot["resolve_hash"].startswith(stale))
 
 if __name__ == "__main__":
     unittest.main()

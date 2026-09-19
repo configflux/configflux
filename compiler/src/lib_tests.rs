@@ -2,7 +2,8 @@
 
     use super::*;
     use crate::compiler_core::SourceChunk;
-    use crate::ingest_merge::build_ir_index;
+    use crate::link_verify::validate_link_summary;
+    use crate::interface_summary::{summarize, InterfaceSummary};
     use crate::resolver::{resolve, ResolutionContext};
     use crate::scenario_test_support::unique_temp_path;
     use crate::schema::{Component, Config, Parameter};
@@ -29,8 +30,18 @@
             access: None,
             limits: None,
             req_id: None,
+            facet: None,
             overrides: Vec::new(),
         }
+    }
+
+    /// One interface summary per chunk — what `Compiler::emit_ir` builds once
+    /// and hands to the link checks and the index builder (ADR-0057 §D9).
+    fn summaries(chunks: &[SourceChunk]) -> Vec<InterfaceSummary> {
+        chunks
+            .iter()
+            .map(|chunk| summarize(&chunk.config, &chunk.source_id))
+            .collect()
     }
 
     fn config_with_component(name: &str) -> Config {
@@ -41,6 +52,7 @@
                 r#type: Some("actuator".to_string()),
                 condition: None,
                 depends_on: Vec::new(),
+                requires: Default::default(),
                 params: HashMap::new(),
             },
         );
@@ -53,6 +65,8 @@
             artifacts: HashMap::new(),
             facets: Default::default(),
             constraints: Default::default(),
+            catalogues: Default::default(),
+            bindings: Default::default(),
         }
     }
 
@@ -70,6 +84,8 @@
             artifacts: HashMap::new(),
             facets: Default::default(),
             constraints: Default::default(),
+            catalogues: Default::default(),
+            bindings: Default::default(),
         }
     }
 
@@ -83,7 +99,7 @@
     // with it, along with the `Compiler::add_chunk` inline convenience wrapper
     // whose only callers they were. The tests that remain here cover the code
     // that stays Rust-owned: the resolve-time override/late-binding engine, the
-    // component-dependency and definition-cycle detectors, `build_ir_index`'s
+    // component-dependency and definition-cycle detectors, the
     // one-entity-one-chunk invariant, and IR emission. Surviving link-verify
     // tests feed their TOML through `add_chunk_auto` (the retained content
     // router), the same entry point the scenario mutation fixtures use.
@@ -347,7 +363,14 @@
     }
 
     #[test]
-    fn test_build_ir_index_duplicate_component() {
+    fn test_one_entity_one_chunk_rejects_a_duplicate_component() {
+        // The one-entity-one-chunk invariant is `validate_link_summary`'s
+        // (ADR-0057 §D9), and every path that emits an index runs it first —
+        // `Compiler::emit_ir` before the write, and the linker's stage 1 over
+        // the merged object headers (ADR-0058 §D4). Asserting it there rather
+        // than through the index builder is what keeps ONE statement of the
+        // rule: configflux-p0jz.2 made the builder a pure function of what each
+        // chunk declares so `compile` and `link` share it.
         let chunks = vec![
             SourceChunk {
                 source_id: "a.toml".to_string(),
@@ -361,7 +384,7 @@
             },
         ];
 
-        let err = build_ir_index(&chunks).unwrap_err();
+        let err = validate_link_summary(&summaries(&chunks)).unwrap_err();
         assert!(
             format!("{err}").contains("Component 'motor' appears in multiple chunks"),
             "err: {err}"
@@ -369,7 +392,7 @@
     }
 
     #[test]
-    fn test_build_ir_index_duplicate_definition() {
+    fn test_one_entity_one_chunk_rejects_a_duplicate_definition() {
         let chunks = vec![
             SourceChunk {
                 source_id: "a.toml".to_string(),
@@ -383,7 +406,7 @@
             },
         ];
 
-        let err = build_ir_index(&chunks).unwrap_err();
+        let err = validate_link_summary(&summaries(&chunks)).unwrap_err();
         assert!(
             format!("{err}").contains("Definition 'speed' appears in multiple chunks"),
             "err: {err}"
@@ -391,7 +414,7 @@
     }
 
     #[test]
-    fn test_build_ir_index_duplicate_artifact() {
+    fn test_one_entity_one_chunk_rejects_a_duplicate_artifact() {
         let mut config_a = config_with_component("motor");
         config_a.artifacts.insert(
             "motor_driver".to_string(),
@@ -431,7 +454,7 @@
             },
         ];
 
-        let err = build_ir_index(&chunks).unwrap_err();
+        let err = validate_link_summary(&summaries(&chunks)).unwrap_err();
         assert!(
             format!("{err}").contains("Artifact 'motor_driver' appears in multiple chunks"),
             "err: {err}"

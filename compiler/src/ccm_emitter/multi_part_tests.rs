@@ -237,6 +237,7 @@ pub(super) fn rostered_model() -> ConditionModel {
             "exactly_one_of(environment == 'dev', environment == 'prod')".to_string(),
             "exactly_one_of(log_level == 'info', log_level == 'debug')".to_string(),
         ],
+        facet_domains: Default::default(),
     }
 }
 

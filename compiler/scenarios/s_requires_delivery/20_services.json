@@ -1,0 +1,48 @@
+{
+    "package": "services_unit",
+    "version": "1.0.0",
+    "components": {
+        "vision_service": {
+            "type": "service",
+            "requires": {
+                "container": "line_container"
+            },
+            "params": {
+                "roi_margin_mm": {
+                    "inherits": "grid_cell_mm",
+                    "type": "integer",
+                    "unit": "mm",
+                    "doc": "Margin held around the container when framing the region of interest.",
+                    "lifecycle": "startup",
+                    "safety": "q_m",
+                    "access": "integrator",
+                    "value": 40
+                }
+            }
+        },
+        "compute_service": {
+            "type": "service",
+            "requires": {
+                "container": {
+                    "binding": "line_container",
+                    "accepts": [
+                        "c1",
+                        "c2"
+                    ]
+                }
+            },
+            "params": {
+                "grid_cell_mm": {
+                    "inherits": "grid_cell_mm",
+                    "type": "integer",
+                    "unit": "mm",
+                    "doc": "Edge length of one occupancy-grid cell over the container footprint.",
+                    "lifecycle": "startup",
+                    "safety": "q_m",
+                    "access": "integrator",
+                    "value": 50
+                }
+            }
+        }
+    }
+}

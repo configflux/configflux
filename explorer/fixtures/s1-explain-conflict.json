@@ -1,7 +1,7 @@
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "status": "ok",
-  "model_hash": "82fd23528e1b1d33b8e423d7a37c8a3d0027e270c9dd8fbc52ec05dab535aa88",
+  "model_hash": "787c3e9c33c7e21520f90138e9d5678aae06f257cc7dde7a4dfda2d22feb9d7c",
   "scope": "all",
   "facet": "cooling_model",
   "option": "x200",
@@ -51,7 +51,7 @@
   "error_count": 0,
   "warning_count": 0,
   "diagnostics": {
-    "schema_version": 4,
+    "schema_version": 5,
     "diagnostics": [],
     "error_count": 0,
     "warning_count": 0

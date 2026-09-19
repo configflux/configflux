@@ -335,12 +335,33 @@ pub fn commit_configuration(request: CommitConfigurationRequest) -> CommitConfig
         }
     };
     let base_configuration_id = base_identity.committed_configuration_id;
-    if let Some(expected_base) = request
-        .expected_base_configuration_id
-        .as_ref()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-    {
+    if let Some(expected_base) = request.expected_base_configuration_id.as_deref() {
+        // A field the caller SENT is an expectation, exactly as sent. There is no
+        // trim and no blank filter: a blank used to mean "no expectation at all",
+        // so a request assembled from an unset variable committed with no
+        // compare-and-swap enforced and reported ok, and a padded digest was
+        // trimmed into a match the caller never sent (configflux-8gah). Only an
+        // omitted or null field is absent. The gate then runs ahead of the
+        // comparison, because an unmatchable value reported as a base mismatch
+        // tells the operator the configuration moved under them when the fault
+        // is the value they sent (configflux-11wx).
+        if !is_sha256_hex(expected_base) {
+            return commit_configuration_failed(
+                model_hash,
+                resolve_hash,
+                scope,
+                vec![Diagnostic {
+                    code: E_RUNTIME_COMMIT_INVALID.to_string(),
+                    severity: DiagnosticSeverity::Error,
+                    message:
+                        "request.expected_base_configuration_id must be a 64-char lowercase sha256 hex string"
+                            .to_string(),
+                    source_id: None,
+                    entity_path: Some("request.expected_base_configuration_id".to_string()),
+                    hint: Some("Use configuration IDs returned by get_configuration_identity".to_string()),
+                }],
+            );
+        }
         if expected_base != base_configuration_id {
             return commit_configuration_failed(
                 model_hash,

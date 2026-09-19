@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "environments": {
+    "factory_a": {
+      "scope": "component:vision_service",
+      "context_tags": {},
+      "choices": {
+        "site": "factory_a",
+        "sorter_container": "c3",
+        "sorter_lanes": "narrow"
+      }
+    },
+    "factory_b": {
+      "scope": "component:vision_service",
+      "context_tags": {},
+      "choices": {
+        "site": "factory_b",
+        "sorter_container": "c3",
+        "sorter_lanes": "wide"
+      }
+    }
+  }
+}

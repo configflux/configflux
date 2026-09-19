@@ -42,6 +42,10 @@ struct PullUpdateWrite {
 struct CommitConfigurationServiceRequest {
   std::string runtime_snapshot_json;
   ControlOperationContext context;
+  // Unset means no compare-and-swap guard: the field is omitted from the
+  // request. Set -- even to an empty string -- is forwarded to the runtime
+  // exactly as sent, and the runtime refuses a blank or otherwise malformed
+  // expected id instead of treating it as absent.
   std::optional<std::string> expected_base_configuration_id;
   std::vector<std::string> changed_ros_parameter_hints;
 };

@@ -23,6 +23,7 @@ use std::collections::HashMap;
 
 mod ast;
 mod eval;
+mod facet_compare;
 mod implication;
 mod rewrite;
 mod selection_eval;
@@ -38,14 +39,25 @@ pub use rewrite::{condition_identifiers, rewrite_condition_identifiers, Conditio
 // backing `condition_implies_typed` below (the link_verify dependency-
 // subsumption check). Replaced the string-scanning matrix engine.
 pub(crate) use implication::condition_expr_implies;
+// configflux-secb.2 / ADR-0057 §D5: the facet-to-facet comparison expansion.
+// `ccm_emitter::parse_condition_model` is its only caller — the two BDD
+// backends cannot see facet domains, so the node is rewritten into the core
+// grammar once, before either of them folds it.
+pub(crate) use facet_compare::{
+    expand_facet_comparisons, for_each_condition_operand, ConditionOperand, FacetDomains,
+};
 // configflux-ccs.7: typed-AST selection-constraint evaluator. Replaces the
 // string-scanning option-validity path in loader_api/shared_ops.rs.
 // configflux-9xxq / ADR-0054 §5.1: `for_each_predicate_symbol` is the
 // symbol-universe walk (both operators), used to land a branch selector's
 // `(facet, value)` symbols without asserting the selector on the BDD root.
+// configflux-vfh5: `is_contradicted` + `FacetWorld` are the same evaluator asked
+// the same question by a caller holding wider facts — a core clause restricts a
+// facet to a SET of still-possible values rather than binding it to one.
+// ADR-0054 §5.4 attribution reads a clause through them.
 pub(crate) use selection_eval::{
-    for_each_eq_predicate, for_each_predicate_symbol, is_pure_conjunction, mentions_eq,
-    not_contradicted,
+    for_each_eq_predicate, for_each_predicate_symbol, is_contradicted, is_pure_conjunction,
+    mentions_eq, not_contradicted, FacetWorld,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -240,8 +252,11 @@ mod tests {
     fn condition_implies_rejects_unparseable_condition() {
         // The typed entry parses both sides through the validated grammar, so a
         // malformed condition surfaces a descriptive parse error instead of a
-        // silent verdict.
-        let err = condition_implies_typed(Some("variant == heavy"), Some("variant == 'heavy'"))
+        // silent verdict. `variant == heavy` is no longer malformed — it is a
+        // facet-to-facet comparison (configflux-secb.2 / ADR-0057 §D5) — so the
+        // fixture is a right-hand side that is neither a literal nor an
+        // identifier.
+        let err = condition_implies_typed(Some("variant == 3"), Some("variant == 'heavy'"))
             .unwrap_err();
         assert!(
             format!("{err}").contains("Failed to parse component condition"),

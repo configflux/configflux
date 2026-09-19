@@ -138,7 +138,7 @@ resolve_cell() {
 
   # open
   python3 -c 'import json,sys
-json.dump({"schema_version":4,"cmp_manifest_ref":sys.argv[1]},open(sys.argv[2],"w"))' \
+json.dump({"schema_version":5,"cmp_manifest_ref":sys.argv[1]},open(sys.argv[2],"w"))' \
     "${OUT}/cmp/cmp.manifest.json" "${work}/open.req.json"
   "${INTERPRETER}" open --request-file "${work}/open.req.json" --response-file "${work}/open.res.json"
   assert_status_ok "${work}/open.res.json" "open(${env_name},${root})"
@@ -147,7 +147,7 @@ json.dump({"schema_version":4,"cmp_manifest_ref":sys.argv[1]},open(sys.argv[2],"
   python3 -c 'import json,sys
 o=json.load(open(sys.argv[1])); m=json.load(open(sys.argv[2]))
 env=m["environments"][sys.argv[4]]
-json.dump({"schema_version":4,"model_handle":o["model_handle"],"scope":sys.argv[3],
+json.dump({"schema_version":5,"model_handle":o["model_handle"],"scope":sys.argv[3],
           "context_tags":env.get("context_tags",{})},open(sys.argv[5],"w"))' \
     "${work}/open.res.json" "${MANIFEST}" "${scope}" "${env_name}" "${work}/init.req.json"
   "${INTERPRETER}" init-selection-state \
@@ -167,7 +167,7 @@ print(" ".join(sorted(m["environments"][sys.argv[2]].get("choices",{}).keys())))
     python3 -c 'import json,sys
 o=json.load(open(sys.argv[1])); s=json.load(open(sys.argv[2])); m=json.load(open(sys.argv[3]))
 opt=m["environments"][sys.argv[5]]["choices"][sys.argv[6]]
-json.dump({"schema_version":4,"model_handle":o["model_handle"],"scope":sys.argv[4],
+json.dump({"schema_version":5,"model_handle":o["model_handle"],"scope":sys.argv[4],
           "selection_state":s["selection_state"],
           "selection_delta":{"facet":sys.argv[6],"option":opt}},open(sys.argv[7],"w"))' \
       "${work}/open.res.json" "${prev}" "${MANIFEST}" "${scope}" "${env_name}" "${facet}" \
@@ -182,7 +182,7 @@ json.dump({"schema_version":4,"model_handle":o["model_handle"],"scope":sys.argv[
   # resolve
   python3 -c 'import json,sys
 o=json.load(open(sys.argv[1])); s=json.load(open(sys.argv[2]))
-json.dump({"schema_version":4,"model_handle":o["model_handle"],"scope":sys.argv[3],
+json.dump({"schema_version":5,"model_handle":o["model_handle"],"scope":sys.argv[3],
           "selection_state":s["selection_state"]},open(sys.argv[4],"w"))' \
     "${work}/open.res.json" "${prev}" "${scope}" "${work}/resolve.req.json"
   local snap="${OUT}/resolved/${env_name}/${root}/resolve_result.${root}.json"

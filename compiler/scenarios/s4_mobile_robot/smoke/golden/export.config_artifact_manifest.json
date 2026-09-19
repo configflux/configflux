@@ -22,5 +22,5 @@
   "model_hash": "__DYNAMIC_MODEL_HASH__",
   "profile": "cpp_early_binding_v1",
   "resolve_hash": "__DYNAMIC_RESOLVE_HASH__",
-  "schema_version": 4
+  "schema_version": 5
 }

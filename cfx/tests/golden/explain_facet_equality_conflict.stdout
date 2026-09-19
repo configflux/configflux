@@ -1,0 +1,4 @@
+cannot select sorter_container.c2:
+  blocked by your earlier choice: line_container.c1
+  blocked by constraint groups_equal: sorter_container == line_container
+(one minimal explanation; other minimal cores may exist)

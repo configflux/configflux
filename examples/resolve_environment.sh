@@ -16,7 +16,7 @@
 # file):
 #
 #   {
-#     "schema_version": 3,
+#     "schema_version": 1,
 #     "environments": {
 #       "<name>": {
 #         "scope": "component:<name>" | "all",
@@ -204,8 +204,11 @@ selection_label() {
   if [[ -z "${label}" ]]; then
     label="${env_name}"
   fi
-  # Restrict to a safe token set for a file name component.
-  echo "${label}" | tr -c 'A-Za-z0-9._-' '_'
+  # Restrict to a safe token set for a file name component. `printf '%s'`, NOT
+  # `echo`: echo appends a newline, which `tr` then folds into the safe set as a
+  # trailing '_' — so every label came out as "<values>_" and no longer matched
+  # the name `cfx resolve --out` writes for the same target (configflux-dkmm.1).
+  printf '%s' "${label}" | tr -c 'A-Za-z0-9._-' '_'
 }
 
 # The <root> component of the snapshot name is the scope root: the part after
@@ -215,7 +218,7 @@ scope_root() {
   case "${scope}" in
     component:*) echo "${scope#component:}" ;;
     all)         echo "all" ;;
-    *)           echo "${scope}" | tr -c 'A-Za-z0-9._-' '_' ;;
+    *)           printf '%s' "${scope}" | tr -c 'A-Za-z0-9._-' '_' ;;
   esac
 }
 
@@ -250,7 +253,7 @@ resolve_cell() {
   mkdir -p "${work}"
 
   # --- open ---------------------------------------------------------------
-  printf '{"schema_version":4,"cmp_manifest_ref":"%s"}\n' "${CMP}" \
+  printf '{"schema_version":5,"cmp_manifest_ref":"%s"}\n' "${CMP}" \
     | "${INTERPRETER}" open > "${work}/open.result.json" \
     || reject "open failed for environment '${env_name}'"
 
@@ -262,7 +265,7 @@ resolve_cell() {
     --arg scope "${scope}" \
     --argjson tags "$(jq -c --arg e "${env_name}" \
       '(.environments[$e].context_tags // {})' "${MANIFEST}")" \
-    '{schema_version: 4, model_handle: $o[0].model_handle,
+    '{schema_version: 5, model_handle: $o[0].model_handle,
       scope: $scope, context_tags: $tags}' \
     > "${work}/init.request.json"
   "${INTERPRETER}" init-selection-state \
@@ -293,7 +296,7 @@ resolve_cell() {
       --arg scope "${scope}" \
       --arg facet "${facet}" \
       --arg option "${option}" \
-      '{schema_version: 4, model_handle: $o[0].model_handle, scope: $scope,
+      '{schema_version: 5, model_handle: $o[0].model_handle, scope: $scope,
         selection_state: $s[0].selection_state,
         selection_delta: {facet: $facet, option: $option}}' \
       > "${req}"
@@ -308,7 +311,7 @@ resolve_cell() {
     --slurpfile o "${work}/open.result.json" \
     --slurpfile s "${prev_state}" \
     --arg scope "${scope}" \
-    '{schema_version: 4, model_handle: $o[0].model_handle, scope: $scope,
+    '{schema_version: 5, model_handle: $o[0].model_handle, scope: $scope,
       selection_state: $s[0].selection_state}' \
     > "${work}/resolve.request.json"
 

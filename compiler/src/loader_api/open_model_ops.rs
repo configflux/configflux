@@ -144,6 +144,19 @@ pub fn open_model(request: OpenModelRequest) -> OpenModelResult {
     }
 
     if let Err(err) = ir::verify_index_integrity(&index, &chunk_dir) {
+        // A chunk whose content no longer hashes to its own name is a package
+        // that was EDITED, and the remedy differs from the one an incomplete or
+        // self-contradictory package needs — restoring a file that is already
+        // there fixes nothing. The code stays the same: both are
+        // E_LOADER_INDEX_INVALID.
+        let hint = if err
+            .downcast_ref::<ir::ChunkContentAddressMismatch>()
+            .is_some()
+        {
+            "Do not mutate emitted chunk files; recompile instead"
+        } else {
+            "Ensure all chunk-<hash>.cfir files are present and unmodified"
+        };
         return open_model_failed(
             Some(manifest.model_hash.clone()),
             vec![Diagnostic {
@@ -152,9 +165,7 @@ pub fn open_model(request: OpenModelRequest) -> OpenModelResult {
                 message: err.to_string(),
                 source_id: Some(chunk_dir.to_string_lossy().into_owned()),
                 entity_path: None,
-                hint: Some(
-                    "Ensure all chunk-<hash>.cfir files are present and unmodified".to_string(),
-                ),
+                hint: Some(hint.to_string()),
             }],
         );
     }

@@ -3,7 +3,9 @@
 // Resolution view (ADR-0043 §2.2): render a resolved snapshot (`cfx resolve`
 // ResolveResult). The hash lineage model_hash → selection_state_hash →
 // resolve_hash is shown prominently; below it a searchable parameters table
-// flattens resolved_output (scope → component → parameter).
+// flattens resolved_output (scope → component → parameter), and between the two
+// a requirements table shows what each component's `requires` block resolved to
+// (ADR-0057 §D7).
 
 import { el, clear, announce, displayValue, shortHash } from "./dom.js";
 
@@ -12,6 +14,11 @@ export function renderResolution(container, data) {
   clear(container);
   container.appendChild(lineage(data));
   container.appendChild(choices(data));
+
+  const requirementRows = flattenRequirements(data.resolved_output);
+  if (requirementRows.length > 0) {
+    container.appendChild(requirements(requirementRows));
+  }
 
   const rows = flattenParams(data.resolved_output);
   const search = el("input", {
@@ -94,6 +101,68 @@ function choices(data) {
         ])
       )
     ),
+  ]);
+}
+
+/**
+ * Flatten resolved_output (scope → { components: { id → { requires } } }) into
+ * one row per requirement FIELD (ADR-0057 §D7). Sorted at every level for the
+ * same reason the parameters table is: the rendered order is a property of the
+ * data, never of object insertion order.
+ *
+ * `requires` is skip-if-empty in the snapshot, so a model that declares no
+ * requirement yields no rows and the section is not rendered at all.
+ */
+function flattenRequirements(resolvedOutput) {
+  const rows = [];
+  if (!resolvedOutput || typeof resolvedOutput !== "object") return rows;
+  for (const scope of Object.keys(resolvedOutput).sort()) {
+    const components = resolvedOutput[scope]?.components || {};
+    for (const compId of Object.keys(components).sort()) {
+      const requires = components[compId]?.requires || {};
+      for (const slot of Object.keys(requires).sort()) {
+        const req = requires[slot] || {};
+        const fields = req.fields || {};
+        for (const field of Object.keys(fields).sort()) {
+          rows.push({
+            scope,
+            component: compId,
+            slot,
+            binding: req.binding ?? "",
+            entry: req.entry ?? "",
+            field,
+            value: fields[field],
+          });
+        }
+      }
+    }
+  }
+  return rows;
+}
+
+const REQUIREMENT_COLUMNS = ["scope", "component", "slot", "binding", "entry", "field", "value"];
+
+/** The catalogue entries this snapshot delivered, one row per field. */
+function requirements(rows) {
+  const head = el(
+    "tr",
+    {},
+    REQUIREMENT_COLUMNS.map((c) => el("th", { scope: "col", text: c }))
+  );
+  const body = rows.map((r) =>
+    el("tr", {}, [
+      el("td", { text: r.scope }),
+      el("td", { text: r.component }),
+      el("td", { class: "cell-param", text: r.slot }),
+      el("td", { text: r.binding }),
+      el("td", { class: "cell-entry", text: r.entry }),
+      el("td", { class: "cell-param", text: r.field }),
+      el("td", { class: "cell-value", text: displayValue(r.value) }),
+    ])
+  );
+  return el("section", { class: "requires", "aria-label": "Resolved requirements" }, [
+    el("h2", { text: `Requirements (${rows.length})` }),
+    el("table", { class: "params-table" }, [el("thead", {}, head), el("tbody", {}, body)]),
   ]);
 }
 

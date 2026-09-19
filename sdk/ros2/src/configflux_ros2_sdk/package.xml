@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <package format="3">
   <name>configflux_ros2_sdk</name>
-  <version>0.3.0</version>
+  <version>0.4.0</version>
   <description>ConfigFlux ROS2 parameter, runtime-control, and diagnostics adapters backed by RuntimeSession.</description>
   <maintainer email="hello@configflux.dev">ConfigFlux Maintainers</maintainer>
   <license>BUSL-1.1</license>

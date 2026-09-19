@@ -99,7 +99,7 @@ rust_binary(
     # src/cli_adapter.rs resolves `--version` to the workspace release
     # version. rules_rust defaults CARGO_PKG_VERSION to "0.0.0" when this
     # attr is absent, so it must mirror /VERSION (lint_repo.py enforces this).
-    version = "0.3.0",
+    version = "0.4.0",
     deps = COMMON_DEPS,
 )
 
@@ -300,9 +300,11 @@ rust_test(
 # Solver-backed `explain-rejection` — configflux-3b5y / ADR-0031 D1–D4.
 # Compiles the mutually-exclusive solver fixture, opens a runtime session,
 # and proves: (a) explaining a constraint-violating value returns a labeled
-# `unsat_core` with `{facet}.{option}` names at exit 0; (b) explaining a
-# valid value succeeds at exit 0 with no core; (c) an unknown facet/value
-# fails closed at exit 2 with `E_SELECTION_UNKNOWN_FACET` and no core.
+# `unsat_core` with `{facet}.{option}` names at exit 0, naming the facet the
+# parameter DECLARES (ADR-0064 D5.4) rather than its last path segment;
+# (b) explaining a valid value succeeds at exit 0 with no core; (c) an unknown
+# facet/value, and a parameter that declares no binding, fail closed at exit 2
+# with `E_SELECTION_UNKNOWN_FACET` and no core.
 # Product-stack + system tagged (E2E impact: smoke).
 rust_test(
     name = "runtime_explain_rejection_test",
@@ -352,11 +354,13 @@ rust_test(
 
 # configflux-vwhj — labeled-MUS exit-criterion E2E on the runtime
 # `explain-rejection` path (configflux-osp M4 hard exit criterion). Compiles
-# the committed THREE-facet cross-facet-`requires` fixture, opens a snapshot
-# carrying the prior `cpu=highperf` selection, and asserts the returned
-# `unsat_core` carries NO raw BDD variable index (a bare integer) in any
-# facet/option position (ADR-0031 D3). E2E impact: regression. Named so CI
-# never skips it.
+# the committed THREE-facet cross-facet-`requires` fixture, opens under the
+# prior `cpu=highperf` selection, and asserts the returned `unsat_core` carries
+# NO raw BDD variable index (a bare integer) in any facet/option position
+# (ADR-0031 D3). It also pins the ADR-0064 D3 propagation that makes the premise
+# reachable — the bound parameter carries the chosen value — and that an
+# in-session write outranks the opened choice. E2E impact: regression. Named so
+# CI never skips it.
 rust_test(
     name = "runtime_labeled_mus_exit_criterion_test",
     size = "small",
@@ -410,13 +414,15 @@ rust_test(
 )
 
 # configflux-jraj — write-path constraint enforcement over the session's total
-# known assignment (ADR-0017 amendment 2026-08-03). One target for the whole
-# group: every case shares the `write_enforcement` name infix, so the substring
-# filter selects exactly these nine and nothing else. They cover the three write
-# commands, both transports (CLI and C ABI), D1's precondition ordering, D3's
-# partial-assignment semantics and D2's skip-on-disagreement rule, all on the
-# committed `s_labeled_mus` fixture already carried by SCENARIO_COMPILE_DATA.
-# E2E impact: regression.
+# known assignment (ADR-0017 amendment 2026-08-03, with D2's facet<->parameter
+# bridge replaced by ADR-0064). One target for the whole group: every case
+# shares the `write_enforcement` name infix, so the substring filter selects
+# exactly these ten and nothing else. They cover the three write commands, both
+# transports (CLI and C ABI), D1's precondition ordering, D3's
+# partial-assignment semantics, ADR-0064 D5.1's declared binding (a same-named
+# unbound parameter is not enforced) and D5.2's fail-closed response to two
+# binders, all on the committed `s_labeled_mus` fixture already carried by
+# SCENARIO_COMPILE_DATA. E2E impact: regression.
 rust_test(
     name = "runtime_write_constraint_enforcement_test",
     size = "small",
@@ -424,6 +430,36 @@ rust_test(
     srcs = RUNTIME_TEST_SRCS,
     crate_root = "src/main.rs",
     args = ["write_enforcement"],
+    compile_data = SCENARIO_COMPILE_DATA,
+    edition = "2021",
+    tags = [
+        "ci",
+        "owner:runtime",
+        "runtime",
+        "security",
+        "solver",
+        "system",
+    ],
+    deps = COMMON_DEPS,
+)
+
+# configflux-tkwt — closed-facet domain entailment on the RUNTIME explain and
+# write surfaces (ADR-0060). One target for the whole group: every case shares
+# the `closed_facet_domain` name infix, so the substring filter selects exactly
+# these and nothing else. They drive an inline two-facet fixture through the
+# real runtime path (`runtime-open` -> `explain-rejection` / `set-parameter`)
+# for the pt6v regression pins (closed `[a9, x200]`, closed `[x200, a9]`, open
+# both), the producer-reachability pin that builds the open payload from the
+# `ResolveResult` JSON alone, the absent-table degradation contract (D7), the
+# fail-closed symbol-table validation at both entrypoints (D6), and the
+# explain-surface parity sibling. E2E impact: regression.
+rust_test(
+    name = "runtime_closed_facet_domain_entailment_test",
+    size = "small",
+    timeout = "moderate",
+    srcs = RUNTIME_TEST_SRCS,
+    crate_root = "src/main.rs",
+    args = ["closed_facet_domain"],
     compile_data = SCENARIO_COMPILE_DATA,
     edition = "2021",
     tags = [
@@ -590,6 +626,7 @@ test_suite(
     ],
     tests = [
         ":runtime_cli_test",
+        ":runtime_closed_facet_domain_entailment_test",
         ":runtime_determinism_replay_gate_test",
         ":runtime_explain_rejection_test",
         ":runtime_explain_rejection_unknown_facet_test",

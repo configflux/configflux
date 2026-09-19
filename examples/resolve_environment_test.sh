@@ -149,6 +149,18 @@ shopt -u nullglob
 [[ "$(basename "${SNAP_A[0]}")" == "$(basename "${SNAP_B[0]}")" ]] \
   || fail "snapshot file names differ between runs: $(basename "${SNAP_A[0]}") vs $(basename "${SNAP_B[0]}")"
 
+# The name must be a well-formed resolve_result.<root>.<selection>.json token
+# and must NOT end in "_.json" — the artifact the old `echo "${label}" | tr`
+# sanitization produced by folding echo's trailing newline into the safe
+# character set. `cfx resolve --out` writes the same name for the same target
+# (configflux-dkmm.1), so the two paths only agree once this holds.
+SNAP_NAME="$(basename "${SNAP_A[0]}")"
+[[ "${SNAP_NAME}" =~ ^resolve_result\.[A-Za-z0-9._-]+\.[A-Za-z0-9._-]+\.json$ ]] \
+  || fail "snapshot name is not a well-formed resolve_result.<root>.<selection>.json token: ${SNAP_NAME}"
+[[ "${SNAP_NAME}" != *_.json ]] \
+  || fail "snapshot name ends in '_.json' (trailing-underscore sanitization artifact): ${SNAP_NAME}"
+echo "  -> snapshot name is well-formed: ${SNAP_NAME}"
+
 # Byte-identical snapshot (the D1 reproducibility guarantee).
 if ! cmp -s "${SNAP_A[0]}" "${SNAP_B[0]}"; then
   echo "--- diff ---" >&2

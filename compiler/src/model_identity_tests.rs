@@ -20,7 +20,7 @@
 //! CLI (`main.rs`) and never resolves them, so an inline manifest reproduces
 //! the CLI's input faithfully.
 
-use crate::ir::CMP_DEFAULT_MANIFEST_FILENAME;
+use crate::ir::{chunk_hash_of_chunk, load_chunk, CMP_DEFAULT_MANIFEST_FILENAME};
 use crate::loader_api::{open_model, OpenModelRequest, E_LOADER_INDEX_INVALID};
 use crate::product_api::{
     compile_model, CompileModelRequest, CompileResult, OperationStatus, SourceManifestEntry,
@@ -198,6 +198,58 @@ fn model_hash_changes_when_content_changes() {
     );
 }
 
+/// ADR-0056 A3, extended for ADR-0057 §D9. The two namespaces this release adds
+/// enter the identity through `catalogue_index` and `binding_index`, so a model
+/// that declares a table — or binds it — must not share a `model_hash` with the
+/// same model without it.
+///
+/// This compiles through the real product API rather than asserting over
+/// `IrIndexContent`, for the reason the module header gives: the defect ADR-0056
+/// records was invisible at the type level and visible only in observed output.
+#[test]
+fn model_hash_changes_when_a_catalogue_or_binding_is_declared() {
+    const CATALOGUE: &str = r#"{
+        "package": "s1_water_pump", "version": "1.0.0",
+        "catalogues": {"containers": {
+            "fields": {"width_mm": {"type": "integer", "unit": "mm"}},
+            "entries": {"c1": {"width_mm": 800}, "c2": {"width_mm": 600}}}}
+    }"#;
+    const CATALOGUE_AND_BINDING: &str = r#"{
+        "package": "s1_water_pump", "version": "1.0.0",
+        "catalogues": {"containers": {
+            "fields": {"width_mm": {"type": "integer", "unit": "mm"}},
+            "entries": {"c1": {"width_mm": 800}, "c2": {"width_mm": 600}}}},
+        "bindings": {"line_container": {"catalogue": "containers", "default": "c1"}}
+    }"#;
+
+    let base = [("defs.json", DEFS), ("components.json", COMPONENTS)];
+    let with_catalogue = [
+        ("defs.json", DEFS),
+        ("components.json", COMPONENTS),
+        ("catalogue.json", CATALOGUE),
+    ];
+    let with_binding = [
+        ("defs.json", DEFS),
+        ("components.json", COMPONENTS),
+        ("catalogue.json", CATALOGUE_AND_BINDING),
+    ];
+
+    let base_hash = model_hash("base", &base);
+    let catalogue_hash = model_hash("catalogue", &with_catalogue);
+    let binding_hash = model_hash("binding", &with_binding);
+
+    assert_ne!(
+        base_hash, catalogue_hash,
+        "declaring a catalogue did not change model_hash; catalogue_index is not \
+         in the identity preimage"
+    );
+    assert_ne!(
+        catalogue_hash, binding_hash,
+        "binding a catalogue did not change model_hash; binding_index is not in \
+         the identity preimage"
+    );
+}
+
 // --- A6: duplicate chunk content is rejected at ingest -----------------------
 
 /// ADR-0056 A6. Two chunks with one `chunk_hash` are rejected at ingest with a
@@ -248,10 +300,9 @@ fn write_json(path: &Path, value: &JsonValue) {
         .expect("write json");
 }
 
-/// Emit a real CMP, then age it into the shape a pre-ADR-0056 toolchain would
-/// have written: the index's chunk vector in the order the old
-/// `source_id`-keyed sort produced, which under the new canonicalization no
-/// longer reproduces the stored `config_hash`.
+/// Emit a real CMP, then age it into the shape a previous toolchain would have
+/// written: the index's chunk vector in an order the current canonicalization
+/// no longer reproduces the stored `config_hash` from.
 ///
 /// Reversing the vector is a faithful stand-in and needs no hand-computed
 /// digest: the point of the fixture is that the index recompute WOULD reject
@@ -282,8 +333,10 @@ fn aged_package(label: &str, canonicalization_version: Option<u32>) -> (PathBuf,
     (manifest_path, guard)
 }
 
-/// ADR-0056 A7. A package canonicalized under rule v1 is rejected at the
-/// MANIFEST gate, stating the true reason.
+/// ADR-0056 A7, at the counter's current value. A package canonicalized under
+/// rule v2 — the last toolchain, the one whose chunk addresses still covered
+/// `package` and `version` (ADR-0056 Amendment 1) — is rejected at the MANIFEST
+/// gate, stating the true reason.
 ///
 /// Without the `CMP_CANONICALIZATION_VERSION` bump such a package falls
 /// through to the index recompute and is rejected as `E_LOADER_INDEX_INVALID`
@@ -291,8 +344,8 @@ fn aged_package(label: &str, canonicalization_version: Option<u32>) -> (PathBuf,
 /// tampering accusation against a package that is internally consistent and
 /// was simply built by the previous toolchain.
 #[test]
-fn pre_canonicalization_v2_package_is_rejected_at_the_manifest_gate() {
-    let (manifest_path, _guard) = aged_package("aged-v1", Some(1));
+fn pre_canonicalization_v3_package_is_rejected_at_the_manifest_gate() {
+    let (manifest_path, _guard) = aged_package("aged-v2", Some(2));
 
     let result = open_model(OpenModelRequest {
         schema_version: PRODUCT_SCHEMA_VERSION,
@@ -308,13 +361,13 @@ fn pre_canonicalization_v2_package_is_rejected_at_the_manifest_gate() {
         .join("\n");
     assert!(
         message.contains("canonicalization_version"),
-        "a v1 package must be rejected for its canonicalization rule, got: {message}"
+        "a v2 package must be rejected for its canonicalization rule, got: {message}"
     );
     assert!(
         !diagnostics
             .iter()
             .any(|d| d.code == E_LOADER_INDEX_INVALID),
-        "a v1 package must not be accused of index tampering, got: {diagnostics:?}"
+        "a v2 package must not be accused of index tampering, got: {diagnostics:?}"
     );
 }
 
@@ -340,6 +393,152 @@ fn aged_index_without_a_version_marker_is_rejected_as_index_invalid() {
             .any(|d| d.code == E_LOADER_INDEX_INVALID),
         "an index reordered under the CURRENT canonicalization rule must fail the \
          recompute, got: {:?}",
+        result.diagnostics.diagnostics
+    );
+}
+
+// --- Package open recomputes each chunk's content address --------------------
+//
+// The package-side twin of the link check (ADR-0058 §D4 stage 3,
+// E_LINK_OBJECT_CORRUPT). Every other check the walk performs reads a value the
+// chunk file DECLARES about itself — its `chunk_hash` field, its `source_id`,
+// the entity ids the index maps to it — so an edit to what the chunk HOLDS
+// passes all of them. Since ADR-0056 Amendment 1 the address is a function of
+// the seven entity maps alone, so the walk can recompute it and see the edit.
+
+/// The compiled s1 smoke package: two real authoring units, the same content
+/// the rest of this suite compiles.
+fn s1_smoke_package(label: &str) -> (PathBuf, TempDirGuard) {
+    let (result, guard) = compile(
+        label,
+        &[
+            ("compiler/scenarios/s1_water_pump/smoke/cue/00_definitions.json", DEFS),
+            ("compiler/scenarios/s1_water_pump/smoke/cue/10_components.json", COMPONENTS),
+        ],
+    );
+    assert_eq!(
+        result.status,
+        OperationStatus::Ok,
+        "[{label}] compile failed: {:?}",
+        result.verify_report.diagnostics.diagnostics
+    );
+    let manifest_path = guard.path.join(CMP_DEFAULT_MANIFEST_FILENAME);
+    (manifest_path, guard)
+}
+
+/// The emitted chunk that carries the components, with the address the package
+/// names it by (its file name, which is also its `chunk_hash` field).
+fn component_chunk(dir: &Path) -> (PathBuf, String) {
+    let entries = std::fs::read_dir(dir).expect("read package dir");
+    for entry in entries {
+        let path = entry.expect("package dir entry").path();
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let Some(hash) = name
+            .strip_prefix("chunk-")
+            .and_then(|rest| rest.strip_suffix(".cfir"))
+        else {
+            continue;
+        };
+        let holds_components = read_json(&path)["components"]
+            .as_object()
+            .is_some_and(|components| !components.is_empty());
+        if holds_components {
+            return (path.clone(), hash.to_string());
+        }
+    }
+    panic!("the package holds no chunk carrying a component");
+}
+
+/// The tamper the amendment exists to catch: one authored parameter value is
+/// edited inside an emitted chunk file, and the file name and the embedded
+/// `chunk_hash` are left exactly as they were. `open_model` must refuse the
+/// package, naming the chunk and both addresses.
+#[test]
+fn a_chunk_edited_in_place_is_refused_at_open_naming_both_addresses() {
+    let (manifest_path, guard) = s1_smoke_package("tampered-chunk");
+    let (chunk_path, stored) = component_chunk(&guard.path);
+
+    let mut chunk = read_json(&chunk_path);
+    let value =
+        &mut chunk["components"]["thermal_control"]["params"]["max_flow_at_commissioning"]["value"];
+    assert!(
+        value.is_number(),
+        "fixture parameter is not a number, so the edit below would not be a \
+         value edit: {value}"
+    );
+    *value = JsonValue::from(9999);
+    write_json(&chunk_path, &chunk);
+
+    // The preconditions that make this the interesting case: every check that
+    // reads a value the file declares about itself still passes.
+    assert!(chunk_path.exists(), "the tamper must not rename the file");
+    assert_eq!(
+        read_json(&chunk_path)["chunk_hash"].as_str(),
+        Some(stored.as_str()),
+        "the tamper must leave the embedded chunk_hash untouched"
+    );
+    let recomputed = chunk_hash_of_chunk(&load_chunk(&chunk_path).expect("parse edited chunk"))
+        .expect("recompute the edited chunk's address");
+    assert_ne!(
+        recomputed, stored,
+        "the edit must move the chunk's content address"
+    );
+
+    let result = open_model(OpenModelRequest {
+        schema_version: PRODUCT_SCHEMA_VERSION,
+        cmp_manifest_ref: manifest_path.to_string_lossy().into_owned(),
+    });
+
+    let diagnostics = &result.diagnostics.diagnostics;
+    assert_eq!(
+        result.status,
+        OperationStatus::Error,
+        "a chunk whose body was edited in place opened clean"
+    );
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "the edit must be refused at exactly one gate, got: {diagnostics:?}"
+    );
+    let diagnostic = &diagnostics[0];
+    assert_eq!(diagnostic.code, E_LOADER_INDEX_INVALID);
+    assert!(
+        diagnostic.message.contains(&stored),
+        "the refusal must name the chunk and the address the package stores for \
+         it, got: {}",
+        diagnostic.message
+    );
+    assert!(
+        diagnostic.message.contains(&recomputed),
+        "the refusal must name the address the content actually hashes to, got: {}",
+        diagnostic.message
+    );
+    assert_eq!(
+        diagnostic.hint.as_deref(),
+        Some("Do not mutate emitted chunk files; recompile instead")
+    );
+}
+
+/// The negative control. The recompute must refuse an edited package without
+/// refusing an untouched one — a check that fails closed on everything is not a
+/// check.
+#[test]
+fn an_untouched_package_still_opens_clean() {
+    let (manifest_path, _guard) = s1_smoke_package("untouched");
+
+    let result = open_model(OpenModelRequest {
+        schema_version: PRODUCT_SCHEMA_VERSION,
+        cmp_manifest_ref: manifest_path.to_string_lossy().into_owned(),
+    });
+
+    assert_eq!(
+        result.status,
+        OperationStatus::Ok,
+        "an untouched package was refused: {:?}",
         result.diagnostics.diagnostics
     );
 }

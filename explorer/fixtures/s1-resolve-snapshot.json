@@ -1,10 +1,11 @@
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "status": "ok",
   "model_hash": "d3375b15c2ca3413d65905270d8a93ab80813225c3300bf49d4e1ae0321c0e90",
   "scope": "all",
   "selection_state_hash": "b7626d976db80299a34771c1ddb0a4f630c8c484cc7306a62f541cbcf96678e7",
-  "resolve_hash": "1f93f5664474edcc692a894ad5f3b625a69cf7153935168c882781be9f6da038",
+  "resolve_hash": "9b3e63b97aec848840b5cc5c2348c8c6957628d5aa153655694655ea8e72332a",
+  "resolved_output_hash": "0a6a3d6e9a83eaadda1e1ce089b9b1b1cdb1dbf5538763d3f86693837cdb38b7",
   "resolved_output": {
     "all": {
       "package": "merged_root",
@@ -79,7 +80,7 @@
   "error_count": 0,
   "warning_count": 0,
   "diagnostics": {
-    "schema_version": 4,
+    "schema_version": 5,
     "diagnostics": [],
     "error_count": 0,
     "warning_count": 0

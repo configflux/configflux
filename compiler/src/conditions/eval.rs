@@ -15,11 +15,17 @@
 //! unary       := '!' unary | primary
 //! primary     := '(' condition ')' | bool_lit | atom
 //! bool_lit    := 'true' | 'false'      (as whole-token keywords)
-//! atom        := ident op literal
+//! atom        := ident op rhs
+//! rhs         := literal | ident       (an ident names another facet)
 //! op          := '==' | '!='
 //! literal     := '\'' … '\'' | '"' … '"'
 //! ident       := [a-z][a-z0-9_]*
 //! ```
+//!
+//! An unquoted right-hand side compares two facets' bound values rather than a
+//! facet against a constant (configflux-secb.2 / ADR-0057 §D5). This evaluator
+//! and the typed-AST parser in `ast` accept the same grammar, so a condition is
+//! never valid in a constraint and invalid in a selector.
 //!
 //! The `true` / `false` keywords are first-class boolean primaries of the
 //! grammar (also represented as `ConditionExpr::Bool` in the typed AST). They
@@ -171,17 +177,49 @@ fn eval_atom(bytes: &[u8], idx: &mut usize, tags: &HashMap<String, String>) -> R
     let op = parse_operator(bytes, idx)
         .with_context(|| format!("Expected '==' or '!=' at position {}", *idx))?;
     skip_ws(bytes, idx);
-    let literal = parse_quoted_literal(bytes, idx)
-        .with_context(|| format!("Expected quoted string literal at position {}", *idx))?;
+    let rhs = parse_rhs(bytes, idx)?;
 
     let actual = tags
         .get(&tag)
         .with_context(|| format!("Missing tag '{}' referenced in condition", tag))?;
+    // Operands are resolved left to right, so a condition that names two
+    // unbound facets reports the left one first.
+    let expected: &String = match &rhs {
+        Rhs::Literal(value) => value,
+        Rhs::Facet(name) => tags
+            .get(name)
+            .with_context(|| format!("Missing tag '{}' referenced in condition", name))?,
+    };
 
     Ok(match op {
-        AtomOp::Eq => actual == &literal,
-        AtomOp::NotEq => actual != &literal,
+        AtomOp::Eq => actual == expected,
+        AtomOp::NotEq => actual != expected,
     })
+}
+
+/// A predicate's right-hand side: a quoted literal, or — since
+/// configflux-secb.2 / ADR-0057 §D5 — an unquoted identifier naming another
+/// facet, whose bound value is the comparand.
+enum Rhs {
+    Literal(String),
+    Facet(String),
+}
+
+/// Parse a right-hand side, accepting either form. Shared by the evaluating
+/// and the short-circuit-skipping walks so both halves of this parser agree
+/// on the grammar.
+fn parse_rhs(bytes: &[u8], idx: &mut usize) -> Result<Rhs> {
+    let start = *idx;
+    if let Some(literal) = parse_quoted_literal(bytes, idx) {
+        return Ok(Rhs::Literal(literal));
+    }
+    let name = parse_ident(bytes, idx).with_context(|| {
+        format!(
+            "Expected quoted string literal or identifier at position {}",
+            start
+        )
+    })?;
+    Ok(Rhs::Facet(name))
 }
 
 /// Advance the cursor past a short-circuited `and_expr` chain without
@@ -251,8 +289,10 @@ fn skip_atom(bytes: &[u8], idx: &mut usize) -> Result<()> {
     let _ = parse_operator(bytes, idx)
         .with_context(|| format!("Expected '==' or '!=' at position {}", *idx))?;
     skip_ws(bytes, idx);
-    let _ = parse_quoted_literal(bytes, idx)
-        .with_context(|| format!("Expected quoted string literal at position {}", *idx))?;
+    // Both right-hand-side forms must be skippable, or a short-circuited
+    // branch containing a facet comparison would fail to parse
+    // (configflux-secb.2).
+    let _ = parse_rhs(bytes, idx)?;
     Ok(())
 }
 
@@ -265,136 +305,5 @@ fn consume_op2(bytes: &[u8], idx: &mut usize, a: u8, b: u8) -> bool {
     }
 }
 
-// ----------------------------------------------------------------------------
-// Grammar coverage tests for the hand-rolled evaluator (ADR-0008).
-// ----------------------------------------------------------------------------
-
 #[cfg(test)]
-mod tests {
-    use super::super::eval_condition;
-    use std::collections::HashMap;
-
-    fn tags_with(pairs: &[(&str, &str)]) -> HashMap<String, String> {
-        let mut tags = HashMap::new();
-        for (k, v) in pairs {
-            tags.insert((*k).to_string(), (*v).to_string());
-        }
-        tags
-    }
-
-    #[test]
-    fn eval_double_quoted_literals() {
-        let tags = tags_with(&[("variant", "heavy")]);
-        assert!(eval_condition("variant == \"heavy\"", &tags).unwrap());
-        assert!(!eval_condition("variant != \"heavy\"", &tags).unwrap());
-    }
-
-    #[test]
-    fn eval_mixed_quotes_in_same_expression() {
-        let tags = tags_with(&[("variant", "heavy"), ("region", "us")]);
-        assert!(eval_condition("variant == 'heavy' && region == \"us\"", &tags).unwrap());
-    }
-
-    #[test]
-    fn eval_and_precedence_binds_tighter_than_or() {
-        // `a && b || c && d` should parse as `(a && b) || (c && d)`.
-        let tags = tags_with(&[("a", "1"), ("b", "0"), ("c", "1"), ("d", "1")]);
-        let expr = "a == '1' && b == '1' || c == '1' && d == '1'";
-        assert!(eval_condition(expr, &tags).unwrap());
-    }
-
-    #[test]
-    fn eval_parentheses_override_precedence() {
-        let tags = tags_with(&[("a", "1"), ("b", "0"), ("c", "1")]);
-        assert!(eval_condition("a == '1' && (b == '1' || c == '1')", &tags).unwrap());
-        assert!(eval_condition("(a == '1' && b == '1') || c == '1'", &tags).unwrap());
-        let tags2 = tags_with(&[("a", "1"), ("b", "0"), ("c", "0")]);
-        assert!(!eval_condition("a == '1' && (b == '1' || c == '1')", &tags2).unwrap());
-    }
-
-    #[test]
-    fn eval_unary_negation() {
-        let tags = tags_with(&[("variant", "heavy")]);
-        assert!(!eval_condition("!(variant == 'heavy')", &tags).unwrap());
-        assert!(eval_condition("!(variant == 'light')", &tags).unwrap());
-        assert!(eval_condition("!!(variant == 'heavy')", &tags).unwrap());
-    }
-
-    #[test]
-    fn eval_short_circuit_and_skips_missing_rhs() {
-        let tags = tags_with(&[("variant", "light")]);
-        let ok = eval_condition("variant == 'heavy' && region == 'us'", &tags).unwrap();
-        assert!(!ok);
-    }
-
-    #[test]
-    fn eval_short_circuit_or_skips_missing_rhs() {
-        let tags = tags_with(&[("variant", "heavy")]);
-        let ok = eval_condition("variant == 'heavy' || region == 'us'", &tags).unwrap();
-        assert!(ok);
-    }
-
-    #[test]
-    fn eval_rejects_trailing_garbage() {
-        let tags = tags_with(&[("variant", "heavy")]);
-        let err = eval_condition("variant == 'heavy' xyz", &tags).unwrap_err();
-        assert!(
-            format!("{err}").contains("Failed to evaluate condition"),
-            "err: {err}"
-        );
-    }
-
-    #[test]
-    fn eval_rejects_unbalanced_parentheses() {
-        let tags = tags_with(&[("variant", "heavy")]);
-        let err = eval_condition("(variant == 'heavy'", &tags).unwrap_err();
-        assert!(
-            format!("{err}").contains("Missing closing parenthesis")
-                || format!("{err}").contains("Failed to evaluate condition"),
-            "err: {err}"
-        );
-    }
-
-    #[test]
-    fn eval_neq_operator_not_confused_with_bang() {
-        let tags = tags_with(&[("a", "y")]);
-        assert!(eval_condition("a != 'x'", &tags).unwrap());
-        assert!(!eval_condition("a != 'y'", &tags).unwrap());
-    }
-
-    #[test]
-    fn eval_empty_condition_errors() {
-        let tags: HashMap<String, String> = HashMap::new();
-        let err = eval_condition("", &tags).unwrap_err();
-        assert!(
-            format!("{err}").contains("Failed to evaluate condition"),
-            "err: {err}"
-        );
-    }
-
-    #[test]
-    fn eval_bool_literal_true_and_false() {
-        let tags: HashMap<String, String> = HashMap::new();
-        assert!(eval_condition("true", &tags).unwrap());
-        assert!(!eval_condition("false", &tags).unwrap());
-        // With surrounding whitespace.
-        assert!(eval_condition("  true  ", &tags).unwrap());
-    }
-
-    #[test]
-    fn eval_bool_literal_combines_with_atoms() {
-        let tags = tags_with(&[("variant", "heavy")]);
-        assert!(eval_condition("true && variant == 'heavy'", &tags).unwrap());
-        assert!(!eval_condition("false && variant == 'heavy'", &tags).unwrap());
-        assert!(eval_condition("false || variant == 'heavy'", &tags).unwrap());
-        // Short-circuit: `true ||` should skip missing-tag RHS.
-        assert!(eval_condition("true || region == 'us'", &tags).unwrap());
-    }
-
-    #[test]
-    fn eval_true_prefixed_identifier_is_tag_not_keyword() {
-        // `true_region` is a valid identifier; must parse as an atom.
-        let tags = tags_with(&[("true_region", "us")]);
-        assert!(eval_condition("true_region == 'us'", &tags).unwrap());
-    }
-}
+mod tests;

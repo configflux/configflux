@@ -2,6 +2,10 @@
 
 mod conditions;
 pub mod ccm_emitter;
+// configflux-py7w: the diagnostic code a refusal carries, as data on the error.
+// Crate-internal on purpose — the CODE is public (`product_api`'s `E_*`
+// constants, frozen in docs/interface-contracts.md §3.4), the carrier is not.
+mod coded_error;
 mod compiler_core;
 // configflux-wbzw: CUDD-side BDD construction path. Single-importer
 // module per ADR-0011 + Amendment 1 §A1.3 — the only file under
@@ -18,9 +22,37 @@ mod compiler_core;
 #[cfg(feature = "cudd")]
 mod cudd_build;
 mod ingest_merge;
+// configflux-secb.4 / ADR-0057 §D9: the per-chunk interface summary every
+// new link/verify check is written over. `link_verify` is a single file, so
+// the summary gets its own sibling module rather than a submodule. ADR-0058's
+// object header is this type serialized — which is precisely why the checks
+// are written over it now rather than over the merged `Config`.
+pub mod interface_summary;
+// configflux-p0jz.2 / ADR-0058 §D4: the link stages, the emit they share with
+// `compile`, and the object reader stage 3 uses.
+mod link;
+mod link_emit;
+mod link_load;
+// configflux-p0jz.3 / ADR-0058 §D5: the lockfile — a pin format the linker
+// CHECKS and never fetches from. Public because the CLI holds `--lock-source`
+// to the same unit-name rule the file's own keys are held to, and because the
+// file format is a contract a reader outside this crate may want to parse.
+pub mod link_lock;
 mod link_verify;
 pub mod ir;
 pub mod loader_api;
+// configflux-secb.5 / ADR-0057 §D4: the one place a `derive` table or an
+// `accepts` list becomes an attributed root conjunct. Public because the three
+// readers of a compiled model — the emitter, the selection loader, and the
+// resolve loader — must lower identically or `options`, `explain` and `resolve`
+// would disagree about what the model says.
+pub mod lowering;
+// configflux-p0jz.1 / ADR-0058 §D2 + §A1: the object header — one unit's
+// interface, content-addressed. Public because the linker, the lockfile and
+// any tool that inspects an object read this type; `object_compile` is the
+// `compile-object` entry point the CLI drives.
+pub mod object;
+pub mod object_compile;
 pub mod prelude;
 // configflux-9pjy.3 / ADR-0039 §7: process RSS lookup, lifted out of the
 // `cudd`-gated `cudd_build/checkpoint.rs` so the compile-time progress
@@ -38,6 +70,12 @@ pub mod product_api;
 // next to the CMP/CCM artifacts. Deterministic + non-hashed — never enters a
 // hash preimage; wall-clock is opt-in via `--stamp-time`.
 pub mod provenance_sidecar;
+// configflux-y2ai: the ONE `resolve_hash` recipe. A LEAF module — it imports
+// nothing from `loader_api` or `runtime_api`, and both import it, so the
+// loader's emission and the runtime's cross-validating recomputation share one
+// pre-image instead of two copies that could drift apart. Private: the only
+// item that was ever public reaches callers through `loader_api`'s re-export.
+mod resolve_hash;
 pub mod resolved_models;
 pub mod resolver;
 // configflux-9pjy.2 / ADR-0039: soft product-compile resource budget +
@@ -50,14 +88,26 @@ pub mod sync_transport;
 pub mod telemetry_sink;
 #[cfg(test)]
 mod lib_tests;
+// configflux-4vb0 / ADR-0056 Amendment 1: a chunk file's name is the SHA-256 of
+// its own content, asserted over every scenario pack and every shipped example.
+#[cfg(test)]
+mod chunk_address_tests;
 #[cfg(test)]
 mod model_identity_tests;
+// configflux-dw9i: the MAX_CHAIN_DEPTH ceiling on the authored `overrides`
+// chain, entered through the three validators that walk it.
+#[cfg(test)]
+mod override_depth_tests;
 #[cfg(test)]
 mod source_digest_tests;
 #[cfg(test)]
 mod scenario_test_support;
 #[cfg(test)]
 mod scenario_baseline_tests;
+// configflux-secb.6 / ADR-0057 D7: requirement delivery in the resolved
+// snapshot, and the fail-closed message when the binding is undecided.
+#[cfg(test)]
+mod resolver_requires_tests;
 #[cfg(test)]
 mod scenario_byte_stability_tests;
 #[cfg(test)]

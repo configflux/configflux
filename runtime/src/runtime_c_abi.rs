@@ -45,16 +45,40 @@ use serde_json::Value as JsonValue;
 use std::ffi::{c_char, CStr, CString};
 use std::ptr;
 
+// ABI version 1.3 (ADR-0064 D5.5): the exported symbols and their C signatures
+// are byte-identical to 1.2. Two behaviours are new, and the minor is the only
+// channel that advertises them: (a) `configflux_runtime_session_snapshot_json`
+// output may carry a `facet` key inside a resolved parameter, naming the facet
+// that parameter is the declared runtime handle for, and (b) constraint
+// enforcement on the write path follows those DECLARED bindings — a parameter
+// that merely shares a facet's name is no longer treated as that facet, and is
+// therefore no longer constraint-checked. `PRODUCT_SCHEMA_VERSION` deliberately
+// stays 5: the field is additive and `#[serde(default)]`, so no existing payload
+// changes meaning and no golden pre-image moves.
+//
+// ABI version 1.2 (configflux-tkwt, ADR-0060 D5): the exported symbols and
+// their C signatures are byte-identical to 1.1, but the runtime now (a) honours
+// a `closed_facet_domains` key on the open payload, (b) emits that key from
+// `configflux_runtime_session_snapshot_json`, and (c) FAILS the open with
+// `E_RUNTIME_OPEN_FACET_DOMAIN_UNKNOWN` when a supplied table names a facet or
+// value the bound `.ccm` does not carry. The minor is the only channel that
+// advertises those three; a CLI client gets the same behaviour with no version
+// signal, because `PRODUCT_SCHEMA_VERSION` deliberately stays put (both
+// additions are `#[serde(default)]`, so no existing payload's meaning changes
+// and no golden pre-image moves).
+//
 // ABI version 1.1 (configflux-u32v): the exported symbols and their C
-// signatures are byte-identical to 1.0, but `configflux_runtime_session_open`
-// now enforces the ADR-0030 D2 `.ccm` precondition and can fail closed with an
-// `E_RUNTIME_OPEN_SOLVER_MODEL_UNAVAILABLE` envelope where 1.0 always returned a
-// snapshot for any loadable request. This is an additive behavior change, so
-// the minor is bumped while the major stays 1: the handshake rule
-// (`expected_minor <= ABI minor`) keeps existing `expected_minor = 0` clients
-// passing while advertising the stricter behavior honestly.
+// signatures were byte-identical to 1.0, but `configflux_runtime_session_open`
+// began enforcing the ADR-0030 D2 `.ccm` precondition and can fail closed with
+// an `E_RUNTIME_OPEN_SOLVER_MODEL_UNAVAILABLE` envelope where 1.0 always
+// returned a snapshot for any loadable request.
+//
+// All three are additive behavior changes, so the minor moves while the major
+// stays 1: the handshake rule (`expected_minor <= ABI minor`) keeps existing
+// `expected_minor = 0`, `= 1` and `= 2` clients passing while advertising the
+// stricter behavior honestly.
 pub const CONFIGFLUX_RUNTIME_C_ABI_VERSION_MAJOR: u32 = 1;
-pub const CONFIGFLUX_RUNTIME_C_ABI_VERSION_MINOR: u32 = 1;
+pub const CONFIGFLUX_RUNTIME_C_ABI_VERSION_MINOR: u32 = 3;
 pub const CONFIGFLUX_RUNTIME_C_ABI_VERSION_PATCH: u32 = 0;
 
 #[repr(C)]

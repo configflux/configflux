@@ -232,6 +232,39 @@ bool TestCommitConfigurationMapsRuntimeV2Request() {
   return true;
 }
 
+bool TestCommitConfigurationForwardsPresentExpectedBaseIdAsSent() {
+  ResetFakeState();
+  RuntimeSession session(FakeApi());
+  CHECK_TRUE(session.Open(R"({"open":"ok"})").ok());
+
+  RuntimeControlAdapter adapter(&session);
+  CommitConfigurationServiceRequest blank_request;
+  blank_request.runtime_snapshot_json = kRuntimeSnapshot;
+  blank_request.context.actor = "ros2.commit_service";
+  blank_request.expected_base_configuration_id = std::string();
+
+  const auto blank_result = adapter.CommitConfiguration(blank_request);
+  CHECK_EQ(blank_result.status, configflux::sdk::RuntimeSdkStatus::kOk);
+  CHECK_EQ(g_state.last_operation,
+           static_cast<uint32_t>(RuntimeOperation::kCommitConfiguration));
+  CHECK_TRUE(g_state.last_request_json.find(R"("expected_base_configuration_id":"")") !=
+             std::string::npos);
+
+  CommitConfigurationServiceRequest absent_request;
+  absent_request.runtime_snapshot_json = kRuntimeSnapshot;
+  absent_request.context.actor = "ros2.commit_service";
+
+  const auto absent_result = adapter.CommitConfiguration(absent_request);
+  CHECK_EQ(absent_result.status, configflux::sdk::RuntimeSdkStatus::kOk);
+  CHECK_EQ(g_state.last_operation,
+           static_cast<uint32_t>(RuntimeOperation::kCommitConfiguration));
+  CHECK_TRUE(g_state.last_request_json.find("expected_base_configuration_id") ==
+             std::string::npos);
+
+  CHECK_EQ(session.Close(), configflux::sdk::RuntimeSdkStatus::kOk);
+  return true;
+}
+
 bool TestRollbackDirtySubsetConvertsRosNames() {
   ResetFakeState();
   RuntimeSession session(FakeApi());
@@ -549,6 +582,7 @@ bool TestExportAndPushAuditMapOfflineWorkflows() {
 int main() {
   bool ok = true;
   ok = TestCommitConfigurationMapsRuntimeV2Request() && ok;
+  ok = TestCommitConfigurationForwardsPresentExpectedBaseIdAsSent() && ok;
   ok = TestRollbackDirtySubsetConvertsRosNames() && ok;
   ok = TestCheckForUpdatesAndGetSyncStatusMapServices() && ok;
   ok = TestPullUpdatesActionSupportsOfflineReconcileShape() && ok;

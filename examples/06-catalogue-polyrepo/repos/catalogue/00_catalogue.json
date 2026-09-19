@@ -1,0 +1,78 @@
+{
+    "package": "site_catalogue",
+    "version": "1.0.0",
+    "definitions": {
+        "container_dim_mm": {
+            "type": "integer",
+            "unit": "mm",
+            "doc": "An outside dimension of a catalogue container, in millimetres.",
+            "lifecycle": "startup",
+            "access": "integrator"
+        }
+    },
+    "facets": {
+        "site": {
+            "values": [
+                "factory_a",
+                "factory_b"
+            ],
+            "default": "factory_a",
+            "doc": "Which deployment site this configuration is for."
+        }
+    },
+    "catalogues": {
+        "containers": {
+            "fields": {
+                "length_mm": {
+                    "type": "integer",
+                    "unit": "mm",
+                    "doc": "Outside length."
+                },
+                "width_mm": {
+                    "type": "integer",
+                    "unit": "mm",
+                    "doc": "Outside width."
+                },
+                "height_mm": {
+                    "type": "integer",
+                    "unit": "mm",
+                    "doc": "Outside height."
+                }
+            },
+            "entries": {
+                "c1": {
+                    "length_mm": 1200,
+                    "width_mm": 800,
+                    "height_mm": 1000
+                },
+                "c2": {
+                    "length_mm": 800,
+                    "width_mm": 600,
+                    "height_mm": 700
+                },
+                "c3": {
+                    "length_mm": 600,
+                    "width_mm": 400,
+                    "height_mm": 400
+                }
+            },
+            "doc": "The physical containers the deployment sites are equipped with."
+        }
+    },
+    "bindings": {
+        "line_container": {
+            "catalogue": "containers",
+            "derive": {
+                "site": {
+                    "factory_a": "c1",
+                    "factory_b": "c2"
+                }
+            },
+            "doc": "The container the line runs at the selected site."
+        },
+        "sorter_container": {
+            "catalogue": "containers",
+            "doc": "The container the sorter handles. A free decision per site."
+        }
+    }
+}

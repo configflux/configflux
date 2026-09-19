@@ -3,15 +3,19 @@
 use anyhow::{Context, Result};
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use compiler::loader_api::{open_model, OpenModelRequest};
+use compiler::object::ObjectHeader;
+use compiler::object_compile::{compile_object, object_summary_line, CompileObjectRequest};
 use compiler::product_api::{
-    compile_model, compile_model_with_progress, inspect_model, verify_model, CompileModelRequest,
-    InspectModelRequest, InspectQuery, OperationStatus, SourceManifestEntry, VerifyModelRequest,
-    PRODUCT_SCHEMA_VERSION,
+    compile_model, compile_model_with_progress, inspect_model, link_model,
+    link_model_with_progress, verify_model,
+    CompileModelRequest, CompileResult, InspectModelRequest, InspectQuery, LinkModelRequest,
+    OperationStatus, SourceManifestEntry, VerifyModelRequest, PRODUCT_SCHEMA_VERSION,
 };
 use compiler::progress::{ProgressEvent, ProgressSink};
 use compiler::resource_budget::ResourceBudget;
 use serde::Serialize;
-use std::path::PathBuf;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 #[derive(Parser)]
@@ -30,6 +34,14 @@ enum Commands {
     ///
     /// Example: configflux-compiler compile --source defs.json --source comps.json --out out/cmp
     Compile(CompileArgs),
+    /// Compile ONE unit into a content-addressed object, against zero or more interface objects
+    ///
+    /// Example: configflux-compiler compile-object --source vision.json --interface catalogue.cfo --out vision.cfo
+    CompileObject(CompileObjectArgs),
+    /// Link objects into a deployable model package — the same package `compile` produces
+    ///
+    /// Example: configflux-compiler link --object catalogue.cfo --object vision.cfo --out out/cmp
+    Link(LinkArgs),
     /// Verify a configuration model for structural and semantic correctness
     ///
     /// Example: configflux-compiler verify --source defs.json --source comps.json
@@ -94,6 +106,121 @@ struct CompileArgs {
     /// sidecar included). The timestamp never enters any hashed artifact.
     #[arg(long = "stamp-time", default_value_t = false)]
     stamp_time: bool,
+}
+
+/// `compile-object` — ADR-0058 §D3. One unit, all of its chunks, compiled
+/// against the HEADERS of zero or more interface objects into an object
+/// directory. Deliberately a separate verb rather than a `compile` flag: it
+/// produces a different artifact (no constraint model, no package index) and
+/// accepts a different input set.
+#[derive(Args)]
+struct CompileObjectArgs {
+    /// Path to a source chunk of THIS unit; every one must declare the same
+    /// `package` (repeat for multiple chunks)
+    #[arg(long = "source", required = true, action = ArgAction::Append)]
+    sources: Vec<PathBuf>,
+    /// Path to an interface object directory to compile against. Only its
+    /// `object.json` is read; its chunk files are never opened
+    #[arg(long = "interface", action = ArgAction::Append)]
+    interfaces: Vec<PathBuf>,
+    /// Output directory for the object
+    #[arg(long = "out", required = true)]
+    out_dir: PathBuf,
+    /// Stamp the emitted `provenance.json` with a wall-clock `stamped_at`
+    /// (ADR-0044 D1). OFF by default so the object stays byte-stable.
+    #[arg(long = "stamp-time", default_value_t = false)]
+    stamp_time: bool,
+    /// Output format: a one-line human summary, or the object header as JSON
+    #[arg(long = "format", value_enum, default_value_t = ObjectFormat::Text)]
+    format: ObjectFormat,
+}
+
+/// `link` — ADR-0058 §D4. The CCM and resource flags are `compile`'s, because
+/// the constraint model is a link product and the flags that shape it belong to
+/// the step that builds it.
+///
+/// The five lock flags are §D5's. A lockfile pins, per unit, the `object_hash`
+/// an integration expects; the linker CHECKS those pins and never fetches
+/// anything, because a monorepo checkout, a submodule, an artifact store or a
+/// CI download is what brings objects to the linker.
+#[derive(Args)]
+struct LinkArgs {
+    /// Path to an object directory to link (repeat for each object). Order does
+    /// not reach the output: objects are linked by unit name
+    #[arg(long = "object", required = true, action = ArgAction::Append)]
+    objects: Vec<PathBuf>,
+    /// Output directory for the compiled model package
+    #[arg(long = "out", required = true)]
+    out_dir: PathBuf,
+    /// Target maximum number of distinct variables per BDD partition
+    /// (ADR-0012 §2). Omitted collapses every model to a single partition
+    #[arg(long = "cluster-size", default_value_t = usize::MAX)]
+    cluster_size: usize,
+    /// Soft target peak resident memory in MiB (ADR-0039). See `compile`
+    #[arg(long = "max-rss-mb")]
+    max_rss_mb: Option<u64>,
+    /// Maximum thread count for the parallel compile/solve paths (ADR-0039)
+    #[arg(long = "max-threads")]
+    max_threads: Option<u32>,
+    /// Link-time progress signal (ADR-0039 §7). See `compile`: `none`
+    /// (default) emits nothing and keeps the link byte-for-byte identical,
+    /// `plain` writes phase / percent / RSS / ETA lines to STDERR, `json`
+    /// writes the JSON-lines stream to STDOUT. The constraint model is a link
+    /// product, so this is the step whose progress there is something to watch
+    #[arg(long = "progress", value_enum, default_value_t = ProgressMode::None)]
+    progress: ProgressMode,
+    /// Stamp the emitted `provenance.json` sidecars with a wall-clock
+    /// `stamped_at` (ADR-0044 D1). OFF keeps the link byte-stable
+    #[arg(long = "stamp-time", default_value_t = false)]
+    stamp_time: bool,
+    /// Path to a lockfile whose pins this link must satisfy (ADR-0058 §D5).
+    /// Every linked object's unit must be pinned at the hash being linked, and
+    /// every pinned unit must be linked. Checked first, before anything else
+    #[arg(long = "lock")]
+    lock: Option<PathBuf>,
+    /// Accept a lockfile that pins units this link does not include, for a
+    /// deliberate subset link. The other half of the check still holds: a
+    /// linked object the lock does not pin is still refused
+    #[arg(long = "lock-allow-extra", default_value_t = false)]
+    lock_allow_extra: bool,
+    /// Path to write the lockfile to after a successful link. The bytes are a
+    /// function of the linked objects alone, so `--object` order cannot reach
+    /// them. Refuses to overwrite a file that differs without `--force-lock`
+    #[arg(long = "write-lock")]
+    write_lock: Option<PathBuf>,
+    /// `<unit>=<text>`, repeatable: the free-text `source` note to record for
+    /// one unit in the written lock. Informational only -- nothing reads it to
+    /// fetch anything. A unit that was not linked has nothing to annotate
+    #[arg(long = "lock-source", action = ArgAction::Append)]
+    lock_source: Vec<String>,
+    /// Overwrite an existing lockfile that differs from the one this link
+    /// would write
+    #[arg(long = "force-lock", default_value_t = false)]
+    force_lock: bool,
+    /// Output format: a one-line human summary, or the full result as JSON
+    #[arg(long = "format", value_enum, default_value_t = LinkFormat::Text)]
+    format: LinkFormat,
+}
+
+/// `compile-object --format`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum ObjectFormat {
+    /// One summary line on stdout.
+    Text,
+    /// The written `object.json`, pretty-printed on stdout.
+    Json,
+}
+
+/// `link --format`. Its own enum rather than `ObjectFormat`'s: the two verbs
+/// take the same two spellings but print different things, and clap renders a
+/// value enum's variant docs as the flag's possible-value help, so sharing one
+/// enum makes one of the two help texts describe the other verb's output.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum LinkFormat {
+    /// One summary line on stdout.
+    Text,
+    /// The full compile result, pretty-printed on stdout.
+    Json,
 }
 
 /// The `--progress` output mode (configflux-9pjy.3 / ADR-0039 §7).
@@ -191,6 +318,8 @@ fn run() -> Result<ExitCode> {
     };
     match cli.command {
         Commands::Compile(args) => run_compile(args),
+        Commands::CompileObject(args) => run_compile_object(args),
+        Commands::Link(args) => run_link(args),
         Commands::Verify(args) => run_verify(args),
         Commands::Inspect(args) => run_inspect(args),
         Commands::OpenModel(args) => run_open_model(args),
@@ -295,6 +424,168 @@ fn run_compile(args: CompileArgs) -> Result<ExitCode> {
     };
     print_json(&result)?;
     Ok(status_exit_code(result.status))
+}
+
+/// Compile one unit into an object (ADR-0058 §D3).
+///
+/// Interface headers are read HERE rather than inside `compile_object`, so an
+/// unreadable or malformed `--interface` is a CLI input error (exit 1) and only
+/// a fault in the model itself is a compilation error (exit 2). That split is
+/// the same one `--source` already has.
+fn run_compile_object(args: CompileObjectArgs) -> Result<ExitCode> {
+    let sources = load_sources(&args.sources)?;
+    let mut interfaces = Vec::with_capacity(args.interfaces.len());
+    for path in &args.interfaces {
+        interfaces.push(ObjectHeader::read_from_dir(path).with_context(|| {
+            format!("Failed to read interface object '{}'", path.display())
+        })?);
+    }
+
+    let output_dir = args.out_dir.to_string_lossy().into_owned();
+    match compile_object(CompileObjectRequest {
+        sources,
+        interfaces,
+        output_dir: output_dir.clone(),
+        stamp_time: args.stamp_time,
+    }) {
+        Ok(header) => {
+            match args.format {
+                ObjectFormat::Text => println!("{}", object_summary_line(&header, &output_dir)),
+                ObjectFormat::Json => print_json(&header)?,
+            }
+            Ok(ExitCode::from(0))
+        }
+        Err(diagnostic) => {
+            eprintln!("{}: {}", diagnostic.code, diagnostic.message);
+            if let Some(hint) = &diagnostic.hint {
+                eprintln!("hint: {hint}");
+            }
+            Ok(ExitCode::from(2))
+        }
+    }
+}
+
+/// Link objects into a package (ADR-0058 §D4).
+///
+/// The text form is the operator's line — the package identity, how many
+/// objects went into it, and how many partitions the constraint model has —
+/// and the JSON form is the same `compile_result` envelope `compile` prints,
+/// so a caller that already parses one parses the other.
+fn run_link(args: LinkArgs) -> Result<ExitCode> {
+    warn_in_crate_threads_once(args.max_threads);
+    let cluster_size = if args.cluster_size == usize::MAX {
+        None
+    } else {
+        Some(args.cluster_size)
+    };
+    let out_dir = args.out_dir.to_string_lossy().into_owned();
+    let request = LinkModelRequest {
+        schema_version: PRODUCT_SCHEMA_VERSION,
+        object_dirs: args
+            .objects
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect(),
+        output_dir: out_dir.clone(),
+        cluster_size,
+        budget: budget_from_args(args.max_rss_mb, args.max_threads),
+        stamp_time: args.stamp_time,
+        lock_path: args.lock.map(|path| path.to_string_lossy().into_owned()),
+        lock_allow_extra: args.lock_allow_extra,
+        write_lock_path: args.write_lock.map(|path| path.to_string_lossy().into_owned()),
+        lock_sources: parse_lock_sources(&args.lock_source)?,
+        force_lock: args.force_lock,
+    };
+    // ADR-0039 §7, exactly as `run_compile` selects it: `none` takes the plain
+    // `link_model` path with NO sink wired, so an unwatched link is byte-for-
+    // byte what it was before the flag existed.
+    let result = match args.progress {
+        ProgressMode::None => link_model(request),
+        ProgressMode::Plain => {
+            let sink = PlainStderrSink;
+            link_model_with_progress(request, Some(&sink))
+        }
+        ProgressMode::Json => {
+            let sink = JsonStdoutSink;
+            link_model_with_progress(request, Some(&sink))
+        }
+    };
+    match args.format {
+        LinkFormat::Json => print_json(&result)?,
+        LinkFormat::Text => {
+            if result.status == OperationStatus::Ok {
+                println!("{}", link_summary_line(&result, &out_dir));
+            }
+            for diagnostic in &result.verify_report.diagnostics.diagnostics {
+                eprintln!("{}: {}", diagnostic.code, diagnostic.message);
+                if let Some(hint) = &diagnostic.hint {
+                    eprintln!("hint: {hint}");
+                }
+            }
+        }
+    }
+    Ok(status_exit_code(result.status))
+}
+
+/// `--lock-source <unit>=<text>`, one entry per repetition (ADR-0058 §D5).
+///
+/// A CLI input error rather than a link diagnostic, because the fault is in
+/// what was typed on the command line and nothing about the objects has been
+/// read yet: `link` exits `1` here, as it does for every other malformed
+/// argument. Split at the FIRST `=` so a note may contain one.
+///
+/// The unit is checked against the same snake_case rule the lockfile's own keys
+/// are held to, so `--lock-source` and a hand-written lock cannot disagree
+/// about what a unit name is. A later repetition of one unit replaces an
+/// earlier one, which is the ordinary last-wins reading of a repeated flag.
+fn parse_lock_sources(entries: &[String]) -> Result<BTreeMap<String, String>> {
+    let mut sources = BTreeMap::new();
+    for entry in entries {
+        let (unit, note) = entry.split_once('=').with_context(|| {
+            format!("--lock-source expects <unit>=<text>, got '{entry}'")
+        })?;
+        compiler::link_lock::check_unit_name(unit)
+            .with_context(|| format!("--lock-source unit name is invalid: '{entry}'"))?;
+        sources.insert(unit.to_string(), note.to_string());
+    }
+    Ok(sources)
+}
+
+/// The `link` summary line: identity, object count, partition count.
+///
+/// The partition count is read from the emitted `.ccm` manifest rather than
+/// carried on the result envelope. It is a property of the artifact, and the
+/// artifact is on disk by the time this line is printed; adding a field to the
+/// shared `compile_result` for one verb's stdout would put a number in
+/// `compile`'s envelope that `compile` never sets.
+fn link_summary_line(result: &CompileResult, out_dir: &str) -> String {
+    let partitions = ccm_partition_count(Path::new(out_dir)).unwrap_or(1);
+    format!(
+        "model_hash: {}  objects: {}  partitions: {}",
+        result.model_hash,
+        result.objects.len(),
+        partitions
+    )
+}
+
+/// How many partitions the emitted `.ccm` holds.
+///
+/// Read from `ccm/partition-manifest.json`, which is where the roster lives
+/// (ADR-0005 Amendment 1 §13) — `ccm.manifest.json` names that file and carries
+/// the hashes, but not the list. The v2 layout is always multi-part, so an
+/// unpartitioned model still writes `partitions: ["partition-0000"]` and this
+/// answers 1 by reading rather than by defaulting.
+///
+/// Returns `None` when the file cannot be read or does not carry the array, and
+/// the caller prints 1. A missing count is not worth failing a link that
+/// succeeded.
+fn ccm_partition_count(cmp_dir: &Path) -> Option<usize> {
+    let manifest = std::fs::read(cmp_dir.join("ccm").join("partition-manifest.json")).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&manifest).ok()?;
+    value
+        .get("partitions")
+        .and_then(|partitions| partitions.as_array())
+        .map(|partitions| partitions.len())
 }
 
 /// `--progress plain` sink: one human-readable line per event on STDERR.
@@ -421,6 +712,38 @@ mod tests {
     use clap::Parser;
 
     #[test]
+    fn partition_count_is_read_from_the_partition_manifest() {
+        // Pins the FILENAME. The roster is in `partition-manifest.json`; an
+        // earlier draft read `ccm.manifest.json`, which parses fine and carries
+        // no `partitions` array, so the summary line silently answered 1 for
+        // every model — a partitioned link would have reported the same number
+        // as an unpartitioned one.
+        let dir = std::env::temp_dir().join(format!(
+            "cfx-link-partitions-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let ccm = dir.join("ccm");
+        std::fs::create_dir_all(&ccm).expect("mkdir");
+        std::fs::write(
+            ccm.join("partition-manifest.json"),
+            br#"{"has_bridge":true,"partitions":["partition-0000","partition-0001"],"schema_version":1}"#,
+        )
+        .expect("write manifest");
+        // The file the earlier draft read: present, valid, and silent about
+        // partitions. It must not become the answer.
+        std::fs::write(ccm.join("ccm.manifest.json"), br#"{"schema_version":1}"#)
+            .expect("write ccm manifest");
+
+        assert_eq!(ccm_partition_count(&dir), Some(2));
+        assert_eq!(ccm_partition_count(&dir.join("absent")), None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn cli_parses_inspect_parameter_subcommand() {
         let cli = Cli::try_parse_from([
             "configflux-compiler",
@@ -512,6 +835,134 @@ mod tests {
             panic!("expected compile command");
         };
         assert_eq!(args.progress, ProgressMode::None);
+    }
+
+    #[test]
+    fn cli_link_accepts_progress_flag() {
+        // ADR-0058 §D4 item 1: `link` takes the CCM and resource flags exactly
+        // as `compile` does, and `--progress` is one of them — the constraint
+        // model is a LINK product, so the step that builds it is the step whose
+        // progress an operator watches. It was the only one of the five the
+        // verb did not accept (configflux-p0jz.2 QA).
+        for (arg, expected) in [
+            ("none", ProgressMode::None),
+            ("plain", ProgressMode::Plain),
+            ("json", ProgressMode::Json),
+        ] {
+            let cli = Cli::try_parse_from([
+                "configflux-compiler",
+                "link",
+                "--object",
+                "unit.cfo",
+                "--out",
+                "out/cmp",
+                "--progress",
+                arg,
+            ])
+            .expect("parse link cli with --progress");
+            let Commands::Link(args) = cli.command else {
+                panic!("expected link command");
+            };
+            assert_eq!(args.progress, expected, "--progress {arg} parsed wrong");
+        }
+    }
+
+    #[test]
+    fn cli_link_defaults_progress_to_none() {
+        // Omitting `--progress` keeps the byte-identical, no-output path, which
+        // is what the §D8 oracle links through.
+        let cli = Cli::try_parse_from([
+            "configflux-compiler",
+            "link",
+            "--object",
+            "unit.cfo",
+            "--out",
+            "out/cmp",
+        ])
+        .expect("parse link cli without --progress");
+        let Commands::Link(args) = cli.command else {
+            panic!("expected link command");
+        };
+        assert_eq!(args.progress, ProgressMode::None);
+    }
+
+    #[test]
+    fn cli_link_accepts_every_lock_flag() {
+        // ADR-0058 §D5's five. A link with none of them behaves exactly as it
+        // did before the lockfile existed, which is what the two `None`s and
+        // the two `false`s below pin.
+        let bare = Cli::try_parse_from([
+            "configflux-compiler",
+            "link",
+            "--object",
+            "unit.cfo",
+            "--out",
+            "out/cmp",
+        ])
+        .expect("parse link cli without any lock flag");
+        let Commands::Link(args) = bare.command else {
+            panic!("expected link command");
+        };
+        assert!(args.lock.is_none() && args.write_lock.is_none());
+        assert!(!args.lock_allow_extra && !args.force_lock);
+        assert!(args.lock_source.is_empty());
+
+        let cli = Cli::try_parse_from([
+            "configflux-compiler",
+            "link",
+            "--object",
+            "unit.cfo",
+            "--out",
+            "out/cmp",
+            "--lock",
+            "configflux.lock",
+            "--lock-allow-extra",
+            "--write-lock",
+            "next.lock",
+            "--lock-source",
+            "site_catalogue=an artifact store",
+            "--force-lock",
+        ])
+        .expect("parse link cli with every lock flag");
+        let Commands::Link(args) = cli.command else {
+            panic!("expected link command");
+        };
+        assert_eq!(args.lock.as_deref(), Some(Path::new("configflux.lock")));
+        assert_eq!(args.write_lock.as_deref(), Some(Path::new("next.lock")));
+        assert!(args.lock_allow_extra && args.force_lock);
+        assert_eq!(args.lock_source, vec!["site_catalogue=an artifact store"]);
+    }
+
+    #[test]
+    fn lock_sources_split_at_the_first_equals_and_refuse_a_non_unit() {
+        // A note may contain '=' — an artifact-store URL routinely does — so
+        // only the first one separates. The unit is held to the lockfile's own
+        // key rule, so a note can never be written under a key a lock could
+        // not carry.
+        let parsed = parse_lock_sources(&[
+            "site_catalogue=store://objects?unit=site_catalogue".to_string(),
+        ])
+        .expect("parses");
+        assert_eq!(
+            parsed["site_catalogue"],
+            "store://objects?unit=site_catalogue"
+        );
+
+        // Last repetition of one unit wins, which is the ordinary reading of a
+        // repeated flag.
+        let repeated = parse_lock_sources(&["a_unit=first".to_string(), "a_unit=second".to_string()])
+            .expect("parses");
+        assert_eq!(repeated["a_unit"], "second");
+
+        assert!(
+            parse_lock_sources(&["no_separator".to_string()]).is_err(),
+            "an entry without '=' names no unit"
+        );
+        let error = parse_lock_sources(&["Site-Catalogue=x".to_string()]).expect_err("refused");
+        assert!(
+            format!("{error:#}").contains("Site-Catalogue"),
+            "the message must name what it refused: {error:#}"
+        );
     }
 
     #[test]

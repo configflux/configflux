@@ -21,7 +21,10 @@ filegroup(
 # NO direct `//solver` edge; it reaches the solver only via `//session_compose`.
 # It still depends on the cudd-free default `compiler` library
 # (`//compiler:compiler_lib`, ADR-0036 amendment 1) for the loader-only ops
-# (open/init/apply/list-facets/resolve) that carry no solver decision.
+# (open/init/apply/list-facets) that carry no solver decision. `resolve` LEFT
+# that list in configflux-secb.3: it now routes through `//session_compose` in
+# both `cfx resolve` and `cfx explain`, because solver-inferred binding lives
+# behind that seam (ADR-0057 §D6).
 CFX_DEPS = [
     "//session_compose",
     "//compiler:compiler_lib",
@@ -36,10 +39,45 @@ CFX_DEPS = [
 
 CFX_SRCS = [
     "src/main.rs",
+    # configflux-dkmm.5 (ADR-0059 D4/M6): the `cfx diff` verb, its cell
+    # comparison, and the DiffReport/CellDiff/Change envelope. The envelope
+    # types live in `cfx` and not in the compiler crate because a manifest is a
+    # user-side deployment container and a diff is a comparison of two runs —
+    # neither is a compiler concept — and an envelope owned by the tool that
+    # emits it can be revised without touching the resolution contract every SDK
+    # and the C ABI depend on.
+    "src/diff.rs",
+    # `#[cfg(test)] mod diff_tests` — the CLI-level `cfx diff` tests. A sibling
+    # of src/tests.rs (whose harness it reuses) only because that file is
+    # already at its lint cap.
+    "src/diff_tests.rs",
     "src/explain.rs",
+    # configflux-c16x: the bounded, file-type-checked read both
+    # operator-supplied input files go through (--selection-file, --manifest).
+    "src/input_file.rs",
+    # configflux-dkmm.4 (ADR-0059 D1/M5/M6): the environment-manifest parser
+    # and the shared `resolve_cells()` cell enumerator. A NEW module rather
+    # than more of pipeline.rs/render.rs because both are already grandfathered
+    # above the 400-line cap, and because `cfx diff` (configflux-dkmm.5) imports
+    # this enumerator unchanged — one enumerator is what keeps a diff from ever
+    # visiting a cell set the matrix did not write.
+    "src/manifest.rs",
     "src/options.rs",
     "src/pipeline.rs",
     "src/render.rs",
+    # configflux-secb.1 (ADR-0057 §D8): the two outside-facing selection inputs
+    # — the `--select` flags and the `--selection-file` document — and the one
+    # rule they share: binding a facet twice AT ONE LEVEL is a usage error,
+    # while a flag overriding the file stays an override. A new module because
+    # `pipeline.rs` and `main.rs` are both at their line caps, and because the
+    # flag half and the file half of that rule have to sit beside each other or
+    # they drift.
+    "src/selection_input.rs",
+    # `#[cfg(test)] mod selection_input_tests` — the CLI-level cases for that
+    # rule. A sibling for the same reason `diff_tests.rs` is one: the
+    # implementation plus these cases would put a NEW file over the 400-line
+    # default.
+    "src/selection_input_tests.rs",
     # `#[cfg(test)] mod tests` — compiled only into `cfx_unit_test`, but listed
     # here because `rust_binary` and `rust_test` share this src list.
     "src/tests.rs",
@@ -53,18 +91,54 @@ rust_binary(
     # ADR-0002 §5: feeds CARGO_PKG_VERSION so `#[command(version)]` resolves
     # `--version` to the workspace release version. Mirror /VERSION
     # (lint_repo.py enforces this).
-    version = "0.3.0",
+    version = "0.4.0",
     deps = CFX_DEPS,
 )
 
+# Scenario chunks the unit tests `include_str!` and compile in-process (via
+# `compiler::product_api::compile_model`) to build a REAL model fixture for the
+# `--out` snapshot-file tests (configflux-dkmm.1). Same pattern as
+# `runtime/BUILD.bazel`'s SCENARIO_COMPILE_DATA: they are compile-time inputs to
+# the test crate, not runfiles.
+CFX_TEST_COMPILE_DATA = [
+    "//compiler:scenarios/s1_water_pump/smoke/cue/00_definitions.json",
+    "//compiler:scenarios/s1_water_pump/smoke/cue/10_components.json",
+    "//examples:00-service-multi-env/00_definitions.json",
+    "//examples:00-service-multi-env/10_components.json",
+    # configflux-dkmm.4: example 05's model plus the two COMMITTED environment
+    # manifests the `--manifest` tests drive. The tests read the shipped
+    # manifests rather than inventing fixtures, so the frozen schema (ADR-0059
+    # D1) is asserted against what the repository actually ships — an invented
+    # fixture is exactly what let the drift in ADR-0059 Context §3 survive.
+    "//examples:00-service-multi-env/environments.json",
+    "//examples:05-compose-fleet/00_definitions.json",
+    "//examples:05-compose-fleet/10_components.json",
+    "//examples:05-compose-fleet/environments.json",
+    # configflux-dkmm.5: example 06's four repository chunks plus its manifest.
+    # The `cfx diff` polyrepo tests drive the SHIPPED example rather than an
+    # invented fixture, so "an edit in one repository reaches only the services
+    # whose scope contains it" is asserted against the model the docs teach.
+    # That coupling runs both ways (configflux-secb.7): this list must carry
+    # every unit the manifest's choices reach into, not only the ones the
+    # assertions name — environments.json binds `sorter_lanes`, so the sorter
+    # chunk is load-bearing here even though no assertion mentions it.
+    "//examples:06-catalogue-polyrepo/environments.json",
+    "//examples:06-catalogue-polyrepo/repos/catalogue/00_catalogue.json",
+    "//examples:06-catalogue-polyrepo/repos/compute/10_compute.json",
+    "//examples:06-catalogue-polyrepo/repos/sorter/20_sorter.json",
+    "//examples:06-catalogue-polyrepo/repos/vision/10_vision.json",
+]
+
 # In-process unit tests: arg parsing, exit-code classification, path safety,
-# and text/JSON rendering (the parts that need no compiled model).
+# text/JSON rendering, and the `--out` snapshot-file contract (which drives the
+# whole pipeline over a fixture model compiled in-process).
 rust_test(
     name = "cfx_unit_test",
     size = "small",
     timeout = "short",
     srcs = CFX_SRCS,
     crate_root = "src/main.rs",
+    compile_data = CFX_TEST_COMPILE_DATA,
     edition = "2021",
     tags = [
         "ci",
@@ -95,6 +169,13 @@ sh_test(
         "//compiler:scenarios/s1_water_pump/smoke/cue/10_components.json",
         "//compiler:scenarios/s5_building_hvac/smoke/cue/00_definitions.json",
         "//compiler:scenarios/s5_building_hvac/smoke/cue/10_components.json",
+        # configflux-secb.6 (ADR-0057 D7): the third differential cell. The two
+        # packs above declare no requirement, so on their own they would prove
+        # cfx and the interpreter agree about a payload that never carries a
+        # `requires` block.
+        "//compiler:scenarios/s_requires_delivery/00_catalogue.json",
+        "//compiler:scenarios/s_requires_delivery/10_bindings.json",
+        "//compiler:scenarios/s_requires_delivery/20_services.json",
     ],
     env = {
         "COMPILER_RLOCATION": "$(rootpath //compiler:compiler)",
@@ -104,6 +185,9 @@ sh_test(
         "S1_COMPONENTS_RLOCATION": "$(rootpath //compiler:scenarios/s1_water_pump/smoke/cue/10_components.json)",
         "S5_DEFS_RLOCATION": "$(rootpath //compiler:scenarios/s5_building_hvac/smoke/cue/00_definitions.json)",
         "S5_COMPONENTS_RLOCATION": "$(rootpath //compiler:scenarios/s5_building_hvac/smoke/cue/10_components.json)",
+        "REQUIRES_CATALOGUE_RLOCATION": "$(rootpath //compiler:scenarios/s_requires_delivery/00_catalogue.json)",
+        "REQUIRES_BINDINGS_RLOCATION": "$(rootpath //compiler:scenarios/s_requires_delivery/10_bindings.json)",
+        "REQUIRES_SERVICES_RLOCATION": "$(rootpath //compiler:scenarios/s_requires_delivery/20_services.json)",
         "GOLDEN_HAPPY_RLOCATION": "$(rootpath tests/golden/resolve_s1_happy.stdout)",
     },
     tags = [
@@ -166,6 +250,28 @@ sh_test(
 # environment=prod via --select) — the case where a hint rebuilt from the flags
 # alone names a different, satisfiable selection.
 #
+# Same agreement on SOLVER-INFERRED BINDING (configflux-secb.3, ADR-0057 §D6):
+# over the committed `s_facet_equality` pack, whose `groups_equal` constraint
+# ties `sorter_container` to `line_container`, selecting `line_container=c2`
+# FORCES `sorter_container=c2`. `cfx resolve` binds it by inference and
+# succeeds; `cfx explain` must reach the same verdict. It only can if it runs
+# the resolve-context check through `//session_compose` — a compiler-direct
+# `resolve_from_selection` resolves with no implied bindings, lets the declared
+# default bind `sorter_container=c1`, and reports the very constraint violation
+# resolve does not have. That is the divergence this case pins.
+#
+# Same agreement across ALL THREE verbs wherever inference fires
+# (configflux-cvey). `cfx options` reaches a forced facet by a different road
+# than `cfx resolve` does — it asks the solver session for the still-valid set
+# and never runs the ADR-0057 §D6 fixpoint — so their agreeing is a fact about
+# two computations, not one. Asserted as an equivalence over the declared closed
+# facets the user did not name, on the `s_requires_accepts` pack, whose `derive`
+# table is the shape §D6's own context section names: `--select site=factory_b`
+# decides `line_container`, and `mode` follows from that. Paired with the
+# `site=factory_a` control, where the same table decides `line_container` again
+# but `mode` is merely DEFAULTED and must still be offered whole — the case that
+# keeps the equivalence from passing for a listing that narrows everything.
+#
 # Drives the REAL compiler / cfx binaries. E2E impact: smoke.
 sh_test(
     name = "cfx_resolve_explain_consistency_test",
@@ -178,6 +284,11 @@ sh_test(
         "//compiler:compiler",
         "//compiler:scenarios/s1_water_pump/smoke/cue/00_definitions.json",
         "//compiler:scenarios/s1_water_pump/smoke/cue/10_components.json",
+        "//compiler:scenarios/s_facet_equality/00_definitions.json",
+        "//compiler:scenarios/s_facet_equality/10_components.json",
+        "//compiler:scenarios/s_requires_accepts/00_catalogue.json",
+        "//compiler:scenarios/s_requires_accepts/10_bindings.json",
+        "//compiler:scenarios/s_requires_accepts/20_components.json",
         "//examples:00-service-multi-env/00_definitions.json",
         "//examples:00-service-multi-env/10_components.json",
     ],
@@ -188,6 +299,11 @@ sh_test(
         "S1_COMPONENTS_RLOCATION": "$(rootpath //compiler:scenarios/s1_water_pump/smoke/cue/10_components.json)",
         "HERO_DEFS_RLOCATION": "$(rootpath //examples:00-service-multi-env/00_definitions.json)",
         "HERO_COMPONENTS_RLOCATION": "$(rootpath //examples:00-service-multi-env/10_components.json)",
+        "IMPLIED_DEFS_RLOCATION": "$(rootpath //compiler:scenarios/s_facet_equality/00_definitions.json)",
+        "IMPLIED_COMPONENTS_RLOCATION": "$(rootpath //compiler:scenarios/s_facet_equality/10_components.json)",
+        "LOWERED_CATALOGUE_RLOCATION": "$(rootpath //compiler:scenarios/s_requires_accepts/00_catalogue.json)",
+        "LOWERED_BINDINGS_RLOCATION": "$(rootpath //compiler:scenarios/s_requires_accepts/10_bindings.json)",
+        "LOWERED_COMPONENTS_RLOCATION": "$(rootpath //compiler:scenarios/s_requires_accepts/20_components.json)",
     },
     tags = [
         "cfx",
@@ -204,6 +320,112 @@ sh_test(
 # text goldens (the shared `explain_renderer` wording), the satisfiable->exit-3
 # contract, and double-run determinism. Drives the REAL compiler / interpreter /
 # cfx binaries. E2E impact: smoke.
+# `cfx explain` must attribute a forced conflict to the facet-to-facet equality
+# constraint that caused it and quote the AUTHORED condition text —
+# configflux-secb.2 (ADR-0057 §D5). The expansion into a pairwise equivalence
+# happens inside the emitter, so a lowering that leaked the expanded form into
+# the ADR-0054 §5.4 roster would surface here as a machine formula where the
+# operator expects the line they wrote. Drives the REAL compiler / cfx binaries
+# over the committed `s_facet_equality` pack. E2E impact: smoke.
+sh_test(
+    name = "cfx_explain_facet_equality_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["tests/cfx_explain_facet_equality_test.sh"],
+    data = [
+        "tests/cfx_explain_facet_equality.py",
+        "tests/golden/explain_facet_equality_conflict.stdout",
+        ":cfx",
+        "//compiler:compiler",
+        "//compiler:scenarios/s_facet_equality/00_definitions.json",
+        "//compiler:scenarios/s_facet_equality/10_components.json",
+    ],
+    env = {
+        "COMPILER_RLOCATION": "$(rootpath //compiler:compiler)",
+        "CFX_RLOCATION": "$(rootpath :cfx)",
+        "PACK_DEFS_RLOCATION": "$(rootpath //compiler:scenarios/s_facet_equality/00_definitions.json)",
+        "PACK_COMPONENTS_RLOCATION": "$(rootpath //compiler:scenarios/s_facet_equality/10_components.json)",
+        "GOLDEN_CONFLICT_RLOCATION": "$(rootpath tests/golden/explain_facet_equality_conflict.stdout)",
+    },
+    tags = [
+        "cfx",
+        "owner:cfx",
+        "system",
+    ],
+)
+
+# configflux-secb.4 / ADR-0057 §D3: a BINDING must reach `cfx options` as the
+# closed facet it is — entries as options, in catalogue order, with the declared
+# default in the label. Drives the real binaries over the committed
+# `s_catalogue_binding` pack, which declares NO facets, so every option comes
+# from the catalogue. E2E impact: regression.
+sh_test(
+    name = "cfx_options_catalogue_binding_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["tests/cfx_options_catalogue_binding_test.sh"],
+    data = [
+        "tests/cfx_options_catalogue_binding.py",
+        "tests/golden/options_catalogue_binding.stdout",
+        ":cfx",
+        "//compiler:compiler",
+        "//compiler:scenarios/s_catalogue_binding/00_definitions.json",
+        "//compiler:scenarios/s_catalogue_binding/10_components.json",
+    ],
+    env = {
+        "COMPILER_RLOCATION": "$(rootpath //compiler:compiler)",
+        "CFX_RLOCATION": "$(rootpath :cfx)",
+        "PACK_DEFS_RLOCATION": "$(rootpath //compiler:scenarios/s_catalogue_binding/00_definitions.json)",
+        "PACK_COMPONENTS_RLOCATION": "$(rootpath //compiler:scenarios/s_catalogue_binding/10_components.json)",
+        "GOLDEN_OPTIONS_RLOCATION": "$(rootpath tests/golden/options_catalogue_binding.stdout)",
+    },
+    tags = [
+        "cfx",
+        "owner:cfx",
+        "system",
+    ],
+)
+
+# configflux-secb.5 / ADR-0057 §D4: a component's `requires`/`accepts` and a
+# binding's `derive` table must reach the operator as NAMED rules — an entry no
+# component accepts is never offered, naming the site decides the container, and
+# a rejection is explained as the requirement or the derive rule that caused it,
+# in the author's vocabulary. The pack is three authoring units, because a
+# requirement whose binding lives in another unit is the normal shape.
+# E2E impact: regression.
+sh_test(
+    name = "cfx_requires_accepts_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["tests/cfx_requires_accepts_test.sh"],
+    data = [
+        "tests/cfx_requires_accepts.py",
+        "tests/golden/requires_accepts_explain_accepts.stdout",
+        "tests/golden/requires_accepts_explain_derive.stdout",
+        "tests/golden/requires_accepts_options_site.stdout",
+        ":cfx",
+        "//compiler:compiler",
+        "//compiler:scenarios/s_requires_accepts/00_catalogue.json",
+        "//compiler:scenarios/s_requires_accepts/10_bindings.json",
+        "//compiler:scenarios/s_requires_accepts/20_components.json",
+    ],
+    env = {
+        "COMPILER_RLOCATION": "$(rootpath //compiler:compiler)",
+        "CFX_RLOCATION": "$(rootpath :cfx)",
+        "PACK_CATALOGUE_RLOCATION": "$(rootpath //compiler:scenarios/s_requires_accepts/00_catalogue.json)",
+        "PACK_BINDINGS_RLOCATION": "$(rootpath //compiler:scenarios/s_requires_accepts/10_bindings.json)",
+        "PACK_COMPONENTS_RLOCATION": "$(rootpath //compiler:scenarios/s_requires_accepts/20_components.json)",
+        "GOLDEN_OPTIONS_SITE_RLOCATION": "$(rootpath tests/golden/requires_accepts_options_site.stdout)",
+        "GOLDEN_EXPLAIN_DERIVE_RLOCATION": "$(rootpath tests/golden/requires_accepts_explain_derive.stdout)",
+        "GOLDEN_EXPLAIN_ACCEPTS_RLOCATION": "$(rootpath tests/golden/requires_accepts_explain_accepts.stdout)",
+    },
+    tags = [
+        "cfx",
+        "owner:cfx",
+        "system",
+    ],
+)
+
 sh_test(
     name = "cfx_explain_differential_test",
     size = "medium",
@@ -232,4 +454,22 @@ sh_test(
         "owner:cfx",
         "system",
     ],
+)
+
+# configflux-ulbg: the shell/python sources //tools:schema_version_lint_test
+# scans for stale product `schema_version` literals. Bazel globs stop at package
+# boundaries, so each owning package has to hand its own scripts over; the test
+# cross-checks the union against tools/publishignore_manifest.txt and fails when
+# a package is missing rather than skipping it in silence.
+filegroup(
+    name = "schema_version_scan_sources",
+    srcs = glob(
+        [
+            "**/*.py",
+            "**/*.sh",
+        ],
+        # sdk/cpp has no python and validation has no shell; a package holding
+        # only one of the two kinds is normal and must not fail analysis.
+        allow_empty = True,
+    ),
 )

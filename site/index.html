@@ -136,14 +136,19 @@ html{scroll-behavior:smooth;}
           <span style="width:11px; height:11px; border-radius:50%; background:var(--border2);"></span>
           <span style="margin-left:8px; font-family:'IBM Plex Mono', monospace; font-size:12px; color:var(--dim);">configflux · compile → resolve</span>
         </div>
-        <pre style="margin:0; padding:18px 18px 20px; font-family:'IBM Plex Mono', monospace; font-size:13px; line-height:1.75; color:var(--fg); overflow-x:auto; white-space:pre;"><span style="color:var(--accent)">$</span> configflux-compiler compile --source model.json --out build/
-<span style="color:var(--accent2)">✓</span> compiled <span style="color:var(--fg)">142</span> chunks → 150% model
-<span style="color:var(--accent2)">✓</span> validated typed graph <span style="color:var(--dim)">(0 conflicts)</span>
-<span style="color:var(--accent)">$</span> configflux-interpreter resolve \
-    --request-file resolve.json --response-file out.json
-<span style="color:var(--accent2)">✓</span> resolved → 100% model
-<span style="color:var(--accent2)">✓</span> canonicalized · sha256 <span style="color:var(--accent)">9f2c…a17b</span>
-<span style="color:var(--dim)">wrote 6 outputs in 0.42s · same inputs → same bytes</span></pre>
+        <pre style="margin:0; padding:18px 18px 20px; font-family:'IBM Plex Mono', monospace; font-size:13px; line-height:1.75; color:var(--fg); overflow-x:auto; white-space:pre;"><span style="color:var(--accent)">$</span> configflux-compiler compile \
+    --source .../00_definitions.json \
+    --source .../10_components.json --out build
+<span style="color:var(--accent)">$</span> cfx resolve --model build/cmp.manifest.json \
+    --select cooling_brand=hydra --select cooling_model=x200 \
+    --select pump_type=dual --select region=eu --out snapshot
+<span style="color:var(--muted)">model_hash:</span> <span style="color:var(--accent)">f8a6f2fb…</span>
+<span style="color:var(--muted)">selection_state_hash:</span> <span style="color:var(--accent)">d8412156…</span>
+<span style="color:var(--muted)">resolve_hash:</span> <span style="color:var(--accent)">8eda451d…</span>
+<span style="color:var(--muted)">resolved_output_hash:</span> <span style="color:var(--accent)">c2a0142a…</span>
+<span style="color:var(--muted)">wrote:</span> generated/config.hpp
+<span style="color:var(--muted)">wrote:</span> resolve_result.all.hydra-x200-dual-eu.json
+<span style="color:var(--dim)">same inputs → same bytes</span></pre>
       </div>
     </div>
   </section>
@@ -267,6 +272,30 @@ html{scroll-behavior:smooth;}
         </div>
 
         <div style="border:1px solid var(--border); border-radius:14px; background:var(--surface); padding:24px;" style-hover="border-color:var(--border2)">
+          <svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true" style="margin-bottom:14px; stroke:var(--accent); fill:none" stroke-width="1.6"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.3a2.6 2.6 0 0 1 5.1.8c0 1.7-2.5 2.2-2.5 3.8"/><circle cx="12" cy="17.2" r="0.5"/></svg>
+          <h3 style="margin:0 0 7px; font-size:16.5px; font-weight:600;">Constraints you can question</h3>
+          <p style="margin:0; color:var(--muted); font-size:14.5px;"><code style="font-family:'IBM Plex Mono', monospace; font-size:13px;">cfx options</code> lists what a deployment may still choose. <code style="font-family:'IBM Plex Mono', monospace; font-size:13px;">cfx explain</code> names the rule behind a refused choice in the author's own words — the requirement and the entries it accepts, or the binding that fixed a value.</p>
+        </div>
+
+        <div style="border:1px solid var(--border); border-radius:14px; background:var(--surface); padding:24px;" style-hover="border-color:var(--border2)">
+          <svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true" style="margin-bottom:14px; stroke:var(--accent); fill:none" stroke-width="1.6"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="3" y1="9.5" x2="21" y2="9.5"/><line x1="9.5" y1="9.5" x2="9.5" y2="20"/></svg>
+          <h3 style="margin:0 0 7px; font-size:16.5px; font-weight:600;">Typed catalogues and bindings</h3>
+          <p style="margin:0; color:var(--muted); font-size:14.5px;">Declare a typed table once, as data; a binding is one shared choice from it per deployment. Components declare what they <code style="font-family:'IBM Plex Mono', monospace; font-size:13px;">requires</code> and may narrow it to what they <code style="font-family:'IBM Plex Mono', monospace; font-size:13px;">accepts</code> — two components naming the same binding receive the same entry by construction, and an empty intersection is refused at compile time.</p>
+        </div>
+
+        <div style="border:1px solid var(--border); border-radius:14px; background:var(--surface); padding:24px;" style-hover="border-color:var(--border2)">
+          <svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true" style="margin-bottom:14px; stroke:var(--accent); fill:none" stroke-width="1.6"><path d="M12 3 3 7.5l9 4.5 9-4.5z"/><path d="M3 12l9 4.5 9-4.5"/><path d="M3 16.5 12 21l9-4.5"/></svg>
+          <h3 style="margin:0 0 7px; font-size:16.5px; font-weight:600;">Environments state only free decisions</h3>
+          <p style="margin:0; color:var(--muted); font-size:14.5px;">The constraints decide the rest, reported as <code style="font-family:'IBM Plex Mono', monospace; font-size:13px;">implied:</code> choices. One manifest resolves every environment (<code style="font-family:'IBM Plex Mono', monospace; font-size:13px;">cfx resolve --manifest … --all</code>), <code style="font-family:'IBM Plex Mono', monospace; font-size:13px;">resolved_output_hash</code> separates a real configuration change from an unrelated model edit, and <code style="font-family:'IBM Plex Mono', monospace; font-size:13px;">cfx diff</code> exits non-zero exactly when a running service would receive different values.</p>
+        </div>
+
+        <div style="border:1px solid var(--border); border-radius:14px; background:var(--surface); padding:24px;" style-hover="border-color:var(--border2)">
+          <svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true" style="margin-bottom:14px; stroke:var(--accent); fill:none" stroke-width="1.6"><rect x="3" y="3" width="7" height="7" rx="1.6"/><rect x="14" y="3" width="7" height="7" rx="1.6"/><rect x="8.5" y="14" width="7" height="7" rx="1.6"/><path d="M6.5 10v2.6h11V10M12 12.6V14"/></svg>
+          <h3 style="margin:0 0 7px; font-size:16.5px; font-weight:600;">Compose across repositories</h3>
+          <p style="margin:0; color:var(--muted); font-size:14.5px;"><code style="font-family:'IBM Plex Mono', monospace; font-size:13px;">compile-object</code> compiles one unit into a content-addressed object against the interfaces it depends on, and <code style="font-family:'IBM Plex Mono', monospace; font-size:13px;">link</code> assembles objects into the same package the one-shot compiler produces. A lockfile pins the object hashes an integration expects, and unchanged units are reused byte for byte.</p>
+        </div>
+
+        <div style="border:1px solid var(--border); border-radius:14px; background:var(--surface); padding:24px;" style-hover="border-color:var(--border2)">
           <svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true" style="margin-bottom:14px; stroke:var(--accent); fill:none" stroke-width="1.6"><path d="M12 3l7 3v5c0 4.2-2.8 7.4-7 9-4.2-1.6-7-4.8-7-9V6z"/><path d="M9 12l2.2 2.2L15.5 10" stroke-width="1.8"/></svg>
           <h3 style="margin:0 0 7px; font-size:16.5px; font-weight:600;">Signed releases</h3>
           <p style="margin:0; color:var(--muted); font-size:14.5px;">Release binaries are cryptographically signed, so you can verify exactly what you're running.</p>
@@ -293,6 +322,7 @@ html{scroll-behavior:smooth;}
         <div style="display:flex; border-bottom:1px solid var(--border); background:var(--surface2);">
           <button data-action="tab-source" data-tab="source" style="flex:1 1 auto; padding:13px 18px; border:none; border-bottom:2px solid var(--accent); background:var(--surface); font-family:'IBM Plex Mono', monospace; font-size:13px; cursor:pointer; color:var(--fg); font-weight:500;">Build from source</button>
           <button data-action="tab-binary" data-tab="binary" style="flex:1 1 auto; padding:13px 18px; border:none; border-bottom:2px solid transparent; background:transparent; font-family:'IBM Plex Mono', monospace; font-size:13px; cursor:pointer; color:var(--muted); font-weight:500;">Download signed release</button>
+          <button data-action="tab-image" data-tab="image" style="flex:1 1 auto; padding:13px 18px; border:none; border-bottom:2px solid transparent; background:transparent; font-family:'IBM Plex Mono', monospace; font-size:13px; cursor:pointer; color:var(--muted); font-weight:500;">Run the container image</button>
         </div>
 
         <div data-panel="source">
@@ -316,9 +346,26 @@ html{scroll-behavior:smooth;}
 <span style="color:var(--dim)"># Verify the signed checksums (keyless cosign):</span>
 <span style="color:var(--accent)">$</span> cosign verify-blob \
     --certificate SHA256SUMS.crt --signature SHA256SUMS.sig \
-    --certificate-identity-regexp 'https://github.com/configflux/configflux/.*' \
+    --certificate-identity-regexp '^https://github\.com/configflux/configflux/\.github/workflows/release\.yml@refs/tags/v.*$' \
+    --certificate-github-workflow-ref 'refs/tags/v&lt;version&gt;' \
     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
     SHA256SUMS</pre>
+          </div>
+        </div>
+
+        <div data-panel="image" hidden>
+          <div style="position:relative;">
+            <button data-action="copy-image" style="position:absolute; top:14px; right:14px; font-family:'IBM Plex Mono', monospace; font-size:12px; padding:6px 11px; border:1px solid var(--border2); border-radius:7px; background:var(--surface2); color:var(--muted); cursor:pointer;" style-hover="color:var(--fg); border-color:var(--accent)">Copy</button>
+            <pre style="margin:0; padding:22px 18px; font-family:'IBM Plex Mono', monospace; font-size:13.5px; line-height:1.85; color:var(--fg); overflow-x:auto; white-space:pre;"><span style="color:var(--accent)">$</span> docker run --rm -u "$(id -u):$(id -g)" \
+    -v "$PWD:/work" -w /work \
+    ghcr.io/configflux/toolchain:v&lt;version&gt; \
+    cfx --version</pre>
+          </div>
+        </div>
+
+        <div data-panel="image" hidden>
+          <div style="border-top:1px solid var(--border); padding:14px 18px; font-family:'IBM Plex Mono', monospace; font-size:12.5px; color:var(--muted);">
+            Run the toolchain anywhere a container runtime is available, including platforms with no native binary. There is deliberately no <span style="color:var(--fg)">latest</span> tag — pin <span style="color:var(--fg)">ghcr.io/configflux/toolchain@sha256:&lt;digest&gt;</span> for reproducible runs. Any OCI-compatible runtime works; the <span style="color:var(--fg)">-u</span> flag depends on your runtime — see the guide. The <a href="https://github.com/configflux/configflux/blob/main/docs/toolchain-image.md" style="color:var(--accent); text-decoration:none;" style-hover="text-decoration:underline">toolchain image guide</a> carries the invocation contract and the signature verification recipe.
           </div>
         </div>
 
@@ -329,7 +376,7 @@ html{scroll-behavior:smooth;}
         </div>
         <div data-panel="binary" hidden>
           <div style="border-top:1px solid var(--border); padding:14px 18px; font-family:'IBM Plex Mono', monospace; font-size:12.5px; color:var(--muted);">
-            No toolchain required — the release binaries are self-contained static builds. <span style="color:var(--fg)">curl</span> (or a browser) and <span style="color:var(--fg)">cosign</span> to verify the signature.
+            No toolchain required — the release binaries are self-contained static builds. <span style="color:var(--fg)">curl</span> (or a browser) and <span style="color:var(--fg)">cosign</span> to verify the signature. Replace <span style="color:var(--fg)">&lt;version&gt;</span> with the version you downloaded; the certificate is bound to that release's workflow run, so a signature from another release does not verify.
           </div>
         </div>
       </div>
@@ -350,6 +397,8 @@ html{scroll-behavior:smooth;}
         <div style="border:1px solid var(--border); border-radius:12px; background:var(--surface); padding:18px 20px;"><div style="font-family:'IBM Plex Mono', monospace; font-size:13px; color:var(--accent); margin-bottom:6px;">100% model</div><p style="margin:0; color:var(--muted); font-size:14px;">The fully resolved configuration for one specific product or deployment.</p></div>
         <div style="border:1px solid var(--border); border-radius:12px; background:var(--surface); padding:18px 20px;"><div style="font-family:'IBM Plex Mono', monospace; font-size:13px; color:var(--accent); margin-bottom:6px;">CUE</div><p style="margin:0; color:var(--muted); font-size:14px;">The typed configuration language used to author and constrain chunks.</p></div>
         <div style="border:1px solid var(--border); border-radius:12px; background:var(--surface); padding:18px 20px;"><div style="font-family:'IBM Plex Mono', monospace; font-size:13px; color:var(--accent); margin-bottom:6px;">CMP</div><p style="margin:0; color:var(--muted); font-size:14px;">Compiled Model Package — the hash-addressable artifact the compiler emits from the validated 150% model.</p></div>
+        <div style="border:1px solid var(--border); border-radius:12px; background:var(--surface); padding:18px 20px;"><div style="font-family:'IBM Plex Mono', monospace; font-size:13px; color:var(--accent); margin-bottom:6px;">CCM</div><p style="margin:0; color:var(--muted); font-size:14px;">Compiled Constraint Model — the compiled solver form emitted alongside the CMP, in the package's <code style="font-family:'IBM Plex Mono', monospace; font-size:13px;">ccm/</code> directory: a symbol table plus a reduced ordered binary decision diagram the solver queries to decide which options remain valid.</p></div>
+        <div style="border:1px solid var(--border); border-radius:12px; background:var(--surface); padding:18px 20px;"><div style="font-family:'IBM Plex Mono', monospace; font-size:13px; color:var(--accent); margin-bottom:6px;">Catalogue / binding</div><p style="margin:0; color:var(--muted); font-size:14px;">A typed table of named entries, declared once as data. A binding is one shared choice of an entry from it — chosen per deployment, and explained like any other facet.</p></div>
       </div>
 
       <div style="margin-top:18px; border:1px solid var(--border); border-radius:12px; background:var(--surface); overflow:hidden;">
@@ -416,8 +465,10 @@ html{scroll-behavior:smooth;}
       <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(260px,1fr)); gap:14px;">
         <a href="https://github.com/configflux/configflux/blob/main/docs/design.md" style="text-decoration:none; border:1px solid var(--border); border-radius:12px; background:var(--surface); padding:22px; display:flex; flex-direction:column; gap:6px;" style-hover="border-color:var(--accent); background:var(--surface2)"><div style="display:flex; justify-content:space-between; align-items:center;"><span style="font-size:15.5px; font-weight:600; color:var(--fg);">Design overview</span><span style="color:var(--muted)">↗</span></div><span style="color:var(--muted); font-size:13.5px;">How the compiler, interpreter and runtime fit together.</span></a>
         <a href="https://github.com/configflux/configflux/blob/main/docs/model-spec.md" style="text-decoration:none; border:1px solid var(--border); border-radius:12px; background:var(--surface); padding:22px; display:flex; flex-direction:column; gap:6px;" style-hover="border-color:var(--accent); background:var(--surface2)"><div style="display:flex; justify-content:space-between; align-items:center;"><span style="font-size:15.5px; font-weight:600; color:var(--fg);">Model spec</span><span style="color:var(--muted)">↗</span></div><span style="color:var(--muted); font-size:13.5px;">The 150% / 100% model and how resolution is defined.</span></a>
-        <a href="https://github.com/configflux/configflux/tree/main/examples" style="text-decoration:none; border:1px solid var(--border); border-radius:12px; background:var(--surface); padding:22px; display:flex; flex-direction:column; gap:6px;" style-hover="border-color:var(--accent); background:var(--surface2)"><div style="display:flex; justify-content:space-between; align-items:center;"><span style="font-size:15.5px; font-weight:600; color:var(--fg);">Worked examples</span><span style="color:var(--muted)">↗</span></div><span style="color:var(--muted); font-size:13.5px;">End-to-end runnable examples, from a minimal model to a composed fleet.</span></a>
+        <a href="https://github.com/configflux/configflux/tree/main/examples" style="text-decoration:none; border:1px solid var(--border); border-radius:12px; background:var(--surface); padding:22px; display:flex; flex-direction:column; gap:6px;" style-hover="border-color:var(--accent); background:var(--surface2)"><div style="display:flex; justify-content:space-between; align-items:center;"><span style="font-size:15.5px; font-weight:600; color:var(--fg);">Worked examples</span><span style="color:var(--muted)">↗</span></div><span style="color:var(--muted); font-size:13.5px;">End-to-end runnable examples, from a minimal model to a fleet composed across four repositories.</span></a>
         <a href="https://github.com/configflux/configflux/blob/main/docs/interface-contracts.md" style="text-decoration:none; border:1px solid var(--border); border-radius:12px; background:var(--surface); padding:22px; display:flex; flex-direction:column; gap:6px;" style-hover="border-color:var(--accent); background:var(--surface2)"><div style="display:flex; justify-content:space-between; align-items:center;"><span style="font-size:15.5px; font-weight:600; color:var(--fg);">Interface contracts</span><span style="color:var(--muted)">↗</span></div><span style="color:var(--muted); font-size:13.5px;">The frozen compiler / interpreter / runtime API envelopes, diagnostics, and hash semantics.</span></a>
+        <a href="https://github.com/configflux/configflux/blob/main/docs/toolchain-image.md" style="text-decoration:none; border:1px solid var(--border); border-radius:12px; background:var(--surface); padding:22px; display:flex; flex-direction:column; gap:6px;" style-hover="border-color:var(--accent); background:var(--surface2)"><div style="display:flex; justify-content:space-between; align-items:center;"><span style="font-size:15.5px; font-weight:600; color:var(--fg);">Toolchain image</span><span style="color:var(--muted)">↗</span></div><span style="color:var(--muted); font-size:13.5px;">Run the toolchain from a signed container: invocation contract and verification recipe.</span></a>
+        <a href="https://github.com/configflux/configflux/blob/main/explorer/README.md" style="text-decoration:none; border:1px solid var(--border); border-radius:12px; background:var(--surface); padding:22px; display:flex; flex-direction:column; gap:6px;" style-hover="border-color:var(--accent); background:var(--surface2)"><div style="display:flex; justify-content:space-between; align-items:center;"><span style="font-size:15.5px; font-weight:600; color:var(--fg);">Model explorer</span><span style="color:var(--muted)">↗</span></div><span style="color:var(--muted); font-size:13.5px;">A local, read-only web UI for compiled models, resolved snapshots and explain reports.</span></a>
         <a href="https://github.com/configflux/configflux/security/policy" style="text-decoration:none; border:1px solid var(--border); border-radius:12px; background:var(--surface); padding:22px; display:flex; flex-direction:column; gap:6px;" style-hover="border-color:var(--accent); background:var(--surface2)"><div style="display:flex; justify-content:space-between; align-items:center;"><span style="font-size:15.5px; font-weight:600; color:var(--fg);">Security policy</span><span style="color:var(--muted)">↗</span></div><span style="color:var(--muted); font-size:13.5px;">Reporting, signed releases and disclosure.</span></a>
       </div>
     </div>

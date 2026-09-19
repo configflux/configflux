@@ -143,6 +143,7 @@ fn resolve_result_for_spec(spec: &ScenarioSpec, label: &str) -> Result<crate::lo
         model_handle: handle,
         scope: spec.scope.to_string(),
         selection_state: state,
+        implied_choices: Default::default(),
     });
     if result.status != OperationStatus::Ok {
         bail!(
@@ -169,6 +170,16 @@ fn runtime_open_request_from_resolve(result: &crate::loader_api::ResolveResult) 
         context_tags: result.context_tags.clone(),
         choices: result.choices.clone(),
         defaulted_choices: result.defaulted_choices.clone(),
+        // ADR-0057 §D6 lockstep: carried for the SAME reason `defaulted_choices`
+        // is. The runtime recomputes `resolve_hash` over BOTH provenance maps,
+        // so a bridge that drops either one manufactures a mismatch against a
+        // snapshot the loader had just emitted.
+        implied_choices: result.implied_choices.clone(),
+        // ADR-0060 D8.4: this is the repository's in-repo model of the
+        // documented handoff projection, so it must forward the closed-facet
+        // table too — an incomplete reference projection is inherited by every
+        // reader of it.
+        closed_facet_domains: result.closed_facet_domains.clone(),
         committed_overlay: std::collections::BTreeMap::new(),
         dirty_overlay: std::collections::BTreeMap::new(),
         dirty_generations: std::collections::BTreeMap::new(),

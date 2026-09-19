@@ -24,7 +24,7 @@
 # reads), extended with an optional `class` field:
 #
 #   {
-#     "schema_version": 3,
+#     "schema_version": 1,
 #     "environments": {
 #       "<name>": { "scope": "...", "context_tags": {...}, "choices": {...},
 #                   "class": "local" }

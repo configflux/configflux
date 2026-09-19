@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! configflux-ok46: fail-closed assertion at the resolve-time safety/lifecycle/
-//! access sink.
+//! configflux-ok46: fail-closed assertion at the resolve-time metadata sink.
 //!
 //! `configflux-qofj` closed the TOML route to the silent safety-default sink in
 //! `resolver.rs` (safety=QM / lifecycle=Runtime / access=Technician via
 //! `unwrap_or`). The JSON ingest path (`add_chunk_json_with_source` /
-//! `add_chunk_auto`) shares that sink and is intentionally unguarded because the
-//! ADR-0027 Decision 8 invariant is that JSON chunks originate from CUE
-//! whole-pack export, which bakes the parent's declared metadata into the chunk.
+//! `add_chunk_auto`) shares that sink and is intentionally unguarded: ADR-0027
+//! Decision 8 has JSON chunks originate from CUE whole-pack export, which bakes
+//! the parent's declared metadata into the chunk.
 //!
 //! These black-box tests pin Option 1 (the decided fix): a parameter that
 //! carries `inherits` and drops a metadata field its parent definition declared
@@ -17,8 +16,7 @@
 //!
 //! The over-broad-assertion guards (artifact-slot inheritor; standalone/root
 //! param) prove the assertion does NOT fire for legitimate CUE-origin shapes,
-//! which is what keeps the scenario / byte-stability / cross-path equivalence
-//! corpora green.
+//! which is what keeps the scenario / byte-stability / equivalence corpora green.
 
 use std::collections::HashMap;
 
@@ -39,6 +37,7 @@ fn empty_param() -> Parameter {
         access: None,
         limits: None,
         req_id: None,
+        facet: None,
         overrides: Vec::new(),
     }
 }
@@ -61,6 +60,7 @@ fn single_param_config(
         r#type: Some("actuator".to_string()),
         condition: None,
         depends_on: Vec::new(),
+        requires: Default::default(),
         params,
     };
     let mut components = HashMap::new();
@@ -73,6 +73,8 @@ fn single_param_config(
         artifacts,
         facets: Default::default(),
         constraints: Default::default(),
+        catalogues: Default::default(),
+        bindings: Default::default(),
     }
 }
 

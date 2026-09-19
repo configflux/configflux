@@ -14,8 +14,12 @@
 #   runtime get-parameter      -> read pid_gain_trim (runtime-writable)
 #   runtime set-parameter      -> write pid_gain_trim (round-trip)
 #   runtime get-parameter      -> read back the value just written
-#   runtime set-parameter      -> facet write rejected by solver validation
-#                                 (g3f.3, CONSTRAINT_VIOLATED family)
+#   runtime set-parameter      -> write to encoder_mode REFUSED: it declares
+#                                 `facet: encoder_type`, so the write is a
+#                                 facet selection the model's constraints
+#                                 govern (05hm, ADR-0064)
+#   runtime set-parameter      -> control: a path that is no parameter at all
+#                                 is refused earlier, by path validation
 #
 # Assertions:
 #   * every positive step exits 0 and reports status "ok"
@@ -23,8 +27,11 @@
 #   * resolve emits the expected resolved config + resolve_hash, byte-equal
 #     to the committed golden (examples/03-motor-controller/expected/)
 #   * runtime get-parameter returns exactly what set-parameter wrote
-#   * a constraint-violating runtime write (an unknown option for a real
-#     model facet) is rejected with the selection/constraint error family
+#   * a write that violates a DECLARED constraint exits 2 with status "error",
+#     code E_SELECTION_CONFLICT, entity_path constraints/<id>, an unsat_core
+#     naming that constraint and quoting its condition, and NO snapshot
+#   * the negative control keeps its own verdict: a write to a path that is
+#     not a parameter is still E_RUNTIME_UNKNOWN_PATH
 #
 # Binaries, example sources and the golden are located via the runfiles tree
 # (rootpath env vars set by the sh_test `env` attribute), mirroring the
@@ -139,7 +146,7 @@ echo "  -> CMP + .ccm produced"
 # ---------------------------------------------------------------------------
 step "open"
 python3 -c 'import json,sys
-json.dump({"schema_version":4,"cmp_manifest_ref":sys.argv[1]},open(sys.argv[2],"w"))' \
+json.dump({"schema_version":5,"cmp_manifest_ref":sys.argv[1]},open(sys.argv[2],"w"))' \
   "${OUT}/cmp.manifest.json" "${OUT}/open.req.json"
 "${INTERPRETER}" open \
   --request-file "${OUT}/open.req.json" \
@@ -157,7 +164,7 @@ step "options (motor_class)"
 # empty state first (this probe carries no context and no prior choices).
 python3 -c 'import json,sys
 o=json.load(open(sys.argv[1]))
-json.dump({"schema_version":4,"model_handle":o["model_handle"],"scope":sys.argv[3],
+json.dump({"schema_version":5,"model_handle":o["model_handle"],"scope":sys.argv[3],
           "context_tags":{}},open(sys.argv[2],"w"))' \
   "${OUT}/open.res.json" "${OUT}/options_init.req.json" "${SCOPE}"
 "${INTERPRETER}" init-selection-state \
@@ -166,7 +173,7 @@ json.dump({"schema_version":4,"model_handle":o["model_handle"],"scope":sys.argv[
 assert_status_ok "${OUT}/options_init.res.json" "options init"
 python3 -c 'import json,sys
 o=json.load(open(sys.argv[1])); s=json.load(open(sys.argv[2]))
-json.dump({"schema_version":4,"model_handle":o["model_handle"],"scope":sys.argv[4],
+json.dump({"schema_version":5,"model_handle":o["model_handle"],"scope":sys.argv[4],
           "selection_state":s["selection_state"],
           "facet":"motor_class"},open(sys.argv[3],"w"))' \
   "${OUT}/open.res.json" "${OUT}/options_init.res.json" "${OUT}/options_probe.req.json" "${SCOPE}"
@@ -194,7 +201,7 @@ echo "  -> solver valid_options(motor_class) = ${OPTS}; declared default = ${DEF
 step "init-selection-state"
 python3 -c 'import json,sys
 o=json.load(open(sys.argv[1]))
-json.dump({"schema_version":4,"model_handle":o["model_handle"],"scope":sys.argv[3],
+json.dump({"schema_version":5,"model_handle":o["model_handle"],"scope":sys.argv[3],
           "context_tags":{"encoder_type":"absolute"}},open(sys.argv[2],"w"))' \
   "${OUT}/open.res.json" "${OUT}/init.req.json" "${SCOPE}"
 "${INTERPRETER}" init-selection-state \
@@ -209,7 +216,7 @@ echo "  -> initial selection state (encoder_type=absolute pinned)"
 step "select #1 motor_class=brushed_dc"
 python3 -c 'import json,sys
 o=json.load(open(sys.argv[1])); s=json.load(open(sys.argv[2]))
-json.dump({"schema_version":4,"model_handle":o["model_handle"],"scope":sys.argv[4],
+json.dump({"schema_version":5,"model_handle":o["model_handle"],"scope":sys.argv[4],
           "selection_state":s["selection_state"],
           "selection_delta":{"facet":"motor_class","option":"brushed_dc"}},
           open(sys.argv[3],"w"))' \
@@ -226,7 +233,7 @@ echo "  -> applied motor_class=brushed_dc"
 step "select #2 power_rating=high"
 python3 -c 'import json,sys
 o=json.load(open(sys.argv[1])); s=json.load(open(sys.argv[2]))
-json.dump({"schema_version":4,"model_handle":o["model_handle"],"scope":sys.argv[4],
+json.dump({"schema_version":5,"model_handle":o["model_handle"],"scope":sys.argv[4],
           "selection_state":s["selection_state"],
           "selection_delta":{"facet":"power_rating","option":"high"}},
           open(sys.argv[3],"w"))' \
@@ -246,7 +253,7 @@ echo "  -> applied power_rating=high; choices=${CHOICES}"
 step "resolve"
 python3 -c 'import json,sys
 o=json.load(open(sys.argv[1])); s=json.load(open(sys.argv[2]))
-json.dump({"schema_version":4,"model_handle":o["model_handle"],"scope":sys.argv[4],
+json.dump({"schema_version":5,"model_handle":o["model_handle"],"scope":sys.argv[4],
           "selection_state":s["selection_state"]},open(sys.argv[3],"w"))' \
   "${OUT}/open.res.json" "${OUT}/sel2.res.json" "${OUT}/resolve.req.json" "${SCOPE}"
 "${INTERPRETER}" resolve \
@@ -279,12 +286,15 @@ echo "  -> overrides verified: control_mode=${CM}, current_limit=${CL}"
 step "runtime-open"
 python3 -c 'import json,sys
 d=json.load(open(sys.argv[1])); o=json.load(open(sys.argv[2]))
-req={"schema_version":4,"model_hash":d["model_hash"],
+req={"schema_version":5,"model_hash":d["model_hash"],
      "ccm_ref":o["model_handle"]["ccm_ref"],"resolve_hash":d["resolve_hash"],
      "scope":d["scope"],"resolved_output":d["resolved_output"],
      "resolved_component_dependencies":d.get("resolved_component_dependencies",{}),
      "resolved_artifacts":d.get("resolved_artifacts",{}),
-     "context_tags":d.get("context_tags",{}),"choices":d.get("choices",{})}
+     "context_tags":d.get("context_tags",{}),"choices":d.get("choices",{}),
+     "defaulted_choices":d.get("defaulted_choices",{}),
+     "implied_choices":d.get("implied_choices",{}),
+     "closed_facet_domains":d.get("closed_facet_domains",{})}
 json.dump(req,open(sys.argv[3],"w"))' \
   "${OUT}/resolve.res.json" "${OUT}/open.res.json" "${OUT}/ropen.req.json"
 "${RUNTIME}" runtime-open \
@@ -301,7 +311,7 @@ PARAM_PATH="component.motion_controller.param.pid_gain_trim"
 step "get-parameter (initial)"
 python3 -c 'import json,sys
 ro=json.load(open(sys.argv[1]))
-json.dump({"schema_version":4,"runtime_snapshot":ro["runtime_snapshot"],
+json.dump({"schema_version":5,"runtime_snapshot":ro["runtime_snapshot"],
           "path":sys.argv[3]},open(sys.argv[2],"w"))' \
   "${OUT}/ropen.res.json" "${OUT}/get1.req.json" "${PARAM_PATH}"
 "${RUNTIME}" get-parameter \
@@ -318,7 +328,7 @@ echo "  -> initial pid_gain_trim = ${INIT_VAL}"
 step "set-parameter (pid_gain_trim=0.42)"
 python3 -c 'import json,sys
 ro=json.load(open(sys.argv[1]))
-json.dump({"schema_version":4,"runtime_snapshot":ro["runtime_snapshot"],
+json.dump({"schema_version":5,"runtime_snapshot":ro["runtime_snapshot"],
           "path":sys.argv[3],"value":0.42},open(sys.argv[2],"w"))' \
   "${OUT}/ropen.res.json" "${OUT}/set.req.json" "${PARAM_PATH}"
 "${RUNTIME}" set-parameter \
@@ -332,7 +342,7 @@ step "get-parameter (after set)"
 # Read back from the snapshot returned by set-parameter (carries the dirty write).
 python3 -c 'import json,sys
 sp=json.load(open(sys.argv[1]))
-json.dump({"schema_version":4,"runtime_snapshot":sp["runtime_snapshot"],
+json.dump({"schema_version":5,"runtime_snapshot":sp["runtime_snapshot"],
           "path":sys.argv[3]},open(sys.argv[2],"w"))' \
   "${OUT}/set.res.json" "${OUT}/get2.req.json" "${PARAM_PATH}"
 "${RUNTIME}" get-parameter \
@@ -344,29 +354,92 @@ RT_VAL="$(jget "${OUT}/get2.res.json" 'd["parameter"]["value"]')"
 echo "  -> set/get round-trip confirmed: pid_gain_trim = ${RT_VAL}"
 
 # ---------------------------------------------------------------------------
-# 10) runtime set-parameter  — a write to a path that is not a parameter is
-#     REJECTED
+# 10) runtime set-parameter  — a write the MODEL forbids is REJECTED
+# ---------------------------------------------------------------------------
+# `encoder_interface.encoder_mode` declares `facet: encoder_type`, which is what
+# makes it that facet's runtime handle (ADR-0064): writing it is a selection of
+# encoder_type, not a free-form scalar poke, so the model's declared
+# constraints govern it. This session already holds `power_rating=high`, and
+# the model declares
+#
+#   high_power_requires_absolute_encoder:
+#     power_rating != 'high' || encoder_type != 'incremental'
+#
+# so writing `incremental` makes the session's total assignment unsatisfiable.
+# The write is issued on the snapshot returned by step 9, which carries the
+# accepted pid_gain_trim write — a later write is checked against what earlier
+# writes established, not against the state at open.
+#
+# The assertions mirror the in-process contract (runtime/src/tests.rs,
+# `assert_constraint_rejected` and the named-core cases): exit 2, status error,
+# E_SELECTION_CONFLICT, entity_path `constraints/<id>`, an unsat_core naming
+# the violated constraint and quoting its condition, and NO snapshot returned.
+step "set-parameter (violates a declared constraint, expect rejection)"
+FACET_PATH="component.encoder_interface.param.encoder_mode"
+RULE_ID="high_power_requires_absolute_encoder"
+RULE_TEXT="power_rating != 'high' || encoder_type != 'incremental'"
+python3 -c 'import json,sys
+sp=json.load(open(sys.argv[1]))
+json.dump({"schema_version":5,"runtime_snapshot":sp["runtime_snapshot"],
+          "path":sys.argv[3],"value":"incremental"},open(sys.argv[2],"w"))' \
+  "${OUT}/set.res.json" "${OUT}/conflict.req.json" "${FACET_PATH}"
+set +e
+"${RUNTIME}" set-parameter \
+  --request-file "${OUT}/conflict.req.json" \
+  --response-file "${OUT}/conflict.res.json"
+CONFLICT_RC=$?
+set -e
+[[ ${CONFLICT_RC} -eq 2 ]] || fail "constraint set: expected exit 2 (command error), got ${CONFLICT_RC}"
+CONFLICT_STATUS="$(jget "${OUT}/conflict.res.json" 'd["status"]')"
+[[ "${CONFLICT_STATUS}" == "error" ]] || fail "constraint set: expected status error, got ${CONFLICT_STATUS}"
+CONFLICT_CODE="$(jget "${OUT}/conflict.res.json" 'd["diagnostics"]["diagnostics"][0]["code"]')"
+if [[ "${CONFLICT_CODE}" != "E_SELECTION_CONFLICT" ]]; then
+  echo "--- rejection response ---" >&2
+  cat "${OUT}/conflict.res.json" >&2 || true
+  fail "constraint set: expected E_SELECTION_CONFLICT, got ${CONFLICT_CODE}"
+fi
+CONFLICT_ENTITY="$(jget "${OUT}/conflict.res.json" 'd["diagnostics"]["diagnostics"][0]["entity_path"]')"
+[[ "${CONFLICT_ENTITY}" == "constraints/${RULE_ID}" ]] \
+  || fail "constraint set: expected entity_path constraints/${RULE_ID}, got ${CONFLICT_ENTITY}"
+# A rejected write changes nothing, so no snapshot comes back.
+HAS_SNAPSHOT="$(jget "${OUT}/conflict.res.json" 'd.get("runtime_snapshot") is not None')"
+[[ "${HAS_SNAPSHOT}" == "False" ]] || fail "constraint set: a rejected write must return no snapshot"
+# The core names the rejected selection and the violated rule, with its
+# condition text quoted verbatim from the model.
+CORE_REJECTED="$(jget "${OUT}/conflict.res.json" 'json.dumps(d["unsat_core"]["rejected"],sort_keys=True)')"
+[[ "${CORE_REJECTED}" == '{"facet": "encoder_type", "option": "incremental"}' ]] \
+  || fail "constraint set: unexpected unsat_core.rejected ${CORE_REJECTED}"
+python3 -c 'import json,sys
+d=json.load(open(sys.argv[1]))
+named=[(c.get("constraint_id"), c["summary"])
+       for c in d["unsat_core"]["conflicting_constraints"] if c["kind"] == "model_rule"]
+if named != [(sys.argv[2], sys.argv[3])]:
+    sys.exit("model_rule clauses %r do not name %s and quote its condition"
+             % (named, sys.argv[2]))' \
+  "${OUT}/conflict.res.json" "${RULE_ID}" "${RULE_TEXT}" \
+  || { cat "${OUT}/conflict.res.json" >&2 || true; fail "constraint set: unsat_core core mismatch"; }
+echo "  -> write refused by the model: ${CONFLICT_CODE} at ${CONFLICT_ENTITY}"
+echo "  -> unsat_core names ${RULE_ID}: ${RULE_TEXT}"
+
+# ---------------------------------------------------------------------------
+# 11) NEGATIVE CONTROL — a path that is not a parameter is refused EARLIER
 # ---------------------------------------------------------------------------
 # 'power_rating' is declared as a FACET (00_definitions.json) and appears in
-# this model only inside component `condition` strings — motor_drive's actual
-# params are control_mode / current_limit / motor_driver / pwm_frequency. So
-# there is no such parameter to write, and the runtime reports
-# E_RUNTIME_UNKNOWN_PATH.
+# this model only inside `condition` strings — motor_drive's actual params are
+# control_mode / current_limit / motor_driver / pwm_frequency. There is no such
+# parameter to write, so the compiler's own path validation refuses it before
+# the solver is consulted at all (the D1 ordering configflux-jraj established)
+# and the code is E_RUNTIME_UNKNOWN_PATH, whatever value is supplied.
 #
-# This step used to claim it demonstrated constraint enforcement, and passed
-# only because the solver ran ahead of the compiler and answered about the
-# same-named facet first — which made the reported code depend on whether the
-# supplied VALUE happened to be a valid option of that facet. Since
-# configflux-jraj (ADR-0017 amendment D1) the compiler's own path validation
-# runs first, so a non-existent path is reported as one whatever value is
-# supplied. This example has no genuine runtime constraint violation to show:
-# its only lifecycle:runtime parameter is a float, and none of its
-# runtime-writable parameters is a facet (tracked as a follow-up).
-step "set-parameter (path is not a parameter, expect rejection)"
+# Keeping it beside step 10 is the point: the two refusals must stay
+# distinguishable. A regression that made every refused write look like a
+# policy violation — or every policy violation look like a bad path — would
+# pass either assertion alone.
+step "set-parameter (path is not a parameter, expect unknown-path rejection)"
 BAD_PATH="component.motor_drive.param.power_rating"
 python3 -c 'import json,sys
 ro=json.load(open(sys.argv[1]))
-json.dump({"schema_version":4,"runtime_snapshot":ro["runtime_snapshot"],
+json.dump({"schema_version":5,"runtime_snapshot":ro["runtime_snapshot"],
           "path":sys.argv[3],"value":"nonexistent_option"},open(sys.argv[2],"w"))' \
   "${OUT}/ropen.res.json" "${OUT}/badset.req.json" "${BAD_PATH}"
 set +e
@@ -375,9 +448,9 @@ set +e
   --response-file "${OUT}/badset.res.json"
 BAD_RC=$?
 set -e
-[[ ${BAD_RC} -eq 2 ]] || fail "constraint set: expected exit 2 (command error), got ${BAD_RC}"
+[[ ${BAD_RC} -eq 2 ]] || fail "bad-path set: expected exit 2 (command error), got ${BAD_RC}"
 BAD_STATUS="$(jget "${OUT}/badset.res.json" 'd["status"]')"
-[[ "${BAD_STATUS}" == "error" ]] || fail "constraint set: expected status error, got ${BAD_STATUS}"
+[[ "${BAD_STATUS}" == "error" ]] || fail "bad-path set: expected status error, got ${BAD_STATUS}"
 BAD_CODE="$(jget "${OUT}/badset.res.json" 'd["diagnostics"]["diagnostics"][0]["code"]')"
 if [[ "${BAD_CODE}" != "E_RUNTIME_UNKNOWN_PATH" ]]; then
   echo "--- rejection response ---" >&2
@@ -387,4 +460,4 @@ fi
 echo "  -> write to a non-parameter path rejected: ${BAD_CODE}"
 
 step "DONE — full solver-path E2E green"
-echo "compile -> open -> options -> init -> select x2 -> resolve(golden) -> runtime-open -> get/set/get -> unknown-path-reject"
+echo "compile -> open -> options -> init -> select x2 -> resolve(golden) -> runtime-open -> get/set/get -> constraint-reject (with an unknown-path control)"

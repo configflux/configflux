@@ -16,3 +16,7 @@ include!("operations.rs");
 mod tests;
 #[cfg(test)]
 mod authority_tests;
+#[cfg(test)]
+mod cas_field_routing_tests;
+#[cfg(test)]
+mod hash_format_tests;

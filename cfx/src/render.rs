@@ -15,14 +15,47 @@ use compiler::loader_api::{
 
 use crate::explain::ResolveContextConflict;
 use crate::options::OptionsOutcome;
-use crate::pipeline::ResolveOutcome;
+use crate::pipeline::{CellOutcome, ResolveOutcome};
 
 /// Render the default human text lineage: one line per stage plus one
 /// `wrote:` line per exported file (sorted). Determinism-safe.
 pub fn render_text<W: Write>(outcome: &ResolveOutcome, out: &mut W) -> std::io::Result<()> {
+    render_lineage(outcome, "", out)
+}
+
+/// The lineage block itself, with every `wrote:` path prefixed.
+///
+/// ONE definition, TWO callers (configflux-dkmm.4): a single resolve passes an
+/// empty prefix and its output is byte-unchanged, while a matrix cell passes
+/// `<environment>/<root>/` so the printed paths are relative to `--out` rather
+/// than to the cell directory the reader never named.
+fn render_lineage<W: Write>(
+    outcome: &ResolveOutcome,
+    prefix: &str,
+    out: &mut W,
+) -> std::io::Result<()> {
     writeln!(out, "model_hash: {}", outcome.model_hash)?;
     writeln!(out, "selection_state_hash: {}", outcome.selection_state_hash)?;
     writeln!(out, "resolve_hash: {}", outcome.resolve_hash)?;
+    // ADR-0059 D3: the payload's own identity, printed immediately after
+    // `resolve_hash` so the two read as the pair they are — one rotates with
+    // the model, one only with the delivered bytes. Guarded rather than
+    // unconditional: the field is present iff `resolved_output` is, so an
+    // error-status result prints no line and pre-ADR output stays byte-exact.
+    if let Some(resolved_output_hash) = &outcome.resolve_result.resolved_output_hash {
+        writeln!(out, "resolved_output_hash: {resolved_output_hash}")?;
+    }
+    // ADR-0057 §D6: what the constraints decided, printed BEFORE the defaults
+    // because that is the precedence order — an implied binding outranks a
+    // declared default, so a reader scanning top-down meets the stronger
+    // provenance first. Note this is the REVERSE of the wire order, where
+    // `implied_choices` is declared after `defaulted_choices`; both orderings
+    // are deliberate and specified, so neither should be "fixed" to match the
+    // other. Sorted (`BTreeMap`), and absent entirely when nothing is implied,
+    // so every model that implies nothing keeps byte-identical output.
+    for (facet, value) in &outcome.resolve_result.implied_choices {
+        writeln!(out, "implied: {facet}={value}")?;
+    }
     // ADR-0047 §5/§6: surface the auto-bound-default provenance. Sorted
     // (`BTreeMap`), determinism-safe, and absent entirely for a facet-free
     // resolve (empty map → no lines), so pre-ADR output is byte-unchanged.
@@ -30,18 +63,70 @@ pub fn render_text<W: Write>(outcome: &ResolveOutcome, out: &mut W) -> std::io::
         writeln!(out, "defaulted: {facet}={value}")?;
     }
     for path in &outcome.written {
-        writeln!(out, "wrote: {path}")?;
+        writeln!(out, "wrote: {prefix}{path}")?;
     }
     Ok(())
+}
+
+/// Render a matrix run as text (ADR-0059 D2): per cell, a `cell: <environment>
+/// <scope>` header followed by that cell's usual lineage block.
+///
+/// Only cells that produced a resolution appear. A rejected cell has no lineage
+/// to print and no files to name — its diagnostic is on stderr, where a caller
+/// redirecting stdout into a report still sees it.
+pub fn render_cells_text<W: Write>(
+    outcomes: &[CellOutcome],
+    out: &mut W,
+) -> std::io::Result<()> {
+    for cell in outcomes {
+        let Ok(outcome) = &cell.result else { continue };
+        writeln!(out, "cell: {} {}", cell.environment, cell.scope)?;
+        render_lineage(outcome, &format!("{}/", cell.prefix), out)?;
+    }
+    Ok(())
+}
+
+/// Render a matrix run as JSON Lines: one EXISTING `ResolveResult` per resolved
+/// cell, in cell order, and nothing else on stdout (ADR-0059 D2 — no new JSON
+/// shape is invented). Each line is the same `snapshot_bytes` the cell's own
+/// snapshot file holds, so the stream and the files can never disagree.
+pub fn render_cells_json<W: Write>(
+    outcomes: &[CellOutcome],
+    out: &mut W,
+) -> std::io::Result<()> {
+    for cell in outcomes {
+        let Ok(outcome) = &cell.result else { continue };
+        let bytes = snapshot_bytes(&outcome.resolve_result)
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
+        out.write_all(&bytes)?;
+    }
+    Ok(())
+}
+
+/// The canonical bytes of a resolved snapshot: the existing `ResolveResult`
+/// schema serialized exactly as the interpreter's `resolve` op emits it
+/// (compact `serde_json::to_vec` over the struct — never via
+/// `serde_json::Value`, whose map would re-sort keys) plus one trailing
+/// newline, matching `interpreter/src/cli_adapter.rs`'s
+/// `write_response_payload`.
+///
+/// ONE definition, TWO consumers (configflux-dkmm.1): `render_json` writes
+/// these bytes to stdout and `pipeline::run` writes the same bytes to
+/// `<out>/resolve_result.<root>.<selection>.json`. Factoring it here is what
+/// makes "the file is byte-identical to `--format json` stdout" true by
+/// construction rather than by two call sites happening to agree.
+pub fn snapshot_bytes(result: &ResolveResult) -> serde_json::Result<Vec<u8>> {
+    let mut bytes = serde_json::to_vec(result)?;
+    bytes.push(b'\n');
+    Ok(bytes)
 }
 
 /// Render the resolved payload as JSON — the existing `ResolveResult` schema,
 /// serialized exactly as the interpreter's `resolve` op emits it, with a
 /// trailing newline.
 pub fn render_json<W: Write>(outcome: &ResolveOutcome, out: &mut W) -> std::io::Result<()> {
-    let mut bytes = serde_json::to_vec(&outcome.resolve_result)
+    let bytes = snapshot_bytes(&outcome.resolve_result)
         .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
-    bytes.push(b'\n');
     out.write_all(&bytes)
 }
 
@@ -237,10 +322,13 @@ mod tests {
                 scope: "all".to_string(),
                 selection_state_hash: "bbbb".to_string(),
                 resolve_hash: Some("cccc".to_string()),
+                resolved_output_hash: Some("dddd".to_string()),
                 resolved_output: Some(serde_json::json!({"k": "v"})),
                 context_tags: BTreeMap::new(),
                 choices: BTreeMap::new(),
                 defaulted_choices: BTreeMap::new(),
+                implied_choices: BTreeMap::new(),
+                closed_facet_domains: Default::default(),
                 resolved_component_dependencies: BTreeMap::new(),
                 resolved_artifacts: BTreeMap::new(),
                 error_count: 0,
@@ -266,6 +354,7 @@ mod tests {
             "model_hash: aaaa\n\
              selection_state_hash: bbbb\n\
              resolve_hash: cccc\n\
+             resolved_output_hash: dddd\n\
              wrote: generated/config.hpp\n\
              wrote: generated/config_build_flags.cmake\n"
         );
@@ -428,10 +517,13 @@ mod tests {
                 scope: "all".to_string(),
                 selection_state_hash: "bbbb".to_string(),
                 resolve_hash: None,
+                resolved_output_hash: None,
                 resolved_output: None,
                 context_tags: BTreeMap::new(),
                 choices: BTreeMap::new(),
                 defaulted_choices: BTreeMap::new(),
+                implied_choices: BTreeMap::new(),
+                closed_facet_domains: Default::default(),
                 resolved_component_dependencies: BTreeMap::new(),
                 resolved_artifacts: BTreeMap::new(),
                 error_count: 1,

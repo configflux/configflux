@@ -279,6 +279,9 @@ fn walk(expr: &ConditionExpr, out: &mut BTreeSet<(String, String)>) {
                 walk(child, out);
             }
         }
+        // Expanded before emission (configflux-secb.2 / ADR-0057 §D5), so an
+        // unexpanded node references no variable slot here.
+        ConditionExpr::FacetCompare { .. } => {}
     }
 }
 

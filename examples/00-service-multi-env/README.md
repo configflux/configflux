@@ -90,18 +90,27 @@ that guarantee visible.
 
 ```console
 $ cfx options --model out/cmp/cmp.manifest.json --select environment=prod
+facet beta_dashboard [closed, default: off]
+  off
+  on
+facet environment [selected: prod, default: dev]
+  prod
 facet log_level [closed, default: info]
   info
+facet replica_class [closed, default: single]
+  scaled
+  single
 ```
 
 `log_level` shows only `info`. A guided walk can never land on the invalid
-combination, because the model has removed it.
+combination, because the model has removed it. The other three facets are
+listed in full because `cfx options` always reports the whole decision space —
+`prod` narrows `log_level` and nothing else.
 
 **`cfx explain`** answers *why* when you deliberately force the bad pair:
 
 ```console
-$ cfx explain --model out/cmp/cmp.manifest.json \
-    --select environment=prod --select log_level=debug
+$ cfx explain --model out/cmp/cmp.manifest.json --select environment=prod --select log_level=debug
 cannot select log_level.debug:
   blocked by your earlier choice: environment.prod
   blocked by constraint prod_forbids_debug: environment != 'prod' || log_level != 'debug'

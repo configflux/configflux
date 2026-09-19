@@ -29,11 +29,38 @@ pub(crate) const EXIT_OK: u8 = 0;
 pub(crate) const EXIT_TRANSPORT_ERROR: u8 = 1;
 pub(crate) const EXIT_COMMAND_ERROR: u8 = 2;
 
-pub(crate) const E_INTERPRETER_CLI_ARGS_INVALID: &str = "E_INTERPRETER_CLI_ARGS_INVALID";
-pub(crate) const E_INTERPRETER_CLI_REQUEST_IO: &str = "E_INTERPRETER_CLI_REQUEST_IO";
-pub(crate) const E_INTERPRETER_CLI_REQUEST_TOO_LARGE: &str = "E_INTERPRETER_CLI_REQUEST_TOO_LARGE";
-pub(crate) const E_INTERPRETER_CLI_REQUEST_INVALID: &str = "E_INTERPRETER_CLI_REQUEST_INVALID";
-pub(crate) const E_INTERPRETER_CLI_RESPONSE_IO: &str = "E_INTERPRETER_CLI_RESPONSE_IO";
+// The five transport codes are `pub`, unlike everything else in this module,
+// because they are the part of this module an operator meets: the binary writes
+// each one to stderr as `{code}: {message}`, so a script driving the
+// interpreter branches on them without ever reading this crate.
+// `docs/diagnostics.md` promises to list every code the compiler, interpreter
+// and runtime can emit, and the generator behind it scans for `pub const E_*`
+// (ADR-0044 D4) — so a crate-private constant is one that published registry can
+// never name, and the promise stays false while the visibility says otherwise
+// (configflux-d3ga, the interpreter half of configflux-p8ki). They are frozen
+// too, exactly as the runtime's five are: section 4.1 of
+// `docs/interpreter-cli-contract.md` lists them as the vocabulary that
+// discriminates that document's frozen exit code `1`, and the repository lint
+// holds the list and these declarations equal in both directions — so adding,
+// renaming or removing one here without editing that section fails the gate
+// (configflux-dxap). Section 8 of `docs/interface-contracts.md` does not settle
+// that question: it keeps the presentation CLI (`cfx`) unfrozen, and reading it
+// as though it covered `configflux-interpreter`, a different binary with a
+// contract document of its own, is what left this list unguarded. Nor does
+// `pub` widen anything linkable —
+// this crate's only library slice is `explain_renderer`, its own file in both
+// BUILD.bazel and Cargo.toml, so `cli_adapter` compiles into the binary alone
+// and the module stays private in main.rs.
+/// registry: cause = the command line the interpreter binary was invoked with is not one it accepts, whether an unknown subcommand, a missing argument, or a flag the command does not take; remedy = run the binary with --help to see the commands it accepts and the transport flags each of them takes, and reissue the invocation
+pub const E_INTERPRETER_CLI_ARGS_INVALID: &str = "E_INTERPRETER_CLI_ARGS_INVALID";
+/// registry: cause = the request payload could not be read at all: the file named by --request-file could not be opened or read, most often because it is missing or permission was denied, or because it is not a regular file (a directory, FIFO or device is refused from its file type before any of it is read, because only a regular file's recorded size bounds what a read returns), or the stdin stream failed mid-read; remedy = read the failure class the message names, such as not_found, permission_denied or not a regular file, then make the request path an existing regular file readable by the invoking user, or pipe the payload on stdin instead of naming a file
+pub const E_INTERPRETER_CLI_REQUEST_IO: &str = "E_INTERPRETER_CLI_REQUEST_IO";
+/// registry: cause = the request payload exceeds the 8 MiB the transport accepts: a file whose recorded size is already over the bound is refused without being read, and otherwise the payload is refused by the length actually read, which on both transports is capped one byte past the bound so nothing larger is ever buffered; remedy = send a smaller request: a selection command carries the whole selection state and an export command the whole resolve result, so send back what the previous response returned rather than an envelope padded with anything the command does not read
+pub const E_INTERPRETER_CLI_REQUEST_TOO_LARGE: &str = "E_INTERPRETER_CLI_REQUEST_TOO_LARGE";
+/// registry: cause = the request payload is not the JSON the command expects, whether undecodable, the wrong shape, or missing a required field such as schema_version; remedy = send the request envelope documented for that command in docs/interpreter-cli-contract.md, comparing the whole envelope against the contract — the message names the command it was sent to and never the offending field or value
+pub const E_INTERPRETER_CLI_REQUEST_INVALID: &str = "E_INTERPRETER_CLI_REQUEST_INVALID";
+/// registry: cause = the command produced a result the transport could not deliver: the response would not serialize, or the file named by --response-file or the stdout stream could not be written; remedy = point --response-file at an existing writable directory and keep stdout open for the life of the command, then reissue it
+pub const E_INTERPRETER_CLI_RESPONSE_IO: &str = "E_INTERPRETER_CLI_RESPONSE_IO";
 
 #[derive(Parser)]
 #[command(name = "configflux-interpreter")]
@@ -325,7 +352,7 @@ fn read_request_payload<R: Read>(
     }
 }
 
-fn read_request_file(path: &Path) -> Result<Vec<u8>, TransportError> {
+pub(crate) fn read_request_file(path: &Path) -> Result<Vec<u8>, TransportError> {
     let source = path_display(path);
     let metadata = fs::metadata(path).map_err(|err| {
         TransportError::new(
@@ -337,6 +364,19 @@ fn read_request_file(path: &Path) -> Result<Vec<u8>, TransportError> {
         )
     })?;
 
+    // configflux-mtmi. A `stat()` size bounds what a read returns for a regular
+    // file and for nothing else: a FIFO, a device or a procfs entry reports a
+    // size that understates its stream, so the refusal below would never fire
+    // and the read would buffer the whole thing before the second one could
+    // refuse it. The file type is therefore settled BEFORE the file is opened.
+    // The read below is capped as well, so neither check stands alone.
+    if !metadata.file_type().is_file() {
+        return Err(TransportError::new(
+            E_INTERPRETER_CLI_REQUEST_IO,
+            format!("Unable to read request file '{source}' (not a regular file)"),
+        ));
+    }
+
     if metadata.len() > REQUEST_SIZE_LIMIT_BYTES as u64 {
         return Err(TransportError::new(
             E_INTERPRETER_CLI_REQUEST_TOO_LARGE,
@@ -347,15 +387,17 @@ fn read_request_file(path: &Path) -> Result<Vec<u8>, TransportError> {
         ));
     }
 
-    let payload = fs::read(path).map_err(|err| {
-        TransportError::new(
-            E_INTERPRETER_CLI_REQUEST_IO,
-            format!(
-                "Unable to read request file '{source}' ({})",
-                io_error_class(&err)
-            ),
-        )
-    })?;
+    let payload = fs::File::open(path)
+        .and_then(|mut file| read_capped(&mut file))
+        .map_err(|err| {
+            TransportError::new(
+                E_INTERPRETER_CLI_REQUEST_IO,
+                format!(
+                    "Unable to read request file '{source}' ({})",
+                    io_error_class(&err)
+                ),
+            )
+        })?;
 
     if payload.len() > REQUEST_SIZE_LIMIT_BYTES {
         return Err(TransportError::new(
@@ -370,10 +412,23 @@ fn read_request_file(path: &Path) -> Result<Vec<u8>, TransportError> {
     Ok(payload)
 }
 
-fn read_request_stdin<R: Read>(stdin: &mut R) -> Result<Vec<u8>, TransportError> {
+/// Read at most one byte past the transport bound.
+///
+/// Both transports share this reader, so the `--request-file` path is bounded
+/// by the same rule as stdin rather than by the file's own recorded size, which
+/// understates a FIFO or a device (configflux-mtmi). Stopping one byte PAST the
+/// bound is what lets the caller tell a request that sits exactly on it from
+/// one that exceeds it.
+pub(crate) fn read_capped<R: Read>(reader: &mut R) -> std::io::Result<Vec<u8>> {
     let mut payload = Vec::new();
-    let mut limited = stdin.take((REQUEST_SIZE_LIMIT_BYTES + 1) as u64);
-    limited.read_to_end(&mut payload).map_err(|err| {
+    reader
+        .take((REQUEST_SIZE_LIMIT_BYTES + 1) as u64)
+        .read_to_end(&mut payload)?;
+    Ok(payload)
+}
+
+fn read_request_stdin<R: Read>(stdin: &mut R) -> Result<Vec<u8>, TransportError> {
+    let payload = read_capped(stdin).map_err(|err| {
         TransportError::new(
             E_INTERPRETER_CLI_REQUEST_IO,
             format!(

@@ -17,6 +17,7 @@
 // This test does NOT run the gf2o-acceptance fixture (10k×50/50) — that
 // belongs to `configflux-vfx4` per ADR-0011 §"Follow-on work".
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -196,6 +197,93 @@ fn cudd_and_in_crate_paths_are_semantically_equivalent() {
         assert_eq!(
             a_names, b_names,
             "valid_options({facet}) must match across in-crate and CUDD paths"
+        );
+    }
+}
+
+// ----------------------------------------------------------------------------
+// configflux-secb.2 / ADR-0057 §D5: the facet-to-facet comparison form.
+//
+// The form is expanded into the core grammar by `parse_condition_model` before
+// either backend sees it, so both fold an IDENTICAL tree through their existing
+// arms. This test is what makes that claim checkable rather than assumed: if a
+// future change moved the expansion into `compile_expr`, the two backends would
+// carry two hand-written folds and could drift here.
+// ----------------------------------------------------------------------------
+
+/// Two closed facets with overlapping-but-unequal domains, tied by one authored
+/// equality constraint. The asymmetry matters: `c3` is declared only on the
+/// right, so a correct lowering rules it out and a lowering that ignored the
+/// union rule would not.
+fn facet_equality_model() -> ConditionModel {
+    let left = ("line_container", ["c1", "c2"].as_slice());
+    let right = ("sorter_container", ["c1", "c2", "c3"].as_slice());
+
+    let mut clauses: Vec<String> = Vec::new();
+    let mut cardinality: Vec<String> = Vec::new();
+    let mut facet_domains: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (name, values) in [left, right] {
+        for value in values {
+            clauses.push(format!("{name} == '{value}' || {name} != '{value}'"));
+        }
+        let args: Vec<String> = values
+            .iter()
+            .map(|value| format!("{name} == '{value}'"))
+            .collect();
+        cardinality.push(format!("exactly_one_of({})", args.join(", ")));
+        facet_domains.insert(
+            name.to_string(),
+            values.iter().map(|v| v.to_string()).collect(),
+        );
+    }
+
+    ConditionModel {
+        bound_model_hash: "55".repeat(32),
+        clauses,
+        constraints: vec![(
+            "groups_equal".to_string(),
+            "line_container == sorter_container".to_string(),
+        )],
+        cardinality,
+        facet_domains,
+    }
+}
+
+#[test]
+fn cudd_and_in_crate_agree_on_a_facet_equality_constraint() {
+    let model = facet_equality_model();
+
+    let in_crate_dir = tempdir_for("facet_equality_in_crate");
+    emit_ccm_dir_with_construction(&model, &in_crate_dir, "facet-name-ascending", "in-crate")
+        .expect("in-crate build");
+    let cudd_dir = tempdir_for("facet_equality_cudd");
+    emit_ccm_dir_with_construction(&model, &cudd_dir, "facet-name-ascending", "cudd")
+        .expect("CUDD-path build");
+
+    let session_in_crate = load(&in_crate_dir);
+    let session_cudd = load(&cudd_dir);
+
+    for facet in &["line_container", "sorter_container"] {
+        let mut a: Vec<String> = session_in_crate
+            .valid_options(facet)
+            .expect("in-crate valid_options")
+            .options;
+        let mut b: Vec<String> = session_cudd
+            .valid_options(facet)
+            .expect("cudd valid_options")
+            .options;
+        a.sort();
+        b.sort();
+        assert_eq!(
+            a, b,
+            "valid_options({facet}) must match across in-crate and CUDD paths"
+        );
+        // Both must also be RIGHT, not merely equal: `c3` is unreachable under
+        // the equality because the left-hand facet cannot take it.
+        assert_eq!(
+            a,
+            vec!["c1".to_string(), "c2".to_string()],
+            "equality must rule out the value only one side declares"
         );
     }
 }

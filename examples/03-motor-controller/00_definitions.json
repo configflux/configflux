@@ -67,5 +67,11 @@
         "default": "incremental",
         "doc": "Encoder feedback; absolute selects the absolute encoder driver."
       }
+    },
+  "constraints": {
+    "high_power_requires_absolute_encoder": {
+      "condition": "power_rating != 'high' || encoder_type != 'incremental'",
+      "doc": "A high-power drive needs absolute position feedback."
     }
+  }
 }

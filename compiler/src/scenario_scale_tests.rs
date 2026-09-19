@@ -402,6 +402,7 @@ fn run_closed_loop(spec: &ScenarioSpec, label: &str) -> Result<ClosedLoopResult>
         model_handle: handle.clone(),
         scope: spec.scope.to_string(),
         selection_state: selection_state.clone(),
+        implied_choices: Default::default(),
     });
     let resolve_us = resolve_start.elapsed().as_micros();
     assert_eq!(resolve_result.status, OperationStatus::Ok);
@@ -750,6 +751,7 @@ fn scale_large_diamond_accepted_and_unsatisfied_emits_stable_code() -> Result<()
         model_handle: large_handle,
         scope: S3_LARGE_SPEC.scope.to_string(),
         selection_state: sparse_state,
+        implied_choices: Default::default(),
     });
     assert_eq!(unsat_resolve.status, OperationStatus::Error);
     assert_eq!(

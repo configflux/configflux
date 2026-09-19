@@ -6,8 +6,8 @@
 // configflux-uiyo once the last matrix-implication user (`link_verify`) moved
 // onto the typed evaluator; only the typed helpers below are imported here.
 use crate::conditions::{
-    for_each_eq_predicate, is_pure_conjunction, mentions_eq, not_contradicted,
-    parse_condition_expr, ConditionExpr,
+    for_each_eq_predicate, is_contradicted, is_pure_conjunction, mentions_eq, not_contradicted,
+    parse_condition_expr, ConditionExpr, FacetWorld,
 };
 use crate::ir::{
     self, CMP_CANONICALIZATION_VERSION, CMP_HASH_ALGO, CMP_MANIFEST_SCHEMA_VERSION,

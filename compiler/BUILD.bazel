@@ -7,7 +7,7 @@ load(
 
 package(default_visibility = ["//visibility:public"])
 
-exports_files(["Cargo.toml"])
+exports_files(["Cargo.toml", "cue/schema.cue"])  # schema.cue: //examples:export_pack_test
 
 COMPILER_LIB_SRCS = [
     "src/ccm_emitter.rs",
@@ -21,17 +21,23 @@ COMPILER_LIB_SRCS = [
     "src/ccm_emitter/timings.rs",
     "src/ccm_emitter/var_order.rs",
     "src/ccm_emitter/var_order/force_tests.rs",
+    "src/chunk_address_tests.rs",
+    "src/coded_error.rs",
     "src/conditions/ast.rs",
     "src/conditions/ast/parser_tests.rs",
     "src/compiler_core.rs",
     "src/compiler_core_tests.rs",
     "src/conditions/eval.rs",
+    "src/conditions/eval/tests.rs",
+    "src/conditions/facet_compare.rs",
+    "src/conditions/facet_compare/tests.rs",
     "src/conditions/implication.rs",
     "src/conditions/implication/tests.rs",
     "src/conditions/mod.rs",
     "src/conditions/rewrite.rs",
     "src/conditions/rewrite_tests.rs",
     "src/conditions/selection_eval.rs",
+    "src/conditions/selection_eval/tests.rs",
     # configflux-wbzw: CUDD-side compiler build path. Single-importer
     # module per ADR-0011 + Amendment 1 §A1.3. The cudd_sys dep below
     # is on the COMPILER_LIB_DEPS list because Bazel rust_library deps
@@ -44,10 +50,23 @@ COMPILER_LIB_SRCS = [
     "src/cudd_build/mod.rs",
     "src/cudd_build/tests.rs",
     "src/ingest_merge.rs",
+    "src/interface_summary.rs",
+    "src/interface_summary_tests.rs",
     "src/ir.rs",
     "src/lib.rs",
     "src/lib_tests.rs",
+    "src/lowering.rs",
+    "src/lowering_tests.rs",
+    "src/link.rs",
+    "src/link_emit.rs",
+    "src/link_load.rs",
+    "src/link_lock.rs",
+    "src/link_lock_tests.rs",
+    "src/link_tests.rs",
     "src/link_verify.rs",
+    "src/link_verify_catalogue_tests.rs",
+    "src/link_verify_requires_tests.rs",
+    "src/link_verify_symbol_charset_tests.rs",
     "src/loader_api/contracts.rs",
     "src/loader_api/export_resolved_ops.rs",
     "src/loader_api/mod.rs",
@@ -61,18 +80,28 @@ COMPILER_LIB_SRCS = [
     "src/loader_api/unsat_attribution.rs",
     "src/loader_api/unsat_attribution_tests.rs",
     "src/model_identity_tests.rs",
+    "src/object.rs",
+    "src/object_compile.rs",
+    "src/object_tests.rs",
+    "src/override_depth_tests.rs",
     "src/prelude.rs",
     "src/proc_rss.rs",
     "src/progress.rs",
     "src/product_api.rs",
     "src/provenance_sidecar.rs",
+    # configflux-y2ai: the one resolve_hash recipe, shared by loader_api and
+    # runtime_api. Leaf module — it imports neither of them.
+    "src/resolve_hash.rs",
     "src/resolved_models.rs",
     "src/resolver.rs",
+    "src/resolver_requires_tests.rs",
     "src/resource_budget.rs",
     "src/runtime_api/authority.rs",
     "src/runtime_api/authority_tests.rs",
+    "src/runtime_api/cas_field_routing_tests.rs",
     "src/runtime_api/contracts.rs",
     "src/runtime_api/commit_identity_ops.rs",
+    "src/runtime_api/hash_format_tests.rs",
     "src/runtime_api/lifecycle_driver_ops.rs",
     "src/runtime_api/mod.rs",
     "src/runtime_api/open_read_ops.rs",
@@ -147,6 +176,28 @@ COMPILER_LIB_COMPILE_DATA = glob([
     # and the envelope `tool_version`. Shared by the lean and cudd lib builds;
     # `crate=`-based rust_test targets inherit `compile_data` from the crate.
     "//:VERSION",
+    # configflux-4vb0 / ADR-0056 Amendment 1: the shipped example models, baked
+    # into `src/chunk_address_tests.rs` so the chunk-address invariant is
+    # asserted over the models the documentation teaches and not only over the
+    # scenario packs. They live in another package, so a glob cannot reach them
+    # — the same reason `compile_object_test` lists the polyrepo units by label.
+    # These are compile-time inputs of the crate rather than of one test target
+    # because every `crate=`-based rust_test recompiles these sources.
+    "//examples:00-service-multi-env/00_definitions.json",
+    "//examples:00-service-multi-env/10_components.json",
+    "//examples:01-hello-led/config.json",
+    "//examples:02-sensor-gateway/00_definitions.json",
+    "//examples:02-sensor-gateway/10_components.json",
+    "//examples:03-motor-controller/00_definitions.json",
+    "//examples:03-motor-controller/10_components.json",
+    "//examples:04-fleet-edge-node/00_definitions.json",
+    "//examples:04-fleet-edge-node/10_components.json",
+    "//examples:05-compose-fleet/00_definitions.json",
+    "//examples:05-compose-fleet/10_components.json",
+    "//examples:06-catalogue-polyrepo/repos/catalogue/00_catalogue.json",
+    "//examples:06-catalogue-polyrepo/repos/compute/10_compute.json",
+    "//examples:06-catalogue-polyrepo/repos/sorter/20_sorter.json",
+    "//examples:06-catalogue-polyrepo/repos/vision/10_vision.json",
 ]
 
 rust_library(
@@ -266,6 +317,259 @@ rust_test(
     deps = [":compiler_lib"],
 )
 
+# configflux-2yiq: a non-finite float (TOML `nan`/`inf`/`-inf`) must never
+# reach a hash pre-image. `serde_json` writes every non-finite `f64` as `null`,
+# so three distinct authored models would otherwise share one `model_hash` and
+# one `resolve_hash`. Black box through `compile_model`, because what has to
+# hold is the diagnostic CODE a caller receives, which the unit layer cannot see.
+# configflux-dw9i: a deeply nested authored `overrides` chain fails closed with
+# a diagnostic and never aborts. Drives the real `verify` binary as a
+# SUBPROCESS: a stack overflow ends the whole process, so the regression this
+# pins would take the test runner down if it were asserted in-process, and
+# report as infrastructure noise rather than as this failure.
+rust_test(
+    name = "override_chain_depth_test",
+    size = "small",
+    timeout = "short",
+    srcs = [
+        "tests/override_chain_depth.rs",
+        "tests/temp_dirs.rs",
+    ],
+    crate_root = "tests/override_chain_depth.rs",
+    data = [":compiler"],
+    edition = "2021",
+    env = {"COMPILER_RLOCATION": "$(rootpath :compiler)"},
+)
+
+# configflux-l4e7: the definition `inherits` chain is a FLAT map of string
+# pointers, so neither parser limit bounds it — and the link-side
+# `MAX_CHAIN_DEPTH` guard is defeated by DFS root order, so a chain far past the
+# ceiling reaches the inspect walk. Measured: ~30_000 definitions abort the
+# process with a stack overflow through `inspect parameter`. Drives the real
+# binary as a SUBPROCESS for the same reason override_chain_depth_test does —
+# an abort asserted in-process takes the test runner down with it.
+rust_test(
+    name = "inherits_chain_depth_test",
+    size = "small",
+    timeout = "short",
+    srcs = [
+        "tests/inherits_chain_depth.rs",
+        "tests/temp_dirs.rs",
+    ],
+    crate_root = "tests/inherits_chain_depth.rs",
+    data = [":compiler"],
+    edition = "2021",
+    env = {"COMPILER_RLOCATION": "$(rootpath :compiler)"},
+)
+
+rust_test(
+    name = "non_finite_float_test",
+    size = "small",
+    timeout = "short",
+    srcs = [
+        "tests/non_finite_float.rs",
+        "tests/temp_dirs.rs",
+    ],
+    crate_root = "tests/non_finite_float.rs",
+    edition = "2021",
+    deps = [
+        ":compiler_lib",
+        "@crates//:serde_json",
+    ],
+)
+
+# configflux-p0jz.1 / ADR-0058 §D1-§D3: `compile-object` turns ONE unit into a
+# content-addressed object directory. Black box through the public
+# `object_compile::compile_object` entry point and the files it writes. The
+# fixture is the SHIPPED examples/06-catalogue-polyrepo, whose four units are
+# the only multi-unit model in the corpus, so the split along unit boundaries is
+# asserted against the model the docs teach rather than an invented one.
+rust_test(
+    name = "compile_object_test",
+    size = "small",
+    timeout = "short",
+    srcs = [
+        "tests/compile_object.rs",
+        "tests/temp_dirs.rs",
+    ],
+    compile_data = [
+        "//examples:06-catalogue-polyrepo/repos/catalogue/00_catalogue.json",
+        "//examples:06-catalogue-polyrepo/repos/compute/10_compute.json",
+        "//examples:06-catalogue-polyrepo/repos/vision/10_vision.json",
+    ],
+    crate_root = "tests/compile_object.rs",
+    edition = "2021",
+    deps = [
+        ":compiler_lib",
+        "@crates//:serde_json",
+    ],
+)
+
+# configflux-p0jz.2 / ADR-0058 §D8: THE byte-identity oracle. For every scenario
+# pack and every example, `compile` and (`compile-object` per unit + `link`)
+# must write the same package file for file, byte for byte. It is the acceptance
+# criterion of separate compilation and the standing regression guard for it: if
+# the two forms ever diverge, one of them is wrong and this names the file.
+#
+# The corpus the oracle COMPILES is embedded with include_str!, so those runs
+# are hermetic and a pack that moves breaks the build rather than silently
+# dropping out of coverage. The corpus-coverage guard is the one test that also
+# needs the tree itself: it asks which packs the repository holds, which no
+# embedded copy can answer, so `data` carries both roots into the runfiles and
+# the guard walks them. Both attributes glob rather than list, so a pack
+# directory added under either root reaches the guard with no edit here — which
+# is what makes "a pack nobody listed fails the test" true rather than a claim.
+rust_test(
+    name = "link_oracle_test",
+    size = "medium",
+    timeout = "moderate",
+    srcs = [
+        "tests/link_oracle.rs",
+        "tests/temp_dirs.rs",
+    ],
+    data = glob(["scenarios/**/*.json"]) + ["//examples:example_model_chunks"],
+    compile_data = glob([
+        "scenarios/*/*.json",
+        "scenarios/*/*/cue/*.json",
+    ]) + [
+        "//examples:00-service-multi-env/00_definitions.json",
+        "//examples:00-service-multi-env/10_components.json",
+        "//examples:01-hello-led/config.json",
+        "//examples:02-sensor-gateway/00_definitions.json",
+        "//examples:02-sensor-gateway/10_components.json",
+        "//examples:03-motor-controller/00_definitions.json",
+        "//examples:03-motor-controller/10_components.json",
+        "//examples:04-fleet-edge-node/00_definitions.json",
+        "//examples:04-fleet-edge-node/10_components.json",
+        "//examples:05-compose-fleet/00_definitions.json",
+        "//examples:05-compose-fleet/10_components.json",
+        "//examples:06-catalogue-polyrepo/repos/catalogue/00_catalogue.json",
+        "//examples:06-catalogue-polyrepo/repos/compute/10_compute.json",
+        "//examples:06-catalogue-polyrepo/repos/sorter/20_sorter.json",
+        "//examples:06-catalogue-polyrepo/repos/vision/10_vision.json",
+    ],
+    crate_root = "tests/link_oracle.rs",
+    edition = "2021",
+    deps = [
+        ":compiler_lib",
+        "@crates//:serde_json",
+    ],
+)
+
+# configflux-p0jz.2 / ADR-0058 §D4: the link's refusals — duplicate ids across
+# objects, an import nothing provides, an interface whose hash moved, an object
+# that does not match its own header, and the header-only property of stage 1
+# (a stage-1 fault is still reported when every chunk file is unreadable). The
+# fixture is the SHIPPED examples/06-catalogue-polyrepo, so every message these
+# assert is one its author could meet.
+rust_test(
+    name = "link_diagnostics_test",
+    size = "small",
+    timeout = "short",
+    srcs = [
+        "tests/link_diagnostics.rs",
+        "tests/temp_dirs.rs",
+    ],
+    compile_data = [
+        "//examples:06-catalogue-polyrepo/repos/catalogue/00_catalogue.json",
+        "//examples:06-catalogue-polyrepo/repos/sorter/20_sorter.json",
+        "//examples:06-catalogue-polyrepo/repos/vision/10_vision.json",
+    ],
+    crate_root = "tests/link_diagnostics.rs",
+    edition = "2021",
+    deps = [":compiler_lib"],
+)
+
+# configflux-3ukw / ADR-0056 Amendment 2: `verify` and `compile` report ONE
+# model identity. The suite drives both verbs over every scenario smoke pack and
+# every shipped example and compares the two hashes, then asserts the SERIALIZED
+# absence of the field on each failing path — the property a consumer observes,
+# which an `Option` field alone does not witness. Its T1 loop is also the corpus
+# proof of the amendment's D4 claim that the link stages `verify` now runs
+# cannot fail where the complete-model checks passed.
+rust_test(
+    name = "verify_identity_test",
+    size = "small",
+    timeout = "moderate",
+    srcs = [
+        "tests/temp_dirs.rs",
+        "tests/verify_identity.rs",
+    ],
+    compile_data = glob(["scenarios/*/smoke/cue/*.json"]) + [
+        "//examples:00-service-multi-env/00_definitions.json",
+        "//examples:00-service-multi-env/10_components.json",
+        "//examples:01-hello-led/config.json",
+        "//examples:02-sensor-gateway/00_definitions.json",
+        "//examples:02-sensor-gateway/10_components.json",
+        "//examples:03-motor-controller/00_definitions.json",
+        "//examples:03-motor-controller/10_components.json",
+        "//examples:04-fleet-edge-node/00_definitions.json",
+        "//examples:04-fleet-edge-node/10_components.json",
+        "//examples:05-compose-fleet/00_definitions.json",
+        "//examples:05-compose-fleet/10_components.json",
+        "//examples:06-catalogue-polyrepo/repos/catalogue/00_catalogue.json",
+        "//examples:06-catalogue-polyrepo/repos/compute/10_compute.json",
+        "//examples:06-catalogue-polyrepo/repos/sorter/20_sorter.json",
+        "//examples:06-catalogue-polyrepo/repos/vision/10_vision.json",
+    ],
+    crate_root = "tests/verify_identity.rs",
+    edition = "2021",
+    deps = [
+        ":compiler_lib",
+        "@crates//:serde_json",
+    ],
+)
+
+# configflux-p0jz.3 / ADR-0058 §D5: the lockfile — checked, never fetched. The
+# pin round trip, both refusals and both halves of the "is this a lockfile"
+# question, plus the workflow the format exists for: a unit is edited in a
+# worktree, the pinned link refuses the object by name, and the pin is renewed
+# from the integration unit after review. Driven over the shipped
+# examples/06-catalogue-polyrepo units, so the messages are ones an integrator
+# could meet.
+rust_test(
+    name = "link_lock_test",
+    size = "small",
+    timeout = "short",
+    srcs = [
+        "tests/link_lock.rs",
+        "tests/temp_dirs.rs",
+    ],
+    compile_data = [
+        "//examples:06-catalogue-polyrepo/repos/catalogue/00_catalogue.json",
+        "//examples:06-catalogue-polyrepo/repos/vision/10_vision.json",
+    ],
+    crate_root = "tests/link_lock.rs",
+    edition = "2021",
+    deps = [
+        ":compiler_lib",
+        "@crates//:serde_json",
+    ],
+)
+
+# configflux-p0jz.2 / ADR-0058 §D4 item 1: `link --progress`. The constraint
+# model is a link product, so the link runs the same var-order -> apply ->
+# serialize band a compile does and takes the same progress flag. The
+# load-bearing assertion is byte identity — a watched link and an unwatched one
+# write the same package (ADR-0005 Amendment 2), without which wiring a sink
+# would quietly break the §D8 oracle for any link under observation.
+rust_test(
+    name = "link_progress_test",
+    size = "small",
+    timeout = "short",
+    srcs = [
+        "tests/link_progress.rs",
+        "tests/temp_dirs.rs",
+    ],
+    compile_data = [
+        "//examples:06-catalogue-polyrepo/repos/catalogue/00_catalogue.json",
+        "//examples:06-catalogue-polyrepo/repos/vision/10_vision.json",
+    ],
+    crate_root = "tests/link_progress.rs",
+    edition = "2021",
+    deps = [":compiler_lib"],
+)
+
 # configflux-3j2i: docs/runtime-v2-contract.md section 11.4 documents the lineage
 # `entry_id` worked example as a NORMATIVE byte layout plus two normative content
 # addresses. Its canonical payload injects PRODUCT_SCHEMA_VERSION (see
@@ -284,6 +588,64 @@ rust_test(
     deps = [
         ":compiler_lib",
         "@crates//:sha2",
+    ],
+)
+
+# configflux-fa0o: docs/runtime-v2-contract.md section 6 froze v2 request and
+# response shapes that never shipped — `scope` for `scope_root`, dirty metadata
+# flat where the result nests it, `actor` per write instead of per request, a
+# flattened identity block. Nothing executed the section, so an integrator
+# shaping a request from it got a rejection or a silently wrong call. This test
+# `include_str!`s the contract (hence the compile_data dep, as the lineage-doc
+# target above does) and round-trips every documented example through the real
+# structs. It has to be a value round-trip rather than a parse: apart from the
+# two compare-and-swap requests (configflux-8gah), no contract struct carries
+# deny_unknown_fields, so a field the document invents is silently dropped on
+# deserialize and is only observable on the way back out.
+rust_test(
+    name = "runtime_v2_contract_doc_section6_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["tests/runtime_v2_contract_doc_section6.rs"],
+    compile_data = ["//:docs/runtime-v2-contract.md"],
+    edition = "2021",
+    deps = [
+        ":compiler_lib",
+        "@crates//:serde",
+        "@crates//:serde_json",
+    ],
+)
+
+# configflux-3r8a: the sibling above guards section 6's examples; nothing guarded
+# section 4's prose list of the fields every response envelope carries. It named
+# `event_sequence`, which exists nowhere in contracts.rs, and
+# `committed_configuration_id` / `working_configuration_id`, which live only on
+# nested payloads — while omitting `scope` and the optional `diagnostics_ref`,
+# which every envelope does carry. This test derives the common set mechanically
+# from the shipped structs (hence the second compile_data entry, the contract
+# source itself) and asserts section 4's list is exactly that intersection, so
+# the list cannot drift in either direction.
+# configflux-wf2f widened it to the document's two other unpinned envelope
+# claims, sections 2 and 8: the single version both command families carry, and
+# that no top-level field tells a v1 response from a v2 one.
+# configflux-8di0 renamed target and source from `..._section4` once that
+# widening left the name describing one of the three sections pinned here. All
+# three are claims about the response envelope's field set, which is why they
+# share the contracts.rs parser below rather than a target apiece, so the name
+# now says envelope.
+rust_test(
+    name = "runtime_v2_contract_doc_envelope_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["tests/runtime_v2_contract_doc_envelope.rs"],
+    compile_data = [
+        "//:docs/runtime-v2-contract.md",
+        "src/runtime_api/contracts.rs",
+    ],
+    edition = "2021",
+    deps = [
+        ":compiler_lib",
+        "@crates//:serde_json",
     ],
 )
 
@@ -377,12 +739,37 @@ rust_test(
     ],
 )
 
+# configflux-y2ai: the resolve-hash DRIFT TRIPWIRE. Feeds identical inputs
+# through the loader's emission and the runtime's recomputation and asserts the
+# two `resolve_hash` values are the same bytes — once with every provenance map
+# non-empty, once with all of them empty so the skip-if-empty arm is covered
+# too. It pins no hash literal: it fails when the two paths disagree, which is
+# what a re-forked recipe looks like. Pure loader/runtime path (solver-free) —
+# depends on `compiler_lib` only.
+rust_test(
+    name = "resolve_hash_recipe_parity_test",
+    size = "small",
+    timeout = "short",
+    srcs = [
+        "tests/resolve_hash_recipe_parity.rs",
+        "tests/temp_dirs.rs",
+    ],
+    crate_root = "tests/resolve_hash_recipe_parity.rs",
+    edition = "2021",
+    deps = [
+        ":compiler_lib",
+        "@crates//:serde_json",
+    ],
+)
+
 # configflux-6j91: the DIAGNOSTIC CODE the declared-facet constraint rule
-# reaches the caller with. `product_api::map_graph_error` classifies link/verify
-# failures by substring, so the rule's unit tests can all pass while the code
-# silently falls through to the generic ingest bucket — which is how the defect
-# arose. Drives `compile_model` (what `compiler compile` calls) so a reword of
-# the message fails here instead of downgrading the code in silence.
+# reaches the caller with. The rule's unit tests can all pass while the code it
+# reports is wrong — they see the message, not the code — which is how the defect
+# arose. Drives `compile_model` (what `compiler compile` calls) so the code and
+# the remedy are asserted where the caller actually reads them. Since
+# configflux-py7w the rule names its own code, so this no longer guards a prose
+# coupling; it guards the rule keeping the code and remedy it is specified to
+# carry.
 rust_test(
     name = "constraint_facet_diagnostic_test",
     size = "small",
@@ -394,6 +781,79 @@ rust_test(
     crate_root = "tests/constraint_facet_diagnostic.rs",
     edition = "2021",
     deps = [":compiler_lib"],
+)
+
+# configflux-tcp5 / ADR-0064 D1-D4: a parameter is a facet's runtime handle only
+# when it DECLARES so. Carries the four declaration rules (each asserted through
+# `verify_model` AND `compile_model`, because the rule living in `link_verify`
+# is what makes the two agree), the challenger's narrowing that an `overrides`
+# entry varying only other fields stays legal, the cross-unit case that proves
+# the one-handle-per-facet rule is a LINK obligation rather than a unit-local
+# one, the propagation precedence (explicit > implied > declared default), and
+# the byte-invisibility of the new field on a model that declares no binding.
+rust_test(
+    name = "facet_binding_test",
+    size = "small",
+    timeout = "short",
+    srcs = [
+        "tests/facet_binding.rs",
+        "tests/temp_dirs.rs",
+    ],
+    crate_root = "tests/facet_binding.rs",
+    edition = "2021",
+    deps = [
+        ":compiler_lib",
+        "@crates//:serde_json",
+    ],
+)
+
+# configflux-py7w: the diagnostic CODE must name the RULE that refused, never
+# text the author chose. Four chunks carrying the SAME non-finite-float fault
+# came back with four different codes, selected by the definition id they named,
+# because both mappers recovered the code from the message prose. Drives
+# `verify_model` (what `compiler verify --source` calls) over the steerable ids
+# AND the reverse guards, so a genuine cycle, unknown dependency, closed-domain
+# violation and duplicate facet are all held to their own codes and remedies.
+rust_test(
+    name = "diagnostic_code_routing_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["tests/diagnostic_code_routing.rs"],
+    crate_root = "tests/diagnostic_code_routing.rs",
+    edition = "2021",
+    deps = [":compiler_lib"],
+)
+
+# configflux-mrm6 / ADR-0063: the authored symbol charset, re-validated on the
+# Rust ingest path. `compile --source` never evaluates CUE, so `#snakeId`
+# reached nothing there and a facet key or declared value crafted to close its
+# own quoted literal continued into the synthesized clause as VALID grammar —
+# it parsed, so the emit-time parseability check passed it, and the model was
+# emitted at `status=ok` with a phantom value in a closed facet's domain or a
+# declared value silently truncated. Carries the three measured reproducers,
+# the token-set controls, and the catalogue/binding ids reachable only through
+# JSON. Every case is asserted through `verify_model` AND `compile_model`,
+# because the rule living in `link_verify` is what makes the two agree
+# (configflux-8o20 fact 2) and only a paired assertion can see that.
+rust_test(
+    name = "symbol_charset_test",
+    size = "small",
+    timeout = "short",
+    srcs = [
+        "tests/symbol_charset.rs",
+        "tests/temp_dirs.rs",
+    ],
+    crate_root = "tests/symbol_charset.rs",
+    edition = "2021",
+    deps = [
+        ":compiler_lib",
+        # configflux-h3rm: the consumption-side case re-addresses a real package
+        # around a one-symbol edit, which means writing the index back. Third
+        # party and already a plain `[dependencies]` entry of this crate, so the
+        # cargo graph resolves it for an integration test without a manifest
+        # change; only the Bazel edge has to be declared.
+        "@crates//:serde_json",
+    ],
 )
 
 # CUDD-side construction round-trip — configflux-wbzw (ADR-0011
@@ -416,6 +876,51 @@ rust_test(
     # configflux-4jmc: this is the one integration test that exercises the real
     # CUDD construction path (`emit_ccm_dir_with_construction(.., "cudd")`), so it
     # must link the CUDD-feature crate, not the lean default `compiler_lib`.
+    deps = [
+        ":compiler_lib_cudd",
+        "//solver:solver",
+    ],
+)
+
+# Facet-to-facet equality lowering — configflux-secb.2 (ADR-0057 §D5).
+# Asserts the MEANING of `a == b` / `a != b` against the real compiled BDD
+# through the solver (identical domains, asymmetric domains) plus byte
+# stability across two emissions. Needs the solver because the claim under
+# test is about satisfiability, not about the shape of the expanded AST.
+rust_test(
+    name = "facet_equality_lowering_test",
+    size = "small",
+    timeout = "short",
+    srcs = [
+        "tests/facet_equality_lowering.rs",
+        "tests/temp_dirs.rs",
+    ],
+    crate_root = "tests/facet_equality_lowering.rs",
+    edition = "2021",
+    deps = [
+        ":compiler_lib",
+        "//solver:solver",
+    ],
+)
+
+# The `derive` / `accepts` lowering — configflux-secb.5 (ADR-0057 §D4).
+# Compiles the conjuncts the PRODUCTION lowering emits (not hand-copied text)
+# and asserts their MEANING through the solver: an entry no requirement accepts
+# is unreachable, a derive pair forces its entry while an uncovered source value
+# forces nothing, and a conditional requirement narrows only where its component
+# is included. Also pins in-crate/CUDD agreement and per-path byte stability.
+# Links the CUDD-feature crate because one half of the equivalence claim is the
+# real `--construction=cudd` path. E2E impact: regression.
+rust_test(
+    name = "requires_accepts_lowering_test",
+    size = "small",
+    timeout = "short",
+    srcs = [
+        "tests/requires_accepts_lowering.rs",
+        "tests/temp_dirs.rs",
+    ],
+    crate_root = "tests/requires_accepts_lowering.rs",
+    edition = "2021",
     deps = [
         ":compiler_lib_cudd",
         "//solver:solver",
@@ -581,6 +1086,21 @@ rust_test(
     crate = ":compiler_lib",
 )
 
+# configflux-4vb0 / ADR-0056 Amendment 1: a chunk file's name is the SHA-256 of
+# the chunk file's content, so any reader can recompute it. Compiles every
+# scenario pack and every shipped example and asserts the three-way agreement
+# (recomputed address == file name == embedded chunk_hash) on every emitted
+# chunk, plus the tamper primitive `link` drives through E_LINK_OBJECT_CORRUPT.
+# The scenario roster is scenario_byte_stability_tests::SCENARIOS, reused rather
+# than restated so the coverage guard there governs this suite too.
+rust_test(
+    name = "chunk_address_test",
+    size = "small",
+    timeout = "short",
+    args = ["chunk_address_tests::"],
+    crate = ":compiler_lib",
+)
+
 # configflux-9pjy.5: core-contract verification + hardening suite for the
 # product-compile resource budget (ADR-0039 §8). Pins graceful-degradation
 # monotonicity (derived memo_cap non-increasing as the budget shrinks),
@@ -609,7 +1129,7 @@ rust_binary(
     # src/main.rs resolves `--version` to the workspace release version.
     # rules_rust defaults CARGO_PKG_VERSION to "0.0.0" when this attr is
     # absent, so it must mirror /VERSION (lint_repo.py enforces this).
-    version = "0.3.0",
+    version = "0.4.0",
     deps = [
         ":compiler_lib",
         "@crates//:anyhow",
@@ -617,4 +1137,22 @@ rust_binary(
         "@crates//:serde",
         "@crates//:serde_json",
     ],
+)
+
+# configflux-ulbg: the shell/python sources //tools:schema_version_lint_test
+# scans for stale product `schema_version` literals. Bazel globs stop at package
+# boundaries, so each owning package has to hand its own scripts over; the test
+# cross-checks the union against tools/publishignore_manifest.txt and fails when
+# a package is missing rather than skipping it in silence.
+filegroup(
+    name = "schema_version_scan_sources",
+    srcs = glob(
+        [
+            "**/*.py",
+            "**/*.sh",
+        ],
+        # sdk/cpp has no python and validation has no shell; a package holding
+        # only one of the two kinds is normal and must not fail analysis.
+        allow_empty = True,
+    ),
 )

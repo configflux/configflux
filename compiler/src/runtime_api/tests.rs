@@ -381,11 +381,15 @@ fn driver_fixture_snapshot() -> RuntimeSnapshot {
             }
         }
     });
-    let request = RuntimeOpenRequest {
+    let mut request = RuntimeOpenRequest {
         schema_version: PRODUCT_SCHEMA_VERSION,
         model_hash: "ab".repeat(32),
         ccm_ref: String::new(),
-        resolve_hash: "cd".repeat(32),
+        // Stamped below. configflux-zr6m made the resolve_hash recompute
+        // unconditional, so an assembled fixture with empty provenance is
+        // cross-validated like any other snapshot and can no longer carry a
+        // made-up hash.
+        resolve_hash: String::new(),
         scope: "component:ctl".to_string(),
         resolved_output,
         resolved_component_dependencies: Default::default(),
@@ -393,6 +397,8 @@ fn driver_fixture_snapshot() -> RuntimeSnapshot {
         context_tags: Default::default(),
         choices: Default::default(),
         defaulted_choices: Default::default(),
+        implied_choices: Default::default(),
+        closed_facet_domains: Default::default(),
         committed_overlay: Default::default(),
         dirty_overlay: Default::default(),
         dirty_generations: Default::default(),
@@ -407,6 +413,7 @@ fn driver_fixture_snapshot() -> RuntimeSnapshot {
         persistence_format_version: 1,
         persistence_journal_sequence: 0,
     };
+    request.resolve_hash = expected_resolve_hash(&request).expect("canonical resolve hash");
     let result = runtime_open(request);
     assert_eq!(
         result.status,
@@ -1350,4 +1357,394 @@ fn set_parameter_request_intent_serde_is_optional_back_compat() {
     assert_eq!(declared.intent, OverrideIntent::Compensating);
     assert_eq!(declared.actor.as_deref(), Some("tech-42"));
     assert_eq!(declared.reason.as_deref(), Some("loosened until part swap"));
+}
+
+// ---------------------------------------------------------------------------
+// Requirement delivery at the runtime (ADR-0057 §D7, configflux-secb.6)
+// ---------------------------------------------------------------------------
+//
+// A snapshot now carries `components.<c>.requires.<slot> = {binding, entry,
+// fields}`. Three things have to be true at the runtime, and they are the whole
+// contract this version offers:
+//
+//   1. Such a snapshot OPENS, and the `requires` block is inside the pre-image
+//      the RUNTIME hashes — the tamper arm below edits one delivered entry and
+//      must be refused as `E_RUNTIME_HASH_MISMATCH`.
+//
+//      Read the open arm narrowly. The fixture is stamped with
+//      `expected_resolve_hash`, the runtime's OWN recipe, because a hand-built
+//      snapshot has no loader to get a hash from — which means this file cannot
+//      witness the two recipes DISAGREEING, only that the runtime's is
+//      self-consistent and covers the new block. The cross-recipe claim is
+//      pinned where a real loader hash is available:
+//      `runtime_open_cross_validates_a_loader_produced_requires_hash` in
+//      compiler/tests/facet_resolve_defaults.rs compiles a requirement-bearing
+//      model, forwards the LOADER's `resolve_hash`, and asserts the runtime
+//      reproduces it.
+//   2. The field READS, at `component.<c>.requires.<slot>.<field>`, carrying the
+//      binding and entry it came from.
+//   3. The field does NOT WRITE. Requirement values are decided at resolve time;
+//      the v2 write API refuses the path with the code it already uses for a
+//      path it does not know, rather than inventing a second vocabulary for
+//      "no".
+
+const REQUIRES_READ_PATH: &str = "component.vision_service.requires.container.width_mm";
+
+fn requires_fixture_request() -> RuntimeOpenRequest {
+    let resolved_output = serde_json::json!({
+        "vision_service": {
+            "package": "merged_root",
+            "version": "0.0.0",
+            "components": {
+                "vision_service": {
+                    "type": "service",
+                    "requires": {
+                        "container": {
+                            "binding": "line_container",
+                            "entry": "c1",
+                            "fields": { "height_mm": 1000, "length_mm": 1200, "width_mm": 800 }
+                        }
+                    },
+                    "params": {
+                        "roi_margin_mm": {
+                            "value": 40,
+                            "type": "integer",
+                            "unit": "mm",
+                            "safety": "q_m",
+                            "lifecycle": "startup",
+                            "access": "integrator",
+                            "req_id": null,
+                            "doc": null,
+                            "limits": null
+                        }
+                    }
+                }
+            }
+        }
+    });
+    let mut request = RuntimeOpenRequest {
+        schema_version: PRODUCT_SCHEMA_VERSION,
+        model_hash: "cd".repeat(32),
+        ccm_ref: String::new(),
+        resolve_hash: String::new(),
+        scope: "component:vision_service".to_string(),
+        resolved_output,
+        resolved_component_dependencies: Default::default(),
+        resolved_artifacts: Default::default(),
+        context_tags: Default::default(),
+        choices: Default::default(),
+        defaulted_choices: Default::default(),
+        implied_choices: Default::default(),
+        closed_facet_domains: Default::default(),
+        committed_overlay: Default::default(),
+        dirty_overlay: Default::default(),
+        dirty_generations: Default::default(),
+        dirty_metadata: Default::default(),
+        auto_reset_policy: Default::default(),
+        auto_reset_scheduler: Default::default(),
+        event_bus: Default::default(),
+        sync_status: Default::default(),
+        audit_events: Default::default(),
+        audit_next_sequence: 1,
+        audit_uploaded_sequence: 0,
+        persistence_format_version: 1,
+        persistence_journal_sequence: 0,
+    };
+    request.resolve_hash = expected_resolve_hash(&request).expect("canonical resolve hash");
+    request
+}
+
+fn requires_fixture_snapshot() -> RuntimeSnapshot {
+    let result = runtime_open(requires_fixture_request());
+    assert_eq!(
+        result.status,
+        OperationStatus::Ok,
+        "a snapshot carrying requires must open: {:?}",
+        result.diagnostics.diagnostics
+    );
+    result.runtime_snapshot.expect("runtime snapshot")
+}
+
+#[test]
+fn runtime_open_accepts_a_snapshot_carrying_requires() {
+    // Claim 1. The hash is computed by the runtime's own recipe and handed back
+    // to the runtime, so the assertion that matters is that open ACCEPTS it —
+    // which it can only do if the recipe covers the requires block the same way
+    // the compiler's does.
+    let snapshot = requires_fixture_snapshot();
+    let request = requires_fixture_request();
+    assert_eq!(
+        snapshot.resolve_hash, request.resolve_hash,
+        "open must carry the cross-validated resolve_hash through unchanged"
+    );
+
+    // And a snapshot whose requires block was tampered with must be refused:
+    // this is what proves the block is really inside the pre-image rather than
+    // merely tolerated beside it.
+    let mut tampered = requires_fixture_request();
+    tampered.resolved_output["vision_service"]["components"]["vision_service"]["requires"]
+        ["container"]["entry"] = serde_json::json!("c2");
+    let rejected = runtime_open(tampered);
+    assert_eq!(rejected.status, OperationStatus::Error);
+    assert_eq!(
+        rejected.diagnostics.diagnostics[0].code, E_RUNTIME_HASH_MISMATCH,
+        "editing a requirement must move the resolve_hash"
+    );
+}
+
+#[test]
+fn runtime_read_returns_a_requirement_field() {
+    // Claim 2.
+    let result = get_parameter(GetParameterRequest {
+        schema_version: PRODUCT_SCHEMA_VERSION,
+        runtime_snapshot: requires_fixture_snapshot(),
+        path: REQUIRES_READ_PATH.to_string(),
+    });
+    assert_eq!(
+        result.status,
+        OperationStatus::Ok,
+        "{:?}",
+        result.diagnostics.diagnostics
+    );
+    let payload = result.parameter.expect("read returned no payload");
+    assert_eq!(payload.path, REQUIRES_READ_PATH);
+    assert_eq!(payload.component_id, "vision_service");
+    assert_eq!(payload.param_key, "width_mm");
+    assert_eq!(payload.r#type, "integer");
+    assert_eq!(payload.value, crate::schema::Value::Integer(800));
+    assert_eq!(payload.lifecycle, crate::schema::Lifecycle::Construction);
+    assert_eq!(payload.access, crate::schema::Role::SuperUser);
+    let provenance = payload.requires.expect("read carried no requirement block");
+    assert_eq!(provenance.slot, "container");
+    assert_eq!(provenance.binding, "line_container");
+    assert_eq!(provenance.entry, "c1");
+
+    // A slot or field the component does not declare is the same unknown-path
+    // refusal a bad parameter key gets.
+    for path in [
+        "component.vision_service.requires.container.depth_mm",
+        "component.vision_service.requires.pallet.width_mm",
+        "component.compute_service.requires.container.width_mm",
+    ] {
+        let missing = get_parameter(GetParameterRequest {
+            schema_version: PRODUCT_SCHEMA_VERSION,
+            runtime_snapshot: requires_fixture_snapshot(),
+            path: path.to_string(),
+        });
+        assert_eq!(missing.status, OperationStatus::Error, "path {path}");
+        assert_eq!(
+            missing.diagnostics.diagnostics[0].code, E_RUNTIME_UNKNOWN_PATH,
+            "path {path}"
+        );
+    }
+}
+
+#[test]
+fn runtime_write_refuses_a_requirement_path() {
+    // Claim 3. `E_RUNTIME_UNKNOWN_PATH` is the runtime's EXISTING code for a
+    // path outside the writable parameter grammar; this version deliberately
+    // adds no requirement-specific write diagnostic, because there is no
+    // requirement write to describe.
+    let result = set_parameter(SetParameterRequest {
+        schema_version: PRODUCT_SCHEMA_VERSION,
+        runtime_snapshot: requires_fixture_snapshot(),
+        path: REQUIRES_READ_PATH.to_string(),
+        value: crate::schema::Value::Integer(999),
+        intent: OverrideIntent::Experimental,
+        actor: None,
+        reason: None,
+    });
+    assert_eq!(result.status, OperationStatus::Error);
+    assert_eq!(
+        result.diagnostics.diagnostics[0].code,
+        E_RUNTIME_UNKNOWN_PATH
+    );
+}
+
+#[test]
+fn list_parameters_offers_only_writable_parameter_paths() {
+    // A requirement field is readable but never writable, so it must not appear
+    // in the list a client iterates to discover what it may set. A consumer that
+    // wants its requirements reads its own `requires` block out of the snapshot.
+    let result = list_parameters(ListParametersRequest {
+        schema_version: PRODUCT_SCHEMA_VERSION,
+        runtime_snapshot: requires_fixture_snapshot(),
+        scope_root: "vision_service".to_string(),
+    });
+    assert_eq!(result.status, OperationStatus::Ok);
+    assert_eq!(
+        result.parameter_paths,
+        vec!["component.vision_service.param.roi_margin_mm".to_string()]
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The declared facet binding on a read payload (ADR-0064 D4, acceptance (j))
+// ---------------------------------------------------------------------------
+//
+// `ResolvedParameter` and `RuntimeParameterPayload` both gained
+// `facet: Option<String>`, so `get-parameter` can tell a caller WHICH facet a
+// parameter is the handle for. Two claims, and they are the whole surface this
+// half of the change adds:
+//
+//   1. A parameter that declares no binding is byte-identical to what it was
+//      before the field existed — the key is absent, not present-and-null, on
+//      `get-parameter` and everywhere else a resolved parameter is serialized.
+//      That is what leaves every existing read envelope, every golden and the
+//      §6 contract-doc round-trip unchanged without a doc edit.
+//   2. A parameter that DOES declare one carries it verbatim.
+//
+// `list-parameters` returns paths only, so its envelope cannot move either way;
+// the assertion below pins that rather than assuming it.
+
+const BOUND_READ_PATH: &str = "component.rig.param.cpu";
+const UNBOUND_READ_PATH: &str = "component.rig.param.roi_margin_mm";
+
+fn facet_binding_request() -> RuntimeOpenRequest {
+    let resolved_output = serde_json::json!({
+        "rig": {
+            "package": "facet_binding_read",
+            "version": "0.0.0",
+            "components": {
+                "rig": {
+                    "type": "controller",
+                    "params": {
+                        "cpu": {
+                            "value": "standard",
+                            "type": "string",
+                            "facet": "cpu",
+                            "safety": "q_m",
+                            "lifecycle": "runtime",
+                            "access": "technician",
+                            "req_id": null,
+                            "doc": null,
+                            "limits": null
+                        },
+                        "roi_margin_mm": {
+                            "value": 40,
+                            "type": "integer",
+                            "unit": "mm",
+                            "safety": "q_m",
+                            "lifecycle": "startup",
+                            "access": "integrator",
+                            "req_id": null,
+                            "doc": null,
+                            "limits": null
+                        }
+                    }
+                }
+            }
+        }
+    });
+    let mut request = RuntimeOpenRequest {
+        schema_version: PRODUCT_SCHEMA_VERSION,
+        model_hash: "ef".repeat(32),
+        ccm_ref: String::new(),
+        resolve_hash: String::new(),
+        scope: "component:rig".to_string(),
+        resolved_output,
+        resolved_component_dependencies: Default::default(),
+        resolved_artifacts: Default::default(),
+        context_tags: Default::default(),
+        choices: Default::default(),
+        defaulted_choices: Default::default(),
+        implied_choices: Default::default(),
+        closed_facet_domains: Default::default(),
+        committed_overlay: Default::default(),
+        dirty_overlay: Default::default(),
+        dirty_generations: Default::default(),
+        dirty_metadata: Default::default(),
+        auto_reset_policy: Default::default(),
+        auto_reset_scheduler: Default::default(),
+        event_bus: Default::default(),
+        sync_status: Default::default(),
+        audit_events: Default::default(),
+        audit_next_sequence: 1,
+        audit_uploaded_sequence: 0,
+        persistence_format_version: 1,
+        persistence_journal_sequence: 0,
+    };
+    request.resolve_hash = expected_resolve_hash(&request).expect("canonical resolve hash");
+    request
+}
+
+fn facet_binding_snapshot() -> RuntimeSnapshot {
+    let result = runtime_open(facet_binding_request());
+    assert_eq!(
+        result.status,
+        OperationStatus::Ok,
+        "a snapshot carrying a declared binding must open: {:?}",
+        result.diagnostics.diagnostics
+    );
+    result.runtime_snapshot.expect("runtime snapshot")
+}
+
+fn read_payload(path: &str) -> RuntimeParameterPayload {
+    let result = get_parameter(GetParameterRequest {
+        schema_version: PRODUCT_SCHEMA_VERSION,
+        runtime_snapshot: facet_binding_snapshot(),
+        path: path.to_string(),
+    });
+    assert_eq!(
+        result.status,
+        OperationStatus::Ok,
+        "read {path}: {:?}",
+        result.diagnostics.diagnostics
+    );
+    result.parameter.expect("read returned no payload")
+}
+
+#[test]
+fn get_parameter_surfaces_a_declared_facet_binding() {
+    let bound = read_payload(BOUND_READ_PATH);
+    assert_eq!(bound.param_key, "cpu");
+    assert_eq!(bound.facet.as_deref(), Some("cpu"));
+    assert_eq!(bound.value, crate::schema::Value::String("standard".to_string()));
+    let json = serde_json::to_value(&bound).expect("serialize bound payload");
+    assert_eq!(json.get("facet"), Some(&serde_json::json!("cpu")));
+}
+
+#[test]
+fn get_parameter_omits_the_facet_key_for_an_unbound_parameter() {
+    let unbound = read_payload(UNBOUND_READ_PATH);
+    assert_eq!(unbound.param_key, "roi_margin_mm");
+    assert_eq!(unbound.facet, None);
+    // Absent, not null: `skip_serializing_if` is what keeps every existing read
+    // envelope byte-identical, so asserting `None` on the Rust value alone would
+    // miss the regression this guards.
+    let json = serde_json::to_value(&unbound).expect("serialize unbound payload");
+    assert!(
+        json.get("facet").is_none(),
+        "an unbound read payload must carry no facet key: {json}"
+    );
+    assert!(
+        !serde_json::to_string(&json)
+            .expect("render unbound payload")
+            .contains("\"facet\""),
+        "an unbound read envelope must carry no facet key anywhere"
+    );
+}
+
+#[test]
+fn list_parameters_is_unchanged_by_a_declared_binding() {
+    // Paths only: a binding changes nothing a client iterates.
+    let result = list_parameters(ListParametersRequest {
+        schema_version: PRODUCT_SCHEMA_VERSION,
+        runtime_snapshot: facet_binding_snapshot(),
+        scope_root: "rig".to_string(),
+    });
+    assert_eq!(result.status, OperationStatus::Ok);
+    assert_eq!(
+        result.parameter_paths,
+        vec![
+            BOUND_READ_PATH.to_string(),
+            UNBOUND_READ_PATH.to_string()
+        ]
+    );
+    assert!(
+        !serde_json::to_string(&result)
+            .expect("render list result")
+            .contains("\"facet\""),
+        "the list envelope carries no parameter metadata, so no facet key"
+    );
 }

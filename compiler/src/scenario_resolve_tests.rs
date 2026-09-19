@@ -40,6 +40,10 @@ const S5_GOLDEN_RESOLVE_RESULT: &str = include_str!(
 struct ResolveGolden {
     scope: String,
     resolve_hash: String,
+    // ADR-0059 D3. Pinned from the golden FILE as well as from the frozen
+    // literal in `resolved_output_hash_preimage_is_pinned`, so the shipped
+    // snapshot and the pre-image contract cannot drift apart silently.
+    resolved_output_hash: String,
     resolved_output: JsonValue,
 }
 
@@ -112,6 +116,7 @@ fn resolve(
         model_handle: model_handle.clone(),
         scope: scope.to_string(),
         selection_state: state.clone(),
+        implied_choices: Default::default(),
     })
 }
 
@@ -185,6 +190,10 @@ fn resolve_golden_s1_resolve_result_and_hash_match() -> Result<()> {
         result.resolve_hash.as_deref(),
         Some(golden.resolve_hash.as_str())
     );
+    assert_eq!(
+        result.resolved_output_hash.as_deref(),
+        Some(golden.resolved_output_hash.as_str())
+    );
     assert_eq!(result.resolved_output, Some(golden.resolved_output));
 
     std::fs::remove_dir_all(&temp_dir).ok();
@@ -215,6 +224,10 @@ fn resolve_golden_s5_resolve_result_and_hash_match() -> Result<()> {
     assert_eq!(
         result.resolve_hash.as_deref(),
         Some(golden.resolve_hash.as_str())
+    );
+    assert_eq!(
+        result.resolved_output_hash.as_deref(),
+        Some(golden.resolved_output_hash.as_str())
     );
     assert_eq!(result.resolved_output, Some(golden.resolved_output));
 
@@ -359,6 +372,227 @@ fn resolve_metrics_snapshot() -> Result<()> {
         "resolve_metrics resolve_us={} rss_kib={}",
         resolve_us,
         read_vm_rss_kib().unwrap_or(0)
+    );
+
+    std::fs::remove_dir_all(&temp_dir).ok();
+    Ok(())
+}
+
+// --- ADR-0059 D3: `resolved_output_hash` ------------------------------------
+//
+// The payload identity. `resolve_hash` folds `model_hash` into its pre-image,
+// so it rotates on ANY model edit — including one that leaves the bytes a
+// service receives byte-identical. `resolved_output_hash` covers
+// `{schema_version, scope, resolved_output}` and nothing else, which is what
+// makes "did my change touch this deployment" answerable by hash comparison.
+//
+// The three tests below pin the three things that make it useful: it ignores
+// model identity (T1), it does not ignore the payload (T2), and its pre-image
+// is frozen (T3). They read the WIRE key rather than the struct field because
+// the wire form is what `cfx diff`, the interpreter response, and every
+// snapshot consumer actually read.
+
+/// A definition-only chunk that no component references. Merging it changes the
+/// compiled model — and therefore `model_hash` — while leaving every resolved
+/// value untouched. That is exactly the edit T1 needs: unrelated to the target.
+const S1_UNRELATED_DEFS: &str = r#"{
+  "package": "s1_water_pump",
+  "version": "1.0.0",
+  "definitions": {
+    "unused_probe_gain": {
+      "type": "float",
+      "unit": "ratio",
+      "doc": "Unreferenced definition; exists only to move model_hash",
+      "lifecycle": "runtime",
+      "safety": "q_m",
+      "access": "technician"
+    }
+  }
+}"#;
+const S1_SOURCE_UNRELATED_DEFS: &str =
+    "scenarios/s1_water_pump/smoke/chunks/90_unrelated_definitions.toml";
+
+/// Read `resolved_output_hash` off the SERIALIZED result. The struct field is
+/// asserted in T3; every other assertion here goes through the wire form,
+/// because a consumer that never links the compiler crate is the audience.
+fn wire_resolved_output_hash(result: &crate::loader_api::ResolveResult) -> Option<String> {
+    serde_json::to_value(result)
+        .expect("resolve result must serialize")
+        .get("resolved_output_hash")
+        .and_then(JsonValue::as_str)
+        .map(str::to_string)
+}
+
+#[test]
+fn resolved_output_hash_ignores_model_identity() -> Result<()> {
+    let scope = "component:thermal_control";
+
+    let (base_dir, _base_index) = emitted_cmp_dir(
+        &[
+            (S1_SOURCE_DEFS, S1_CHUNK_DEFS),
+            (S1_SOURCE_COMPONENTS, S1_CHUNK_COMPONENTS),
+        ],
+        "s1-output-hash-base",
+    )?;
+    let base_handle = open_handle(&base_dir)?;
+    let base_state =
+        state_from_payload(&base_handle, scope, s1_default_context(), BTreeMap::new())?;
+    let base = resolve(&base_handle, scope, &base_state);
+
+    let (edited_dir, _edited_index) = emitted_cmp_dir(
+        &[
+            (S1_SOURCE_DEFS, S1_CHUNK_DEFS),
+            (S1_SOURCE_COMPONENTS, S1_CHUNK_COMPONENTS),
+            (S1_SOURCE_UNRELATED_DEFS, S1_UNRELATED_DEFS),
+        ],
+        "s1-output-hash-edited",
+    )?;
+    let edited_handle = open_handle(&edited_dir)?;
+    let edited_state =
+        state_from_payload(&edited_handle, scope, s1_default_context(), BTreeMap::new())?;
+    let edited = resolve(&edited_handle, scope, &edited_state);
+
+    assert_eq!(base.status, OperationStatus::Ok);
+    assert_eq!(edited.status, OperationStatus::Ok);
+
+    // The edit must actually be an edit, or the test proves nothing.
+    assert_ne!(
+        base.model_hash, edited.model_hash,
+        "the unrelated chunk must change model_hash, else T1 is vacuous"
+    );
+    // ...and it must be unrelated: the delivered bytes are identical.
+    assert_eq!(
+        base.resolved_output, edited.resolved_output,
+        "an unreferenced definition must not change the resolved payload"
+    );
+
+    // resolve_hash cannot tell the two apart from a real change: it rotates.
+    assert_ne!(
+        base.resolve_hash, edited.resolve_hash,
+        "resolve_hash folds model_hash, so it must rotate on any model edit"
+    );
+
+    // resolved_output_hash can: it is the payload's identity, and the payload
+    // did not move.
+    let base_output_hash = wire_resolved_output_hash(&base);
+    let edited_output_hash = wire_resolved_output_hash(&edited);
+    assert!(
+        base_output_hash.is_some(),
+        "an ok resolve must carry resolved_output_hash"
+    );
+    assert_eq!(
+        base_output_hash, edited_output_hash,
+        "resolved_output_hash must ignore model identity"
+    );
+
+    std::fs::remove_dir_all(&base_dir).ok();
+    std::fs::remove_dir_all(&edited_dir).ok();
+    Ok(())
+}
+
+#[test]
+fn resolved_output_hash_changes_with_output() -> Result<()> {
+    let (temp_dir, _index) = emitted_cmp_dir(
+        &[
+            (S1_SOURCE_DEFS, S1_CHUNK_DEFS),
+            (S1_SOURCE_COMPONENTS, S1_CHUNK_COMPONENTS),
+        ],
+        "s1-output-hash-differs",
+    )?;
+    let handle = open_handle(&temp_dir)?;
+    let scope = "component:thermal_control";
+
+    // `pump_type` selects the control_driver override: dual -> the dual driver,
+    // single -> the declared default. One value moves; everything else holds.
+    let dual = resolve(
+        &handle,
+        scope,
+        &state_from_payload(&handle, scope, s1_default_context(), BTreeMap::new())?,
+    );
+    let mut single_context = s1_default_context();
+    single_context.insert("pump_type".to_string(), "single".to_string());
+    let single = resolve(
+        &handle,
+        scope,
+        &state_from_payload(&handle, scope, single_context, BTreeMap::new())?,
+    );
+
+    assert_eq!(dual.status, OperationStatus::Ok);
+    assert_eq!(single.status, OperationStatus::Ok);
+    assert_ne!(
+        dual.resolved_output, single.resolved_output,
+        "the two selections must deliver different bytes, else T2 is vacuous"
+    );
+
+    let dual_hash = wire_resolved_output_hash(&dual);
+    let single_hash = wire_resolved_output_hash(&single);
+    assert!(dual_hash.is_some(), "an ok resolve must carry the hash");
+    assert_ne!(
+        dual_hash, single_hash,
+        "resolved_output_hash must change when the delivered payload changes"
+    );
+
+    std::fs::remove_dir_all(&temp_dir).ok();
+    Ok(())
+}
+
+/// The frozen pre-image contract. This literal is NOT copied from the
+/// implementation: it is `sha256(serde_json::to_vec({schema_version: 5, scope,
+/// resolved_output}))` derived independently from the checked-in S1 smoke
+/// golden. If the implementation ever reorders the pre-image fields, folds in
+/// `model_hash`, or stops canonicalizing the payload, this value moves and the
+/// test says so.
+const S1_SMOKE_RESOLVED_OUTPUT_HASH: &str =
+    "fadff45010340eebae0ea17ae1c9936bef19c9edff5c5cafff0da7daa150f270";
+
+#[test]
+fn resolved_output_hash_preimage_is_pinned() -> Result<()> {
+    let (temp_dir, _index) = emitted_cmp_dir(
+        &[
+            (S1_SOURCE_DEFS, S1_CHUNK_DEFS),
+            (S1_SOURCE_COMPONENTS, S1_CHUNK_COMPONENTS),
+        ],
+        "s1-output-hash-pinned",
+    )?;
+    let handle = open_handle(&temp_dir)?;
+    let scope = "component:thermal_control";
+    let state = state_from_payload(&handle, scope, s1_default_context(), BTreeMap::new())?;
+
+    let result = resolve(&handle, scope, &state);
+    assert_eq!(result.status, OperationStatus::Ok);
+    assert_eq!(
+        wire_resolved_output_hash(&result).as_deref(),
+        Some(S1_SMOKE_RESOLVED_OUTPUT_HASH),
+        "resolved_output_hash pre-image drifted"
+    );
+    // The typed field and the wire key are the same value: a consumer that
+    // links the crate and one that reads the JSON must agree.
+    assert_eq!(
+        result.resolved_output_hash.as_deref(),
+        Some(S1_SMOKE_RESOLVED_OUTPUT_HASH)
+    );
+
+    // Absent on an error result: the field is present iff `resolved_output` is,
+    // so a rejected resolve offers no payload identity to compare.
+    let rejected = resolve(
+        &handle,
+        scope,
+        &state_from_payload(
+            &handle,
+            scope,
+            BTreeMap::from([("region".to_string(), "us".to_string())]),
+            BTreeMap::new(),
+        )?,
+    );
+    assert_eq!(rejected.status, OperationStatus::Error);
+    assert!(
+        rejected.resolved_output.is_none(),
+        "a rejected resolve carries no payload"
+    );
+    assert_eq!(
+        wire_resolved_output_hash(&rejected),
+        None,
+        "a rejected resolve must not carry resolved_output_hash"
     );
 
     std::fs::remove_dir_all(&temp_dir).ok();

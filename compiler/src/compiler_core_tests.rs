@@ -24,8 +24,14 @@ fn facet(values: &[&str], open: bool) -> schema::Facet {
     }
 }
 
-fn declared<'a>(pairs: &'a [(&str, &'a schema::Facet)]) -> BTreeMap<String, &'a schema::Facet> {
-    pairs.iter().map(|(n, f)| (n.to_string(), *f)).collect()
+/// Owned rather than borrowed since ADR-0057 §D3: a binding's facet is DERIVED
+/// from its catalogue, so `declared_facets` cannot hand out references into the
+/// authored chunks any more.
+fn declared(pairs: &[(&str, &schema::Facet)]) -> BTreeMap<String, schema::Facet> {
+    pairs
+        .iter()
+        .map(|(n, f)| (n.to_string(), (*f).clone()))
+        .collect()
 }
 
 #[test]
@@ -314,9 +320,9 @@ fn a_constraint_id_declared_by_two_chunks_is_rejected() {
         msg.contains("Duplicate constraint ID found: 'prod_forbids_debug'"),
         "err: {msg}"
     );
-    // Deliberately NOT the facet phrasing: `map_compile_input_error` routes
-    // "declared in more than one chunk" to E_INGEST_DUPLICATE_FACET, and a
-    // duplicate constraint is not a duplicate facet.
+    // Deliberately NOT the facet phrasing: a duplicate constraint is not a
+    // duplicate facet, and an author reading the message has to be able to tell
+    // them apart (before configflux-py7w the wording also chose the code).
     assert!(
         !msg.contains("declared in more than one chunk"),
         "must not borrow the facet diagnostic's phrasing: {msg}"
@@ -529,7 +535,7 @@ fn cardinality_quotes_fall_back_for_values_containing_a_single_quote() {
     );
 }
 
-// ---- ADR-0054 §5.1: only `constraints` produce root conjuncts ---------
+// ---- ADR-0054 §5.1: only `constraints` carry AUTHORED policy to the root ----
 
 /// A pack shaped like the hero example after migration: a component condition
 /// that is a genuine inclusion selector, a parameter-override condition, and
@@ -555,6 +561,17 @@ const ROUTING_CHUNK: &str = r#"{
   }
 }"#;
 
+/// The merged summary the CCM builders read (ADR-0058 §D4 stage 2).
+///
+/// Built here through the object grouping the compile path itself uses, so
+/// these tests exercise the real input to the clause and constraint builders
+/// rather than a hand-assembled one.
+fn merged_summary(compiler: &Compiler) -> crate::interface_summary::MergedSummary {
+    let summaries = compiler.interface_summaries();
+    let headers = crate::link::in_memory_headers(compiler.source_chunks(), &summaries);
+    crate::link::link_stage_headers(&headers).expect("model links")
+}
+
 fn routing_compiler() -> Compiler {
     let mut compiler = Compiler::new();
     compiler
@@ -566,15 +583,16 @@ fn routing_compiler() -> Compiler {
 
 #[test]
 fn every_harvested_condition_becomes_a_bare_tautology() {
-    // The structural elimination (ADR-0054 §5.1). A COMPONENT condition is an
-    // inclusion selector exactly like a parameter-override condition, so
-    // neither has a syntactic path to the BDD root. This is the invariant that
-    // makes the configflux-9xxq defect class impossible rather than merely
-    // fixed: if this assertion can be made to fail, a selector is asserting
-    // again.
+    // Pins the ADR-0054 §5.1 PRODUCER RULE — a COMPONENT condition is an
+    // inclusion selector exactly like a parameter-override one, and neither
+    // reaches the root as an assertion. The rule, not the encoding, is what
+    // stands between configflux-9xxq and a recurrence: the emitter folds any
+    // non-tautological clause in. Pinned BY EXAMPLE, over one fixture
+    // (`routing_compiler` / `ROUTING_CHUNK`) — extend it rather than lean on it.
     let compiler = routing_compiler();
-    let declared_facets = compiler.declared_facets();
-    let clauses = compiler.collect_ccm_clauses(&declared_facets);
+    let merged = merged_summary(&compiler);
+    let declared_facets = declared_facets_from_summary(&merged);
+    let clauses = ccm_clauses(&merged.selectors, &declared_facets);
 
     assert!(!clauses.is_empty());
     for clause in &clauses {
@@ -602,7 +620,7 @@ fn constraints_are_collected_id_ascending_with_verbatim_conditions() {
     // it to the operator.
     let compiler = routing_compiler();
     assert_eq!(
-        compiler.collect_ccm_constraints(),
+        ccm_constraints(&merged_summary(&compiler)),
         vec![
             (
                 "a_first_by_id".to_string(),
@@ -632,8 +650,9 @@ fn a_model_with_no_constraints_contributes_no_authored_root_conjuncts() {
         .expect("ingest chunk");
     compiler.link_and_verify().expect("model links");
 
-    assert!(compiler.collect_ccm_constraints().is_empty());
-    let declared_facets = compiler.declared_facets();
+    let merged = merged_summary(&compiler);
+    assert!(ccm_constraints(&merged).is_empty());
+    let declared_facets = declared_facets_from_summary(&merged);
     assert_eq!(
         synthesize_facet_cardinality(&declared_facets),
         vec!["exactly_one_of(environment == 'dev', environment == 'prod')".to_string()]

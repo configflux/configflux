@@ -8,12 +8,13 @@
 #
 #   1. Compile the shared model (CUE was exported out-of-band to the committed
 #      *.json; this script never invokes cue).
-#   2. Matrix-resolve BOTH named environments x BOTH service scopes with the
-#      one-shot `cfx resolve` — one command per (environment, scope) cell, no
-#      hand-built request envelopes on the produce path. (The reference
-#      resolver examples/resolve_environment.sh, which unfolds a named
-#      environment through the raw interpreter envelope chain, remains as the
-#      machine/envelope appendix for integrators who need it — ADR-0042.)
+#   2. Matrix-resolve BOTH named environments x BOTH service scopes in ONE
+#      `cfx resolve --manifest environments.json --all --scopes ...` command:
+#      the environment manifest is a product input, so nothing on the produce
+#      path desugars it or builds a request envelope. (The reference resolver
+#      examples/resolve_environment.sh, which unfolds a named environment
+#      through the raw interpreter envelope chain, remains as the
+#      machine/envelope appendix for integrators who need it — ADR-0059 D6.)
 #   3. Assemble one delivery bundle per (environment, scope) — snapshot + ccm/ —
 #      and verify each with the reference verifier examples/verify_bundle.sh.
 #   4. Generate a docker-compose override from a resolve snapshot using the
@@ -112,59 +113,28 @@ ok "compiled -> ${OUT_DIR}/cmp/cmp.manifest.json (+ sibling ccm/)"
 # Step 2: Matrix-resolve both named environments x both service scopes
 # ---------------------------------------------------------------------------
 banner "Step 2: Matrix-resolve (robot-alpha, local) x (vision_service, telemetry_service) with cfx resolve"
-# Each (environment, scope) cell is one independent, deterministic resolution.
-# The PRODUCE path is a single `cfx resolve` per cell: a small selection file
-# carries the cell's scope + context_tags + choices (read straight from the
-# environment manifest you own), and cfx opens -> applies -> resolves in one
-# command. No open/init/select/resolve envelope threading, no jq on the produce
-# path. The snapshot cfx prints (--format json) is byte-for-byte the same
-# ResolveResult the raw envelope chain would produce.
-RESOLVED_DIR="${OUT_DIR}/resolved"
-CFX_EXPORT_DIR="${OUT_DIR}/.cfx-export"
-
-# Resolve one (environment, scope) cell into
+# Each (environment, scope) cell is one independent, deterministic resolution,
+# and ONE command produces the whole matrix: `cfx resolve` reads the environment
+# manifest you own, `--all` walks every environment it names, and `--scopes`
+# sweeps each of them across both service scopes. No selection files to desugar,
+# no open/init/select/resolve envelope threading, no jq or python on the produce
+# path. Every cell lands in its own directory,
 # ${RESOLVED_DIR}/<env>/<root>/resolve_result.<root>.<selection>.json — the
-# standard per-scope bundle-snapshot layout. <selection> is the cell's choice
-# values in sorted-key order joined with '-', falling back to the environment
-# name when it has no choices.
-resolve_cell() {
-  local env_name="$1" scope="$2"
-  local root="${scope#component:}"
-  local cell_out="${RESOLVED_DIR}/${env_name}/${root}"
-  mkdir -p "${cell_out}"
-  # Build the cfx selection file from the manifest entry (scope + the env's
-  # context_tags + choices). This is a declarative cell config, not a
-  # hand-threaded request envelope.
-  local sel="${OUT_DIR}/.selection.${env_name}.${root}.json"
-  python3 -c 'import json,sys
-m=json.load(open(sys.argv[1]));e=m["environments"][sys.argv[2]]
-json.dump({"schema_version":4,"model_hash":"","scope":sys.argv[3],
-          "context_tags":e.get("context_tags",{}),"choices":e.get("choices",{}),
-          "selection_state_hash":""},open(sys.argv[4],"w"))' \
-    "${MANIFEST}" "${env_name}" "${scope}" "${sel}"
-  local label
-  label="$(python3 -c 'import json,sys
-c=json.load(open(sys.argv[1]))["environments"][sys.argv[2]].get("choices",{})
-print("-".join(str(c[k]) for k in sorted(c)) if c else sys.argv[2])' "${MANIFEST}" "${env_name}")"
-  "${CFX}" resolve \
-    --model "${OUT_DIR}/cmp/cmp.manifest.json" \
-    --selection-file "${sel}" \
-    --out "${CFX_EXPORT_DIR}/${env_name}/${root}" \
-    --format json \
-    > "${cell_out}/resolve_result.${root}.${label}.json"
-  rm -f "${sel}"
-  echo "  -> ${env_name} x ${scope}: resolve_result.${root}.${label}.json"
-}
+# standard per-scope bundle-snapshot layout — beside its generated/ C++
+# early-binding files. <selection> is the cell's choice values in sorted-facet
+# order joined with '-', falling back to the environment name when it has none.
+# The snapshot is byte-for-byte the ResolveResult the raw envelope chain would
+# produce for the same cell.
+RESOLVED_DIR="${OUT_DIR}/resolved"
 
-# Enumerate the manifest's environments; resolve each across both service scopes.
-IFS=',' read -r -a SCOPE_LIST <<< "${SCOPES}"
-while IFS= read -r env_name; do
-  [[ -z "${env_name}" ]] && continue
-  for scope in "${SCOPE_LIST[@]}"; do
-    resolve_cell "${env_name}" "${scope}"
-  done
-done < <(python3 -c 'import json,sys
-for k in json.load(open(sys.argv[1]))["environments"]: print(k)' "${MANIFEST}")
+"${CFX}" resolve \
+  --model "${OUT_DIR}/cmp/cmp.manifest.json" \
+  --manifest "${MANIFEST}" \
+  --all \
+  --scopes "${SCOPES}" \
+  --out "${RESOLVED_DIR}" \
+  > "${OUT_DIR}/matrix_resolve.log"
+grep '^cell: ' "${OUT_DIR}/matrix_resolve.log" | sed 's/^cell: /  -> /'
 ok "matrix resolve wrote per-(environment,scope) snapshots under ${RESOLVED_DIR}/"
 
 # ---------------------------------------------------------------------------

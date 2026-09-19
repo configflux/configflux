@@ -109,14 +109,18 @@ echo "  -> resolve.result.json + ccm/ produced"
 # ---------------------------------------------------------------------------
 # 2) Assemble a minimal standard-layout bundle
 # ---------------------------------------------------------------------------
-# The snapshot's scope is component:runtime_tuner and the canary update channel
-# was selected, so the standard per-scope snapshot name is
-# resolve_result.runtime_tuner.canary.json (matching the guide's worked names).
+# The snapshot's scope is component:runtime_tuner and the example selects all
+# three facets, so the standard per-scope snapshot name joins EVERY choice in
+# sorted-facet order: resolve_result.runtime_tuner.gateway-eu-canary.json, which
+# is what the service-integration guide's replayed transcript shows (configflux-882z
+# corrected an earlier name here that was built from the update channel alone).
+# verify_bundle.sh globs resolve_result.*.json, so the name is this test's own
+# choice of a conforming one rather than something the script depends on.
 step "assemble standard-layout bundle"
 BUNDLE="${TEST_TMPDIR:-$(mktemp -d)}/bundle"
 rm -rf "${BUNDLE}"
 mkdir -p "${BUNDLE}"
-cp "${PIPE_OUT}/resolve.result.json" "${BUNDLE}/resolve_result.runtime_tuner.canary.json"
+cp "${PIPE_OUT}/resolve.result.json" "${BUNDLE}/resolve_result.runtime_tuner.gateway-eu-canary.json"
 cp -R "${PIPE_OUT}/ccm" "${BUNDLE}/ccm"
 echo "  -> bundle assembled at ${BUNDLE}"
 
@@ -137,7 +141,7 @@ echo "  -> well-formed bundle accepted (exit 0)"
 
 # The script must also accept a correct expected content hash and reject a
 # wrong one, when one is supplied.
-EXPECTED_HASH="$(sha256sum "${BUNDLE}/resolve_result.runtime_tuner.canary.json" | awk '{print $1}')"
+EXPECTED_HASH="$(sha256sum "${BUNDLE}/resolve_result.runtime_tuner.gateway-eu-canary.json" | awk '{print $1}')"
 set +e
 bash "${VERIFY_SCRIPT}" "${BUNDLE}" "${EXPECTED_HASH}" > "${PIPE_OUT}/verify_hash_ok.log" 2>&1
 HASH_OK_RC=$?
@@ -168,7 +172,7 @@ step "verify_bundle.sh on a bundle with ccm/ removed (expect non-zero)"
 NO_CCM="${TEST_TMPDIR:-$(mktemp -d)}/bundle_no_ccm"
 rm -rf "${NO_CCM}"
 mkdir -p "${NO_CCM}"
-cp "${BUNDLE}/resolve_result.runtime_tuner.canary.json" "${NO_CCM}/"
+cp "${BUNDLE}/resolve_result.runtime_tuner.gateway-eu-canary.json" "${NO_CCM}/"
 set +e
 bash "${VERIFY_SCRIPT}" "${NO_CCM}" > "${PIPE_OUT}/verify_no_ccm.log" 2>&1
 NO_CCM_RC=$?
@@ -187,7 +191,7 @@ step "verify_bundle.sh on a mis-assembled bundle (tampered bound_model_hash)"
 BAD_PAIR="${TEST_TMPDIR:-$(mktemp -d)}/bundle_bad_pair"
 rm -rf "${BAD_PAIR}"
 mkdir -p "${BAD_PAIR}"
-cp "${BUNDLE}/resolve_result.runtime_tuner.canary.json" "${BAD_PAIR}/"
+cp "${BUNDLE}/resolve_result.runtime_tuner.gateway-eu-canary.json" "${BAD_PAIR}/"
 cp -R "${BUNDLE}/ccm" "${BAD_PAIR}/ccm"
 # Rewrite bound_model_hash to a different, well-formed sha256 hex string so the
 # snapshot and ccm/ no longer belong together.
@@ -205,5 +209,52 @@ set -e
   fail "mismatched pair: expected non-zero exit, got 0"
 }
 echo "  -> mismatched model_hash/bound_model_hash rejected (exit ${BAD_PAIR_RC})"
+
+# ---------------------------------------------------------------------------
+# 6) A `cfx resolve --out` directory + a copied ccm/ IS a bundle, unassembled
+# ---------------------------------------------------------------------------
+# The point of configflux-dkmm.1: `--out` now writes the resolved snapshot
+# itself, under the standard resolve_result.<root>.<selection>.json name, so the
+# manual rename-and-place step section 2 performs is no longer necessary. Drop
+# the model's ccm/ beside the output directory and it verifies as it stands.
+step "cfx resolve --out + copied ccm/ verifies with no manual assembly"
+DIRECT="${TEST_TMPDIR:-$(mktemp -d)}/bundle_direct"
+rm -rf "${DIRECT}"
+"${CFX}" resolve \
+  --model "${PIPE_OUT}/cmp.manifest.json" \
+  --selection-file "${PIPE_OUT}/selection.json" \
+  --select device_class=gateway \
+  --select update_channel=canary \
+  --select region=eu \
+  --out "${DIRECT}" \
+  > "${PIPE_OUT}/direct_resolve.log" 2>&1 || {
+    echo "--- cfx resolve output ---" >&2
+    cat "${PIPE_OUT}/direct_resolve.log" >&2 || true
+    fail "cfx resolve into a fresh bundle directory did not succeed"
+  }
+cp -R "${PIPE_OUT}/ccm" "${DIRECT}/ccm"
+
+# verify_bundle.sh requires EXACTLY ONE resolve_result.*.json at the root.
+shopt -s nullglob
+DIRECT_SNAPS=("${DIRECT}"/resolve_result.*.json)
+shopt -u nullglob
+[[ ${#DIRECT_SNAPS[@]} -eq 1 ]] || {
+  find "${DIRECT}" -type f >&2 || true
+  fail "cfx --out must leave exactly one resolve_result.*.json at the bundle root, found ${#DIRECT_SNAPS[@]}"
+}
+DIRECT_NAME="$(basename "${DIRECT_SNAPS[0]}")"
+[[ "${DIRECT_NAME}" != *_.json ]] \
+  || fail "snapshot name must not end in '_.json': ${DIRECT_NAME}"
+
+set +e
+bash "${VERIFY_SCRIPT}" "${DIRECT}" > "${PIPE_OUT}/verify_direct.log" 2>&1
+DIRECT_RC=$?
+set -e
+if [[ ${DIRECT_RC} -ne 0 ]]; then
+  echo "--- verify (cfx --out bundle) output ---" >&2
+  cat "${PIPE_OUT}/verify_direct.log" >&2 || true
+  fail "cfx --out + ccm/ bundle: expected exit 0, got ${DIRECT_RC}"
+fi
+echo "  -> ${DIRECT_NAME} + ccm/ accepted as a delivery bundle (exit 0)"
 
 step "DONE — verify_bundle.sh accepts a matched bundle and rejects mis-assembled ones"

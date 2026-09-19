@@ -42,6 +42,27 @@ pub(crate) fn condition_expr_implies(
     collect_atom_values(antecedent, &mut tag_values);
     collect_atom_values(consequent, &mut tag_values);
 
+    // configflux-secb.2 / ADR-0057 §D5: a facet-to-facet comparison names no
+    // literal, so the walk above learns nothing from it. Left alone, both
+    // operands would enumerate a single sentinel value, `a == b` would be a
+    // tautology in every row of the table, and this function would accept
+    // `depends_on` edges it must reject. Two corrections restore soundness
+    // FOR A SINGLE COMPARED PAIR: the compared tags share one value universe
+    // (so "they agree on a named value" is representable), and every compared
+    // tag gets a SECOND sentinel (so "they differ on unnamed values" is
+    // representable too).
+    //
+    // The scope of that claim is deliberate. Two sentinels are enough to
+    // represent every agree/differ combination of ONE pair, and the two cases
+    // in `tests.rs` pin exactly that. They are NOT enough for three or more
+    // mutually compared facets: `a != b && b != c && a != c` needs three
+    // pairwise-distinct unnamed values and this construction offers two, so
+    // such a condition can still be judged unsatisfiable when it is not, and
+    // the engine can still accept an edge it should reject. That general case
+    // is configflux-hd30; do not read the two corrections above as covering
+    // it.
+    let compared = unify_compared_tag_domains(antecedent, consequent, &mut tag_values);
+
     // Tags in sorted order (BTreeMap iterates sorted), each with its sorted
     // observed values plus one fresh sentinel standing for "any other value".
     let tags: Vec<String> = tag_values.keys().cloned().collect();
@@ -50,6 +71,9 @@ pub(crate) fn condition_expr_implies(
         .map(|tag| {
             let mut domain: Vec<String> = tag_values[tag].iter().cloned().collect();
             domain.push(unique_sentinel(&domain));
+            if compared.contains(tag) {
+                domain.push(unique_sentinel(&domain));
+            }
             domain
         })
         .collect();
@@ -119,6 +143,20 @@ fn eval_total(expr: &ConditionExpr, assignments: &BTreeMap<String, String>) -> b
                 .count()
                 == 1
         }
+        // configflux-secb.2 / ADR-0057 §D5. An operand absent from the total
+        // assignment makes the comparison false under BOTH operators, matching
+        // `eval_total_predicate`'s posture for an unassigned tag. The case does
+        // not arise for tags drawn from the expressions themselves, which
+        // `unify_compared_tag_domains` guarantees these are.
+        ConditionExpr::FacetCompare { left, op, right } => {
+            match (assignments.get(left), assignments.get(right)) {
+                (Some(lhs), Some(rhs)) => match op {
+                    ConditionPredicateOp::Eq => lhs == rhs,
+                    ConditionPredicateOp::NotEq => lhs != rhs,
+                },
+                _ => false,
+            }
+        }
     }
 }
 
@@ -146,6 +184,80 @@ fn collect_atom_values(expr: &ConditionExpr, tag_values: &mut BTreeMap<String, B
             .or_default()
             .insert(predicate.value.clone());
     });
+}
+
+/// Give every pair of facets joined by a `==`/`!=` comparison one shared value
+/// universe, and report the set of tags that appear in such a comparison.
+///
+/// Both operands are entered into `tag_values` even when no predicate names
+/// them, and their value sets are unioned. The union is iterated to a fixpoint
+/// so a chain (`a == b && b == c`) reaches one universe across all three: value
+/// sets only grow and are bounded by the literals in the two expressions, so
+/// the loop terminates.
+///
+/// configflux-secb.2 / ADR-0057 §D5.
+fn unify_compared_tag_domains(
+    antecedent: &ConditionExpr,
+    consequent: &ConditionExpr,
+    tag_values: &mut BTreeMap<String, BTreeSet<String>>,
+) -> BTreeSet<String> {
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    for_each_facet_comparison(antecedent, &mut |left, right| {
+        pairs.push((left.to_string(), right.to_string()));
+    });
+    for_each_facet_comparison(consequent, &mut |left, right| {
+        pairs.push((left.to_string(), right.to_string()));
+    });
+
+    let mut compared: BTreeSet<String> = BTreeSet::new();
+    for (left, right) in &pairs {
+        tag_values.entry(left.clone()).or_default();
+        tag_values.entry(right.clone()).or_default();
+        compared.insert(left.clone());
+        compared.insert(right.clone());
+    }
+
+    loop {
+        let mut changed = false;
+        for (left, right) in &pairs {
+            let union: BTreeSet<String> = tag_values[left]
+                .union(&tag_values[right])
+                .cloned()
+                .collect();
+            for tag in [left, right] {
+                if tag_values[tag] != union {
+                    tag_values.insert(tag.clone(), union.clone());
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            return compared;
+        }
+    }
+}
+
+/// Invoke `sink(left, right)` for every facet-to-facet comparison in `expr`, in
+/// left-to-right source order. Self-contained for the same reason
+/// [`for_each_predicate`] is: the implication engine carries no dependency on
+/// the selection-eval walkers.
+fn for_each_facet_comparison<F: FnMut(&str, &str)>(expr: &ConditionExpr, sink: &mut F) {
+    match expr {
+        ConditionExpr::Bool(_) | ConditionExpr::Predicate(_) => {}
+        ConditionExpr::FacetCompare { left, right, .. } => sink(left, right),
+        ConditionExpr::Not(inner) => for_each_facet_comparison(inner, sink),
+        ConditionExpr::And(lhs, rhs) | ConditionExpr::Or(lhs, rhs) => {
+            for_each_facet_comparison(lhs, sink);
+            for_each_facet_comparison(rhs, sink);
+        }
+        ConditionExpr::AnyOf(children)
+        | ConditionExpr::AllOf(children)
+        | ConditionExpr::ExactlyOneOf(children) => {
+            for child in children {
+                for_each_facet_comparison(child, sink);
+            }
+        }
+    }
 }
 
 /// Pick a value distinct from every entry in `values`, standing for "any tag
@@ -186,6 +298,9 @@ fn for_each_predicate<F: FnMut(&ConditionPredicate)>(expr: &ConditionExpr, sink:
                 for_each_predicate(child, sink);
             }
         }
+        // Names no literal, so it widens no tag domain here. Its operands are
+        // handled by `unify_compared_tag_domains` (configflux-secb.2).
+        ConditionExpr::FacetCompare { .. } => {}
     }
 }
 

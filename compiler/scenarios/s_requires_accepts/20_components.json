@@ -1,0 +1,70 @@
+{
+    "package": "services_unit",
+    "version": "1.0.0",
+    "components": {
+        "compute_service": {
+            "type": "service",
+            "requires": {
+                "container": {
+                    "binding": "line_container",
+                    "accepts": ["c1", "c2"]
+                }
+            },
+            "params": {
+                "frame_width": {
+                    "inherits": "frame_width",
+                    "type": "integer",
+                    "unit": "mm",
+                    "doc": "Width of the frame the service crops to",
+                    "lifecycle": "construction",
+                    "safety": "q_m",
+                    "access": "technician",
+                    "value": 800,
+                    "overrides": [
+                        {"condition": "line_container == 'c2'", "value": 600}
+                    ]
+                }
+            }
+        },
+        "edge_service": {
+            "type": "service",
+            "condition": "mode == 'x'",
+            "requires": {
+                "container": {
+                    "binding": "line_container",
+                    "accepts": ["c1"]
+                }
+            },
+            "params": {
+                "frame_width": {
+                    "inherits": "frame_width",
+                    "type": "integer",
+                    "unit": "mm",
+                    "doc": "Width of the frame the edge service crops to",
+                    "lifecycle": "construction",
+                    "safety": "q_m",
+                    "access": "technician",
+                    "value": 800
+                }
+            }
+        },
+        "telemetry_service": {
+            "type": "service",
+            "requires": {
+                "container": "line_container"
+            },
+            "params": {
+                "frame_width": {
+                    "inherits": "frame_width",
+                    "type": "integer",
+                    "unit": "mm",
+                    "doc": "Width of the frame the telemetry service reports",
+                    "lifecycle": "construction",
+                    "safety": "q_m",
+                    "access": "technician",
+                    "value": 800
+                }
+            }
+        }
+    }
+}

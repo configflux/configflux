@@ -18,7 +18,7 @@ Out of scope:
 ## 2) Canonical Payload Shape
 
 Top-level object (`SoftwareBomV1`):
-- `schema_version: u32` (the current product schema version, `4`)
+- `schema_version: u32` (the current product schema version, `5`)
 - `bom_version: u32` (`1` in v1)
 - `bom_hash: string`
 - `hash_algo: string` (`"sha256"` in v1)
@@ -37,6 +37,12 @@ Top-level object (`SoftwareBomV1`):
 - `components: list<ComponentBomEntry>`
 - `parameters: list<ParameterBomEntry>`
 - `artifacts: list<ArtifactBomEntry>`
+  - Holds exactly the artifacts bound by artifact-typed parameters in the resolved
+    output, which is a subset of the resolve result's `resolved_artifacts` catalogue.
+    That catalogue carries metadata for every artifact the model declares, and the
+    export reads it only to fill in each bound artifact's metadata.
+  - Each entry's `bound_paths` likewise lists only the parameter paths that bind that
+    artifact in this resolved output.
 - `stats: { component_count, parameter_count, artifact_count }`
 
 ## 3) Entry Shapes

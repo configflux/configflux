@@ -1,0 +1,7 @@
+facet line_container [closed]
+  c1
+facet mode [closed, default: y]
+  x
+  y
+facet site [selected: factory_a]
+  factory_a

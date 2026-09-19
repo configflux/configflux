@@ -730,6 +730,25 @@ impl CuddBuilder {
                 }
                 Ok(result)
             }
+            // configflux-secb.2 / ADR-0057 §D5: expanded into the
+            // `And`/`Or`/`Not`/`Predicate` fragment by
+            // `ccm_emitter::parse_condition_model` before either backend sees
+            // it, because the pairwise equivalence it denotes ranges over the
+            // union of the two DECLARED domains and `index` carries no domain
+            // information. Expanding once, upstream, is also what makes this
+            // backend and the in-crate one produce the same canonical BDD:
+            // they fold an identical tree with the arms above. Reaching here
+            // means the expansion was skipped.
+            ConditionExpr::FacetCompare { left, op, right } => bail!(
+                "internal: facet comparison '{} {} {}' reached CUDD lowering unexpanded; \
+                 `parse_condition_model` must expand it against the declared facet domains first",
+                left,
+                match op {
+                    ConditionPredicateOp::Eq => "==",
+                    ConditionPredicateOp::NotEq => "!=",
+                },
+                right
+            ),
         }
     }
 

@@ -41,3 +41,32 @@ cudd-sys = { path = "../third_party/cudd-sys", default-features = false, optiona
 # default: enabling it compiles `src/cudd_build/` and links the cudd-sys native
 # backend. With the feature off, `Construction::Cudd` fails closed.
 cudd = ["dep:cudd-sys"]
+
+# Test-only first-party edges (configflux-4efr). These mirror deps that
+# `compiler/BUILD.bazel` already declares on the `rust_test` targets under
+# `compiler/tests/`; without them the cargo graph cannot build those targets
+# (E0432/E0433) even though every Bazel gate is green. Repo cargo/Bazel
+# manifest-parity rule: a first-party dep edge in a BUILD.bazel must be
+# mirrored in that crate's Cargo.toml in the SAME commit. Bazel-has /
+# cargo-lacks is the breaking direction, because every gate builds with Bazel
+# and the only cargo compile is the release binary build, which runs after
+# publish. `cargo check --workspace --all-targets` is the oracle for the class.
+#
+# `session_compose` is a dev-dep CYCLE (session_compose depends on compiler),
+# which is legal in cargo: dev-dependencies are excluded from the normal build
+# graph, so they cannot form a cycle in it. `solver` is a plain forward edge —
+# `solver` does not depend on `compiler`.
+#
+# session_compose: //session_compose on :facet_mixed_arm_options_test.
+# solver: //solver:solver on :ccm_emitter_roundtrip_test,
+#   :ccm_emitter_equivalence_test, :product_compile_ccm_test,
+#   :facet_symbol_synthesis_test, :cudd_construction_roundtrip_test,
+#   :facet_equality_lowering_test and :requires_accepts_lowering_test.
+#
+# The `cudd` feature covers the other half of :requires_accepts_lowering_test's
+# Bazel deps: it links :compiler_lib_cudd for the in-crate-vs-CUDD equivalence
+# half, and cudd-sys is already declared optional above, exactly as
+# :cudd_construction_roundtrip_test needs it.
+[dev-dependencies]
+session_compose = { path = "../session_compose" }
+solver = { path = "../solver" }

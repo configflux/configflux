@@ -105,6 +105,6 @@ alongside it. Rows are ordered alphabetically.
 | Tool | Its focus | Where ConfigFlux fits |
 |---|---|---|
 | Classical SPLE suites | Interactive modeling, configuration, and analysis of feature models, often in a desktop or IDE | The same SPLE concepts delivered as a deterministic CLI compiler with byte-reproducible outputs |
-| CUE | Unifying schema and data and validating a configuration | The authoring language ConfigFlux builds on; ConfigFlux adds variability resolution over a product family |
+| CUE | Unifying schema and data and validating a configuration | The authoring language ConfigFlux builds on; ConfigFlux adds variability resolution over a product family, plus typed catalogues — shared tables of named entries that services select from by name rather than restate by comprehension |
 | Helm and Kustomize | Packaging and applying Kubernetes manifests | Chooses and proves a valid configuration first, then emits into a Helm values file or Kustomize base |
 | Nix | Reproducible builds from a specified configuration | Chooses and proves which configuration to build across variants, then emits a reproducible result to consume |

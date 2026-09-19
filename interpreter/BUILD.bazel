@@ -115,7 +115,7 @@ rust_binary(
     # src/cli_adapter.rs resolves `--version` to the workspace release
     # version. rules_rust defaults CARGO_PKG_VERSION to "0.0.0" when this
     # attr is absent, so it must mirror /VERSION (lint_repo.py enforces this).
-    version = "0.3.0",
+    version = "0.4.0",
     deps = COMMON_DEPS,
 )
 
@@ -160,6 +160,15 @@ rust_test(
     deps = COMMON_DEPS,
 )
 
+# configflux-7uex: the tamper gate is a FAMILY, not one case. INT-004 pinned a
+# forged `selection_state_hash` on `explain` alone, so the two classes of
+# tampered `SelectionState` a caller can hand the CLI went ungated on the other
+# verbs. The three tests below join it here rather than in targets of their own:
+# they are the same gate — every one of them asserts that a state the engine
+# refuses cannot buy an `Ok` envelope or an exit 0 at the SDK-facing seam — and
+# splitting them would let CI report the family green while a member was never
+# run. libtest takes several `--exact` filters, so each name is still matched
+# exactly and a typo drops that test rather than silently widening the set.
 rust_test(
     name = "interpreter_security_tamper_gate_test",
     size = "small",
@@ -169,6 +178,9 @@ rust_test(
     args = [
         "--exact",
         "tests::int_004_selection_tampering_rejected_with_selection_family_code",
+        "tests::interpreter_select_and_options_refuse_a_forged_selection_state_hash",
+        "tests::interpreter_every_verb_refuses_a_choice_on_an_unknown_facet",
+        "tests::interpreter_every_verb_refuses_a_choice_outside_its_facets_domain",
     ],
     compile_data = SCENARIO_COMPILE_DATA,
     edition = "2021",

@@ -88,8 +88,9 @@ if [[ -n "${RUNTIME_RLOCATION:-}" ]]; then
   export CONFIGFLUX_RUNTIME="${RUNTIME_ABS}"
 fi
 
-# Examples 01-03 use `jq` only in their trailing echo suggestions, not in
-# the pipeline itself. Example 04 produces its config with `cfx resolve` (no
-# jq on the produce path) and uses jq only for the runtime-handoff envelope
-# seam and metadata reads, so jq must be on PATH for that test to pass.
+# Examples 01-02 use `jq` only in their trailing echo suggestions, not in
+# the pipeline itself. Examples 03 and 04 produce their config with `cfx
+# resolve` (no jq on the produce path) and use jq only for the runtime-handoff
+# envelope seam, the metadata reads, and — in 03 — reading the refused write's
+# diagnostic back, so jq must be on PATH for those two tests to pass.
 bash "${EXAMPLE_RUN_ABS}"

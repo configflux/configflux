@@ -1,6 +1,6 @@
-# Runtime C ABI (v1.1)
+# Runtime C ABI (v1.3)
 
-Status: Stable (v1.1)
+Status: Stable (v1.3)
 Date: 2026-02-15 (stabilized 2026-07-23)
 
 ## 1. Scope
@@ -53,14 +53,67 @@ distinct threads without coordination.
 
 `session_open` enforces the same `.ccm` solver-model precondition the runtime CLI
 `runtime-open` enforces (ADR-0030 D2): the snapshot's `ccm_ref` must resolve to a usable
-solver model (a loadable artifact with a populated symbol table). When it does not — an
-empty reference, an unloadable artifact, or a symbol-less stub — the open fails closed:
+solver model (a loadable artifact with a populated symbol table) that is bound to the
+snapshot's own `model_hash`. When it does not — an empty reference, an unloadable
+artifact, a symbol-less stub, or an artifact bound to a different model — the open fails
+closed:
 the response JSON carries `status=error` with diagnostic code
 `E_RUNTIME_OPEN_SOLVER_MODEL_UNAVAILABLE`, and **no** session handle is returned
 (`out_handle` stays null). The boundary status (Section 6) is still `Ok` because the call
 itself was well-formed; the refusal is a runtime-domain rejection in the envelope. This
 makes CLI-driven and SDK-driven (C++/ROS2) opens behave identically — there is no open
 path that accepts a snapshot lacking a loadable `.ccm`.
+
+### 4.2 Closed-facet domains on the open payload (since v1.2)
+
+The exported symbols and their C signatures are unchanged from v1.1. Three
+behaviours are new, and the minor is the only channel that advertises them:
+
+1. `session_open` honours an optional `closed_facet_domains` key on the open
+   request JSON — an object of the form `{"<facet>": ["<value>", ...]}` carrying
+   the declared values of every **closed** facet, copied from the resolve
+   result's field of the same name. Open facets are absent rather than flagged.
+   The runtime uses it so a rejection whose explanation mentions a closed facet
+   only negatively still names the constraint that was violated, instead of
+   reporting the model as over-constrained. Omitting the key is valid and
+   preserves v1.1 behaviour exactly; the open still succeeds and the message
+   quality degrades.
+2. `session_snapshot_json` output gains the same key. It is not
+   omitted-when-empty (no snapshot field is), so an unpopulated table appears as
+   `"closed_facet_domains":{}`. A client that parses the snapshot strictly must
+   tolerate it.
+3. A **supplied** table is validated against the bound solver model. If any
+   `{facet}.{value}` pair is absent from that model's symbol table, the open
+   fails closed exactly as the Section 4.1 precondition does: response JSON with
+   `status=error` and diagnostic code `E_RUNTIME_OPEN_FACET_DOMAIN_UNKNOWN`, no
+   session handle, boundary status still `Ok`. This is a new way for an open to
+   fail, which is why the minor moves. The check verifies that each supplied
+   facet and value exists in the bound model; it cannot verify that a facet is
+   closed, because the symbol table carries no cardinality.
+
+The handshake rule is unchanged, so `expected_minor = 0` and `expected_minor = 1`
+clients keep passing against ABI 1.2.
+
+### 4.3 Declared facet bindings (since v1.3)
+
+The exported symbols and their C signatures are unchanged from v1.2. Two
+behaviours are new, and the minor is the only channel that advertises them:
+
+1. `session_snapshot_json` output may carry a `facet` key inside a resolved
+   parameter, naming the facet that parameter is the model's declared runtime
+   handle for. The key is omitted for a parameter that declares no binding, so
+   every payload produced by a model without bindings is byte-identical to
+   v1.2. A client that parses the snapshot strictly must tolerate the key.
+2. Constraint enforcement on the write path follows those DECLARED bindings.
+   A write to a parameter that declares `facet: <name>` is evaluated against
+   the model's constraints for `<name>`; a write to a parameter that merely
+   shares a facet's name is **not** enforced, and keeps its type, limit and
+   lifecycle checks unchanged. Before v1.3 the runtime inferred the facet from
+   the parameter path's last segment, so a same-named parameter was enforced
+   as if it were the facet's handle.
+
+The handshake rule is unchanged, so `expected_minor` 0, 1 and 2 clients keep
+passing against ABI 1.3.
 
 ## 5. Operation Codes
 

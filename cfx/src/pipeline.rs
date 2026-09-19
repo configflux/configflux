@@ -2,36 +2,107 @@
 //
 // The one-shot `cfx resolve` pipeline (ADR-0042 §1/§2).
 //
-// This module composes the SAME `compiler::loader_api` entry points the
-// interpreter's `src/cli_adapter.rs` dispatches to (`open_model`,
-// `initialize_selection_state`, `apply_selection`, `resolve_from_selection`,
-// `export_resolved`) into a single in-process open->select->resolve->export
-// sequence, then writes the exported snapshot to a directory. It reimplements
-// none of the resolution/selection/export semantics (ADR-0042 §2).
+// This module composes the SAME entry points the interpreter's
+// `src/cli_adapter.rs` dispatches to — `compiler::loader_api`'s `open_model`,
+// `initialize_selection_state`, `apply_selection` and `export_resolved`, plus
+// `session_compose::resolve` — into a single in-process
+// open->select->resolve->export sequence, then writes the exported snapshot to
+// a directory. It reimplements none of the resolution/selection/export
+// semantics (ADR-0042 §2).
 //
-// Byte-identical to the interpreter envelope path (ADR-0042 §5): the
-// interpreter routes `select`/`resolve` through `solver_session`, whose only
-// role is to GATE satisfiability — on a satisfiable selection the composed
-// output comes verbatim from `apply_selection`/`resolve_from_selection`. `cfx`
-// calls those same compiler functions directly (no solver/CUDD dependency; it
-// depends on the cudd-free `compiler` default library), so for any satisfiable
-// input the exported snapshot and `resolve_hash` match the interpreter's.
+// `cfx` holds no decision logic: inference and resolve go through
+// `session_compose` (ADR-0057 §D6, configflux-secb.3). `resolve` used to call
+// the compiler's resolve entry point directly, bypassing that seam, on the
+// reasoning that the solver only GATED satisfiability and so added nothing to
+// the bytes. That stopped being true when resolve gained inferred binding: the
+// implication a selection entails is now part of the composed output, and a
+// surface that skipped the seam would default a facet the constraints had
+// already decided — the disagreement between `cfx options` and `cfx resolve`
+// that ADR-0057 §D6 exists to remove.
+//
+// Byte-identity with the interpreter envelope path (ADR-0042 §5) is therefore
+// stronger than before, not weaker: both now reach the SAME
+// `session_compose::resolve`, so they cannot diverge on selection semantics at
+// all. `cfx` still has no direct `//solver` edge — it reaches the solver only
+// through the seam (ADR-0003 §2 amendment) — and still calls the cudd-free
+// `compiler` library directly for the loader-only steps that carry no decision
+// (`open_model`, `initialize_selection_state`, `apply_selection`,
+// `export_resolved`).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use compiler::loader_api::{
-    apply_selection, export_resolved, initialize_selection_state, open_model, resolve_from_selection,
+    apply_selection, export_resolved, initialize_selection_state, open_model,
     ApplySelectionRequest, ExportResolvedRequest, InitializeSelectionStateRequest, ModelHandle,
     OpenModelRequest, ResolveFromSelectionRequest, ResolveResult, SelectionDelta, SelectionState,
     EXPORT_PROFILE_CPP_EARLY_BINDING_V1, E_RESOLVE_CONTEXT_UNSATISFIED, E_SELECTION_CONFLICT,
-    E_SELECTION_UNSATISFIABLE,
+    E_SELECTION_INVALID_OPTION, E_SELECTION_UNSATISFIABLE,
 };
 use compiler::product_api::{DiagnosticsReport, OperationStatus, PRODUCT_SCHEMA_VERSION};
 
-/// Scope used when no `--selection-file` pins one: `all` is the compiler
-/// resolver's whole-model selector (`compiler::resolver::parse_scope_selectors`).
-const DEFAULT_SCOPE: &str = "all";
+use crate::manifest::Cell;
+use crate::render;
+
+/// Scope used when nothing pins one: `all` is the compiler resolver's
+/// whole-model selector (`compiler::resolver::parse_scope_selectors`).
+pub(crate) const DEFAULT_SCOPE: &str = "all";
+
+/// Where one resolution's `(scope, context_tags, base_choices)` triple comes
+/// from (ADR-0059 D2). The three spellings differ ONLY in where those three
+/// values are read; everything downstream — apply, resolve, export, write — is
+/// the same code, which is what makes "the manifest path is the selection-file
+/// path" true by construction rather than by two branches agreeing.
+pub enum CellSource<'a> {
+    /// Neither a manifest nor a selection file: the whole-model default scope,
+    /// with choices coming only from `--select` flags.
+    None,
+    SelectionFile(&'a Path),
+    Manifest(&'a Cell),
+}
+
+impl<'a> CellSource<'a> {
+    /// Promote the optional `--selection-file` into a source.
+    pub fn from_selection_file(path: Option<&'a Path>) -> Self {
+        match path {
+            Some(path) => CellSource::SelectionFile(path),
+            None => CellSource::None,
+        }
+    }
+
+    /// The `(scope, context_tags, base_choices)` this source supplies.
+    fn inputs(
+        &self,
+    ) -> Result<(String, BTreeMap<String, String>, BTreeMap<String, String>), PipelineError> {
+        match self {
+            CellSource::None => Ok((DEFAULT_SCOPE.to_string(), BTreeMap::new(), BTreeMap::new())),
+            CellSource::SelectionFile(path) => {
+                let state = crate::selection_input::read_selection_file(path)?;
+                Ok((state.scope, state.context_tags, state.choices))
+            }
+            CellSource::Manifest(cell) => Ok((
+                cell.scope.clone(),
+                cell.context_tags.clone(),
+                cell.choices.clone(),
+            )),
+        }
+    }
+
+    /// The `<selection>` label for a resolve that pins no explicit choice.
+    ///
+    /// A manifest cell HAS a name for its target, and the reference resolver
+    /// has always used it (`examples/resolve_environment.sh` `selection_label`),
+    /// so a choice-free environment lands on its own name rather than on a
+    /// `default` that every choice-free environment would share. This is the
+    /// single behavioural difference between the manifest and selection-file
+    /// paths (ADR-0059 D2).
+    fn label_fallback(&self) -> &str {
+        match self {
+            CellSource::Manifest(cell) => &cell.environment,
+            _ => DEFAULT_SELECTION_LABEL,
+        }
+    }
+}
 
 /// A `cfx resolve` failure, carrying the exit code the CLI must surface and a
 /// single human line. `code` follows the ADR-0042 §3 contract: `2` for
@@ -43,6 +114,23 @@ pub struct PipelineError {
     /// Whether this is the unsatisfiable (exit `3`) case, so the caller can
     /// print the canonical "run: cfx explain ..." guidance line.
     pub unsatisfiable: bool,
+    /// The originating diagnostic's `(code, message)`, kept SEPARATE from the
+    /// folded `message` line above. `cfx diff`'s `rejections[]` reports the two
+    /// as distinct JSON fields (ADR-0059 M6), and re-splitting the folded line
+    /// on its first `": "` would break on any message containing one. `None`
+    /// for usage/IO failures no compiler diagnostic produced.
+    pub diagnostic: Option<(String, String)>,
+    /// The facet a rejected choice named, set ONLY where the rejection is
+    /// `E_SELECTION_INVALID_OPTION` — the facet IS declared and the value is
+    /// not in its domain — so the caller can point the user at the listing of
+    /// what IS valid (configflux-ineg). `None` on every other path.
+    ///
+    /// Its own field for the same reason `unsatisfiable` is one: which guidance
+    /// line a refusal earns is a property of the refusal, settled where the
+    /// facet is still in hand, not re-derived by the printer. The only other
+    /// source is the id embedded in `message`, and a hint parsed back out of
+    /// diagnostic wording breaks the next time that wording is edited.
+    pub invalid_option_facet: Option<String>,
 }
 
 impl PipelineError {
@@ -51,14 +139,18 @@ impl PipelineError {
             exit_code: crate::EXIT_USAGE,
             message: message.into(),
             unsatisfiable: false,
+            diagnostic: None,
+            invalid_option_facet: None,
         }
     }
 
-    fn unsat(message: impl Into<String>) -> Self {
+    fn unsat(code: &str, detail: &str) -> Self {
         Self {
             exit_code: crate::EXIT_UNSAT,
-            message: message.into(),
+            message: format!("{code}: {detail}"),
             unsatisfiable: true,
+            diagnostic: Some((code.to_string(), detail.to_string())),
+            invalid_option_facet: None,
         }
     }
 }
@@ -101,25 +193,6 @@ pub fn parse_select_pair(raw: &str) -> Result<SelectPair, PipelineError> {
     })
 }
 
-/// Read and parse the `--selection-file` as the existing `SelectionState` JSON
-/// shape (ADR-0042 §3). Only `scope`, `context_tags`, and `choices` are
-/// consumed; the file's `selection_state_hash` is IGNORED and re-derived
-/// canonically by the pipeline, so a hand-written file need not compute it.
-fn read_selection_file(path: &Path) -> Result<SelectionState, PipelineError> {
-    let bytes = std::fs::read(path).map_err(|err| {
-        PipelineError::usage(format!(
-            "unable to read --selection-file '{}' ({err})",
-            path.display()
-        ))
-    })?;
-    serde_json::from_slice::<SelectionState>(&bytes).map_err(|err| {
-        PipelineError::usage(format!(
-            "malformed --selection-file '{}' ({err})",
-            path.display()
-        ))
-    })
-}
-
 /// The first diagnostic code in a failed operation's report, or a generic
 /// fallback. Used to classify a compiler rejection into an exit code.
 fn first_code(diagnostics: &DiagnosticsReport) -> &str {
@@ -146,6 +219,17 @@ fn first_message(diagnostics: &DiagnosticsReport) -> String {
 /// (unknown facet, invalid option, loader/schema faults) is a usage error
 /// (exit `2`).
 ///
+/// One code moved class when `resolve` went through `session_compose`
+/// (configflux-secb.3): `E_RESOLVE_SOLVER_MODEL_UNAVAILABLE`, which the seam
+/// raises when no usable `.ccm` is reachable, is a usage error (exit `2`) and
+/// not the unsatisfiable case — nothing about the SELECTION is wrong, the model
+/// is unreadable. In practice this is unreachable: `compile_model` emits the
+/// `.ccm` sibling unconditionally on every successful compile, so a model
+/// `cfx` can open always has one, which is why `cfx options` has been able to
+/// require it since ADR-0030. Recorded here rather than in a CLI contract doc
+/// because `cfx`'s exit codes are specified by ADR-0042 §3 and by this
+/// function, and there is no separate cfx contract document to note it in.
+///
 /// BOTH branches carry `code: message`. The unsatisfiable branch used to drop
 /// them and let `emit_error` print the "run cfx explain" guidance alone, which
 /// left the user with a verdict and no reason. ADR-0054 §6 makes that
@@ -159,7 +243,7 @@ pub(crate) fn classify(diagnostics: &DiagnosticsReport) -> PipelineError {
         code,
         E_SELECTION_CONFLICT | E_SELECTION_UNSATISFIABLE | E_RESOLVE_CONTEXT_UNSATISFIED
     ) {
-        PipelineError::unsat(format!("{code}: {message}"))
+        PipelineError::unsat(code, &message)
     } else {
         PipelineError::usage(format!("{code}: {message}"))
     }
@@ -168,7 +252,7 @@ pub(crate) fn classify(diagnostics: &DiagnosticsReport) -> PipelineError {
 /// The shared `open -> init -> apply*` prefix that both `cfx resolve` and
 /// `cfx options` compose (ADR-0042 §1/§2). After preparation, `state` is the
 /// canonical `SelectionState` with every `--select`/selection-file choice
-/// applied; `resolve` feeds it to `resolve_from_selection`, `options` queries
+/// applied; `resolve` feeds it to `session_compose::resolve`, `options` queries
 /// `get_selection_options` against it. `context_tags` and `choices` are carried
 /// so `options` can mark which facets are pinned/selected vs open.
 pub struct PreparedSelection {
@@ -200,28 +284,31 @@ pub struct OpenedModel {
 /// caller decides how (fold-all for resolve/options, one-at-a-time for explain).
 pub fn open_and_init(
     model: &Path,
-    selection_file: Option<&Path>,
+    source: &CellSource,
     selects: &[SelectPair],
 ) -> Result<OpenedModel, PipelineError> {
-    // --- selection-file (scope + context_tags + base choices) --------------
-    let (scope, context_tags, base_choices) = match selection_file {
-        Some(path) => {
-            let state = read_selection_file(path)?;
-            (state.scope, state.context_tags, state.choices)
-        }
-        None => (DEFAULT_SCOPE.to_string(), BTreeMap::new(), BTreeMap::new()),
-    };
+    let handle = open(model)?;
+    let (scope, context_tags, choices) = cell_inputs(source, selects)?;
+    let base_state = init_state(&handle, &scope, &context_tags)?;
+    Ok(OpenedModel {
+        handle,
+        scope,
+        context_tags,
+        choices,
+        base_state,
+    })
+}
 
-    // Final choice set: file choices first, then --select flags override
-    // (ADR-0042 §2). A merged map means no facet is applied twice, so an
-    // override never self-conflicts; iteration is BTreeMap-sorted for
-    // determinism.
-    let mut choices: BTreeMap<String, String> = base_choices;
-    for pair in selects {
-        choices.insert(pair.facet.clone(), pair.option.clone());
-    }
-
-    // --- open --------------------------------------------------------------
+/// Open a compiled model and return its handle, which carries the `model_hash`.
+///
+/// Split out of `open_and_init` (configflux-dkmm.5) because `cfx diff` opens
+/// each side ONCE and resolves every cell against that one handle. Two things
+/// follow from that and neither is an optimization: the report's
+/// `base_model_hash`/`head_model_hash` exist even when every cell is rejected,
+/// and an unreadable package is a usage error raised before any cell is
+/// attempted rather than as a side effect of whichever cell happened to run
+/// first.
+pub fn open(model: &Path) -> Result<ModelHandle, PipelineError> {
     let opened = open_model(OpenModelRequest {
         schema_version: PRODUCT_SCHEMA_VERSION,
         cmp_manifest_ref: model.to_string_lossy().into_owned(),
@@ -233,31 +320,113 @@ pub fn open_and_init(
             first_message(&opened.diagnostics)
         )));
     }
-    let handle: ModelHandle = opened
+    opened
         .model_handle
-        .ok_or_else(|| PipelineError::usage("open returned no model handle"))?;
+        .ok_or_else(|| PipelineError::usage("open returned no model handle"))
+}
 
-    // --- init selection state ---------------------------------------------
+/// The `(scope, context_tags, choices)` one cell resolves with.
+///
+/// Final choice set: source choices first, then `--select` flags override
+/// (ADR-0042 §2). A merged map means no facet is applied twice, so an override
+/// never self-conflicts; iteration is `BTreeMap`-sorted for determinism.
+#[allow(clippy::type_complexity)]
+fn cell_inputs(
+    source: &CellSource,
+    selects: &[SelectPair],
+) -> Result<(String, BTreeMap<String, String>, BTreeMap<String, String>), PipelineError> {
+    let (scope, context_tags, base_choices) = source.inputs()?;
+    let mut choices: BTreeMap<String, String> = base_choices;
+    for pair in selects {
+        choices.insert(pair.facet.clone(), pair.option.clone());
+    }
+    Ok((scope, context_tags, choices))
+}
+
+/// `initialize_selection_state` for one `(scope, context_tags)` — the base
+/// state, with no choice applied yet.
+fn init_state(
+    handle: &ModelHandle,
+    scope: &str,
+    context_tags: &BTreeMap<String, String>,
+) -> Result<SelectionState, PipelineError> {
     let init = initialize_selection_state(InitializeSelectionStateRequest {
         schema_version: PRODUCT_SCHEMA_VERSION,
         model_handle: handle.clone(),
-        scope: scope.clone(),
+        scope: scope.to_string(),
         context_tags: context_tags.clone(),
     });
     if init.status != OperationStatus::Ok {
         return Err(classify(&init.diagnostics));
     }
-    let base_state: SelectionState = init
-        .selection_state
-        .ok_or_else(|| PipelineError::usage("init-selection-state returned no state"))?;
+    init.selection_state
+        .ok_or_else(|| PipelineError::usage("init-selection-state returned no state"))
+}
 
-    Ok(OpenedModel {
-        handle,
+/// Fold every choice onto a base state with `apply_selection`.
+fn apply_all(
+    handle: &ModelHandle,
+    scope: &str,
+    mut state: SelectionState,
+    choices: &BTreeMap<String, String>,
+) -> Result<SelectionState, PipelineError> {
+    for (facet, option) in choices {
+        let applied = apply_selection(ApplySelectionRequest {
+            schema_version: PRODUCT_SCHEMA_VERSION,
+            model_handle: handle.clone(),
+            scope: scope.to_string(),
+            selection_state: state.clone(),
+            selection_delta: SelectionDelta {
+                facet: facet.clone(),
+                option: option.clone(),
+            },
+        });
+        if applied.status != OperationStatus::Ok {
+            let mut err = classify(&applied.diagnostics);
+            // This loop is the ONE place the refused facet is still in hand:
+            // `classify` is handed diagnostics and nothing else, and past it the
+            // id survives only inside the message text (configflux-ineg).
+            if first_code(&applied.diagnostics) == E_SELECTION_INVALID_OPTION {
+                err.invalid_option_facet = Some(facet.clone());
+            }
+            return Err(err);
+        }
+        state = applied
+            .selection_state
+            .ok_or_else(|| PipelineError::usage("apply-selection returned no state"))?;
+    }
+    Ok(state)
+}
+
+/// Resolve ONE cell against an ALREADY-OPEN model and return the result —
+/// writing nothing (ADR-0059 D4).
+///
+/// This is `run_cell` without its export-and-write tail. `cfx diff` compares
+/// two resolutions in memory: it must create no file at all, so it must not
+/// reach `export_resolved`, and it needs the `ResolveResult` itself rather than
+/// the lineage summary a write produces. The `init -> apply* -> resolve`
+/// sequence is the SAME composition `prepare`/`run_cell` use, through the same
+/// three helpers, so the two paths cannot drift on selection semantics.
+pub fn resolve_only(
+    handle: &ModelHandle,
+    source: &CellSource,
+    selects: &[SelectPair],
+) -> Result<ResolveResult, PipelineError> {
+    let (scope, context_tags, choices) = cell_inputs(source, selects)?;
+    let base_state = init_state(handle, &scope, &context_tags)?;
+    let state = apply_all(handle, &scope, base_state, &choices)?;
+
+    let resolved = session_compose::resolve(ResolveFromSelectionRequest {
+        schema_version: PRODUCT_SCHEMA_VERSION,
+        model_handle: handle.clone(),
         scope,
-        context_tags,
-        choices,
-        base_state,
-    })
+        selection_state: state,
+        implied_choices: Default::default(),
+    });
+    if resolved.status != OperationStatus::Ok {
+        return Err(classify(&resolved.diagnostics));
+    }
+    Ok(resolved)
 }
 
 /// Compose the `open -> init -> apply*` prefix shared by `cfx resolve` and
@@ -268,7 +437,7 @@ pub fn open_and_init(
 /// semantics.
 pub fn prepare(
     model: &Path,
-    selection_file: Option<&Path>,
+    source: &CellSource,
     selects: &[SelectPair],
 ) -> Result<PreparedSelection, PipelineError> {
     let OpenedModel {
@@ -277,28 +446,10 @@ pub fn prepare(
         context_tags,
         choices,
         base_state,
-    } = open_and_init(model, selection_file, selects)?;
+    } = open_and_init(model, source, selects)?;
 
     // --- apply each choice -------------------------------------------------
-    let mut state = base_state;
-    for (facet, option) in &choices {
-        let applied = apply_selection(ApplySelectionRequest {
-            schema_version: PRODUCT_SCHEMA_VERSION,
-            model_handle: handle.clone(),
-            scope: scope.clone(),
-            selection_state: state.clone(),
-            selection_delta: SelectionDelta {
-                facet: facet.clone(),
-                option: option.clone(),
-            },
-        });
-        if applied.status != OperationStatus::Ok {
-            return Err(classify(&applied.diagnostics));
-        }
-        state = applied
-            .selection_state
-            .ok_or_else(|| PipelineError::usage("apply-selection returned no state"))?;
-    }
+    let state = apply_all(&handle, &scope, base_state, &choices)?;
 
     Ok(PreparedSelection {
         handle,
@@ -309,27 +460,100 @@ pub fn prepare(
     })
 }
 
+/// The `<selection>` label used when a resolve pins no explicit choice. `cfx`
+/// has no environment name to fall back on (the reference resolver does, and
+/// keeps using it), so the choice-free target is simply `default`.
+const DEFAULT_SELECTION_LABEL: &str = "default";
+
+/// Restrict a name component to the file-safe token set the snapshot naming
+/// convention uses (`docs/service-integration-guide.md` §The deployment bundle,
+/// and `examples/resolve_environment.sh`): every character outside
+/// `[A-Za-z0-9._-]` becomes `_`.
+fn sanitize(raw: &str) -> String {
+    raw.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// The `<root>` component of a snapshot name and of a matrix cell directory:
+/// the scope root. `all` for the whole-model scope, the component name for
+/// `component:<name>`, otherwise the whole scope string sanitized. One
+/// definition, two callers, matching `examples/resolve_environment.sh`'s
+/// `scope_root` — the reference script is the layout oracle (ADR-0059 M1).
+pub(crate) fn scope_root(scope: &str) -> String {
+    if scope == DEFAULT_SCOPE {
+        DEFAULT_SCOPE.to_string()
+    } else if let Some(component) = scope.strip_prefix("component:") {
+        sanitize(component)
+    } else {
+        sanitize(scope)
+    }
+}
+
+/// The snapshot file name for a resolve: `resolve_result.<root>.<selection>.json`
+/// (configflux-dkmm.1, ADR-0042 amendment).
+///
+/// `<root>` is the scope root — `all` for the whole-model scope, the component
+/// name for `component:<name>`, otherwise the whole scope string sanitized.
+/// `<selection>` is the EXPLICIT choices (never the auto-bound
+/// `defaulted_choices`, which are provenance, not identity) in sorted-facet
+/// order, values joined with `-`; a choice-free resolve uses `label_fallback`.
+///
+/// Pure and total: the result is always a single path component from the safe
+/// token set, so it can never escape `--out`, and it never ends in `_` (the
+/// artifact the reference script's `echo | tr` produced by sanitizing a
+/// trailing newline).
+fn snapshot_file_name(
+    scope: &str,
+    choices: &BTreeMap<String, String>,
+    label_fallback: &str,
+) -> String {
+    let root = scope_root(scope);
+    let selection = if choices.is_empty() {
+        sanitize(label_fallback)
+    } else {
+        // BTreeMap iteration is sorted by facet, so the label is deterministic.
+        sanitize(
+            &choices
+                .values()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join("-"),
+        )
+    };
+    format!("resolve_result.{root}.{selection}.json")
+}
+
 /// Run the whole `open -> init -> apply* -> resolve -> export -> write`
-/// pipeline for `cfx resolve`.
-pub fn run(
+/// pipeline for ONE cell — which is what every `cfx resolve` is: a
+/// selection-file cell, a flags-only cell, or one manifest cell of a matrix.
+pub fn run_cell(
     model: &Path,
-    selection_file: Option<&Path>,
+    source: &CellSource,
     selects: &[SelectPair],
     out_dir: &Path,
 ) -> Result<ResolveOutcome, PipelineError> {
     let PreparedSelection {
         handle,
         scope,
+        choices,
         state,
         ..
-    } = prepare(model, selection_file, selects)?;
+    } = prepare(model, source, selects)?;
 
     // --- resolve -----------------------------------------------------------
-    let resolved = resolve_from_selection(ResolveFromSelectionRequest {
+    let resolved = session_compose::resolve(ResolveFromSelectionRequest {
         schema_version: PRODUCT_SCHEMA_VERSION,
         model_handle: handle.clone(),
         scope: scope.clone(),
         selection_state: state.clone(),
+        implied_choices: Default::default(),
     });
     if resolved.status != OperationStatus::Ok {
         return Err(classify(&resolved.diagnostics));
@@ -376,6 +600,37 @@ pub fn run(
         })?;
         written.push(file.path.clone());
     }
+
+    // --- write the resolved snapshot itself --------------------------------
+    // The `ResolveResult` envelope is what a Pattern 1 service reads at
+    // startup; before configflux-dkmm.1 it existed only on `--format json`
+    // stdout, so every integrator redirected it into a file by hand. Written
+    // through the SAME `render::snapshot_bytes` `--format json` uses, so the
+    // file is byte-identical to that stdout — and therefore to the interpreter
+    // `resolve` response — by construction. It lands only after resolve AND
+    // export have succeeded, so a rejected selection still writes nothing
+    // (the exit-3 no-partial-output contract, ADR-0042 §3).
+    let snapshot_name = snapshot_file_name(&scope, &choices, source.label_fallback());
+    let snapshot_path = safe_join(out_dir, &snapshot_name)?;
+    if let Some(parent) = snapshot_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| {
+            PipelineError::usage(format!(
+                "unable to create output directory '{}' ({err})",
+                parent.display()
+            ))
+        })?;
+    }
+    let snapshot = render::snapshot_bytes(&resolved).map_err(|err| {
+        PipelineError::usage(format!("unable to serialize the resolved snapshot ({err})"))
+    })?;
+    std::fs::write(&snapshot_path, &snapshot).map_err(|err| {
+        PipelineError::usage(format!(
+            "unable to write '{}' ({err})",
+            snapshot_path.display()
+        ))
+    })?;
+    written.push(snapshot_name);
+
     // Sorted relative paths — deterministic `wrote:` lineage (ADR-0042 §3).
     written.sort();
 
@@ -386,6 +641,59 @@ pub fn run(
         resolve_result: resolved,
         written,
     })
+}
+
+/// One cell's place in a matrix run: where it wrote (relative to `--out`) and
+/// what happened. `result` is `Err` only for the exit-`3` unsatisfiable class —
+/// a usage/IO failure aborts the whole run and never becomes a cell status.
+pub struct CellOutcome {
+    pub environment: String,
+    pub scope: String,
+    /// `<environment>/<root>` — the directory this cell wrote under, relative
+    /// to `--out`. The renderer prefixes the `wrote:` lineage with it so every
+    /// printed path can be copied straight out of stdout.
+    pub prefix: String,
+    pub result: Result<ResolveOutcome, PipelineError>,
+}
+
+/// Resolve every cell of a matrix into `<out>/<environment>/<root>/` — the
+/// layout `examples/resolve_environment.sh --matrix` writes (ADR-0059 D2/M1).
+///
+/// EVERY cell is attempted. A cell rejected as unsatisfiable is recorded and
+/// the loop continues, because "which of my targets broke" is the question the
+/// matrix exists to answer and stopping at the first one refuses to answer it;
+/// a rejected cell writes nothing, since `run_cell` creates no directory until
+/// resolve AND export have both succeeded. A usage/IO-class failure is a
+/// different animal — the model is unreadable or the disk is full, so every
+/// remaining cell would fail the same way — and aborts immediately with the
+/// error, per ADR-0059 D2. The split is `classify()`'s and is not restated here.
+///
+/// Cell directories are safe by construction: `environment` was validated
+/// against `[A-Za-z0-9._-]+` at manifest load and `scope_root` sanitizes to the
+/// same set, so neither can escape `out_dir`.
+pub fn run_cells(
+    model: &Path,
+    cells: &[Cell],
+    selects: &[SelectPair],
+    out_dir: &Path,
+) -> Result<Vec<CellOutcome>, PipelineError> {
+    let mut outcomes = Vec::with_capacity(cells.len());
+    for cell in cells {
+        let root = scope_root(&cell.scope);
+        let cell_out = out_dir.join(&cell.environment).join(&root);
+        let result = match run_cell(model, &CellSource::Manifest(cell), selects, &cell_out) {
+            Ok(outcome) => Ok(outcome),
+            Err(err) if err.unsatisfiable => Err(err),
+            Err(err) => return Err(err),
+        };
+        outcomes.push(CellOutcome {
+            environment: cell.environment.clone(),
+            scope: cell.scope.clone(),
+            prefix: format!("{}/{root}", cell.environment),
+            result,
+        });
+    }
+    Ok(outcomes)
 }
 
 /// Join an artifact's declared relative path under `out_dir`, rejecting any
@@ -408,6 +716,30 @@ fn safe_join(out_dir: &Path, rel: &str) -> Result<PathBuf, PipelineError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapshot_file_name_sanitizes() {
+        assert_eq!(
+            snapshot_file_name("component:thermal_control", &BTreeMap::new(), "default"),
+            "resolve_result.thermal_control.default.json"
+        );
+        let mut choices = BTreeMap::new();
+        choices.insert("a".to_string(), "1.0".to_string());
+        choices.insert("b".to_string(), "x y".to_string());
+        assert_eq!(
+            snapshot_file_name("all", &choices, "default"),
+            "resolve_result.all.1.0-x_y.json"
+        );
+        assert_eq!(
+            snapshot_file_name("platform:all", &BTreeMap::new(), "default"),
+            "resolve_result.platform_all.default.json"
+        );
+        // ADR-0059 D2: a manifest cell falls back to its environment name.
+        assert_eq!(
+            snapshot_file_name("component:webapp", &BTreeMap::new(), "robot-alpha"),
+            "resolve_result.webapp.robot-alpha.json"
+        );
+    }
 
     #[test]
     fn parse_select_pair_accepts_facet_option() {

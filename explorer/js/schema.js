@@ -14,7 +14,7 @@
 // the bump itself — there is no constant to keep in lockstep on the Python side.
 
 /** Product schema versions this build of the explorer can render. */
-export const SUPPORTED_VERSIONS = Object.freeze([4]);
+export const SUPPORTED_VERSIONS = Object.freeze([5]);
 
 /** Stable, human-facing labels for each artifact kind. */
 export const KIND = Object.freeze({

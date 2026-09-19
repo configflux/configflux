@@ -1,6 +1,7 @@
 {
   "scope": "component:climate_controller",
-  "resolve_hash": "7e64ccbe2640a22b6b1677a2aacd19ed321967f4b20e6f8877241313a5b7c92b",
+  "resolve_hash": "f78d322140dabfc22a925b764362b5f0110665e1b2956782a06d2c878151fb47",
+  "resolved_output_hash": "e180e4de82e02c392cb50578e949e5a932ba48d033987bf5bf55f22254d68e9f",
   "resolved_output": {
     "climate_controller": {
       "components": {

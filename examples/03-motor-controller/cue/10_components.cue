@@ -103,6 +103,18 @@ chunk: #Config & {
 						},
 					]
 				}
+				// The runtime HANDLE of the encoder_type facet: the `facet` line
+				// is what makes this parameter that facet, so a runtime write to
+				// it is a facet selection the model's constraints govern. It
+				// declares no `value` — the facet's resolved value is the
+				// parameter's value.
+				encoder_mode: {
+					type:      "string"
+					facet:     "encoder_type"
+					lifecycle: "runtime"
+					access:    "technician"
+					doc:       "Encoder feedback mode; the runtime handle of the encoder_type facet"
+				}
 			}
 		}
 		motion_controller: {

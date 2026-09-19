@@ -27,7 +27,7 @@ pub fn runtime_open(request: RuntimeOpenRequest) -> RuntimeOpenResult {
             vec![Diagnostic {
                 code: E_RUNTIME_OPEN_INVALID.to_string(),
                 severity: DiagnosticSeverity::Error,
-                message: "runtime_open_request.model_hash must be a 64-char sha256 hex string"
+                message: "runtime_open_request.model_hash must be a 64-char lowercase sha256 hex string"
                     .to_string(),
                 source_id: None,
                 entity_path: Some("request.model_hash".to_string()),
@@ -43,7 +43,7 @@ pub fn runtime_open(request: RuntimeOpenRequest) -> RuntimeOpenResult {
             vec![Diagnostic {
                 code: E_RUNTIME_OPEN_INVALID.to_string(),
                 severity: DiagnosticSeverity::Error,
-                message: "runtime_open_request.resolve_hash must be a 64-char sha256 hex string"
+                message: "runtime_open_request.resolve_hash must be a 64-char lowercase sha256 hex string"
                     .to_string(),
                 source_id: None,
                 entity_path: Some("request.resolve_hash".to_string()),
@@ -128,64 +128,90 @@ pub fn runtime_open(request: RuntimeOpenRequest) -> RuntimeOpenResult {
         return runtime_open_failed(model_hash, resolve_hash, scope, vec![diagnostic]);
     }
 
-    // ADR-0047 §5 lockstep: also cross-validate when only `defaulted_choices` is
-    // non-empty (an empty-selection resolve that auto-bound a declared default).
-    // Extending the guard fails closed on a tampered `defaulted_choices` even
-    // with empty context_tags/choices; a facet-free open (all three empty) keeps
-    // the pre-ADR fast path.
-    if !request.context_tags.is_empty()
-        || !request.choices.is_empty()
-        || !request.defaulted_choices.is_empty()
-    {
-        match compute_resolve_hash(
-            &request.model_hash,
-            &request.scope,
-            &request.context_tags,
-            &request.choices,
-            &request.resolved_output,
-            &request.defaulted_choices,
-        ) {
-            Ok(computed_hash) if computed_hash != request.resolve_hash => {
-                return runtime_open_failed(
-                    model_hash,
-                    resolve_hash,
-                    scope,
-                    vec![Diagnostic {
-                        code: E_RUNTIME_HASH_MISMATCH.to_string(),
-                        severity: DiagnosticSeverity::Error,
-                        message: format!(
-                            "resolve_hash mismatch (expected '{}', got '{}')",
-                            computed_hash, request.resolve_hash
-                        ),
-                        source_id: None,
-                        entity_path: Some("request.resolve_hash".to_string()),
-                        hint: Some(
-                            "Pass context_tags/choices from resolve_result or use matching resolve_hash"
-                                .to_string(),
-                        ),
-                    }],
-                );
-            }
-            Ok(_) => {}
-            Err(err) => {
-                return runtime_open_failed(
-                    model_hash,
-                    resolve_hash,
-                    scope,
-                    vec![Diagnostic {
-                        code: E_RUNTIME_OPEN_INVALID.to_string(),
-                        severity: DiagnosticSeverity::Error,
-                        message: format!(
-                            "Failed to canonicalize resolve hash for runtime_open: {err}"
-                        ),
-                        source_id: None,
-                        entity_path: Some("request.resolve_hash".to_string()),
-                        hint: Some(
-                            "Use deterministic resolve payloads for runtime handoff".to_string(),
-                        ),
-                    }],
-                );
-            }
+    // Cross-validation is UNCONDITIONAL (configflux-zr6m). It used to run only
+    // when at least one of the four provenance maps was non-empty, which left
+    // the all-empty snapshot unchecked: `request.resolve_hash` was never
+    // recomputed, so a caller could bind a pre-existing legitimate hash to a
+    // DIFFERENT `resolved_output` simply by stripping every map. That is
+    // provenance FORGERY rather than privilege escalation — the recompute is
+    // keyless over a public recipe, so it was never an authenticity check — but
+    // `resolve_hash` is consumed downstream as an identity token, so a snapshot
+    // that opens carrying a hash it cannot account for is exactly the thing
+    // this guard exists to refuse. A snapshot with genuine `implied_choices`
+    // could be DOWNGRADED the same way, by zeroing all four maps at once.
+    //
+    // Recomputing over all-empty provenance is safe, and that is the whole
+    // reason the fast path could go: the recipe skip-serializes
+    // `defaulted_choices` and `implied_choices` when empty (ADR-0047 §5,
+    // ADR-0057 §D6 — the rule that keeps facet-free models byte-identical to
+    // their pre-feature pre-image), the loader proves its inner selection_state
+    // schema_version/model_hash/scope equal the outer ones this side substitutes
+    // (`validate_selection_state`), and `resolved_output` is canonicalized on
+    // the way in through an idempotent pass. So a legitimate provenance-free
+    // snapshot reproduces its own hash exactly. The cost is one SHA-256 over the
+    // resolved output.
+    //
+    // configflux-y2ai: the pre-image and the hashing now live in ONE place
+    // (`crate::resolve_hash`), reached from here through the local
+    // `compute_resolve_hash` adapter and from the loader through its own. What
+    // this check establishes is unchanged and was always the real property: the
+    // caller forwarded the same six inputs the loader hashed. It no longer also
+    // depends on two transcribed copies of the recipe having stayed identical.
+    match compute_resolve_hash(
+        &request.model_hash,
+        &request.scope,
+        &request.context_tags,
+        &request.choices,
+        &request.resolved_output,
+        &request.defaulted_choices,
+        &request.implied_choices,
+    ) {
+        Ok(computed_hash) if computed_hash != request.resolve_hash => {
+            return runtime_open_failed(
+                model_hash,
+                resolve_hash,
+                scope,
+                vec![Diagnostic {
+                    code: E_RUNTIME_HASH_MISMATCH.to_string(),
+                    severity: DiagnosticSeverity::Error,
+                    message: format!(
+                        "resolve_hash mismatch (expected '{}', got '{}')",
+                        computed_hash, request.resolve_hash
+                    ),
+                    source_id: None,
+                    entity_path: Some("request.resolve_hash".to_string()),
+                    // Built from the ONE list that also defines the pre-image,
+                    // so the remediation can never again name a narrower set
+                    // than the hash actually covers — the drift
+                    // configflux-j2jj records, where this hint kept naming only
+                    // context_tags and choices after ADR-0047 §5 had added
+                    // defaulted_choices to the recipe. The const moved next to
+                    // the pre-image in configflux-y2ai; its VALUE is unchanged,
+                    // so this hint's text is byte-identical to what it was.
+                    hint: Some(format!(
+                        "Pass {} from resolve_result unmodified, or use a matching resolve_hash",
+                        crate::resolve_hash::RESOLVE_HASH_SELECTION_FIELDS
+                    )),
+                }],
+            );
+        }
+        Ok(_) => {}
+        Err(err) => {
+            return runtime_open_failed(
+                model_hash,
+                resolve_hash,
+                scope,
+                vec![Diagnostic {
+                    code: E_RUNTIME_OPEN_INVALID.to_string(),
+                    severity: DiagnosticSeverity::Error,
+                    message: format!("Failed to canonicalize resolve hash for runtime_open: {err}"),
+                    source_id: None,
+                    entity_path: Some("request.resolve_hash".to_string()),
+                    hint: Some(
+                        "Use deterministic resolve payloads for runtime handoff".to_string(),
+                    ),
+                }],
+            );
         }
     }
 
@@ -201,6 +227,12 @@ pub fn runtime_open(request: RuntimeOpenRequest) -> RuntimeOpenResult {
         scope: request.scope,
         context_tags: request.context_tags,
         choices: request.choices,
+        // ADR-0060 D3: copied VERBATIM, with no derivation and no fabrication —
+        // exactly as `ccm_ref` is. The runtime never guesses a domain from the
+        // symbol table and never infers closed-ness; validation of a SUPPLIED
+        // table is D6's and lives in the runtime crate, because the compiler may
+        // not import `solver` (ADR-0003 §2).
+        closed_facet_domains: request.closed_facet_domains,
         resolved_output,
         resolved_component_dependencies: request.resolved_component_dependencies,
         resolved_artifacts: request.resolved_artifacts,
@@ -267,6 +299,44 @@ pub fn runtime_open(request: RuntimeOpenRequest) -> RuntimeOpenResult {
         diagnostics_ref: None,
         diagnostics,
     }
+}
+
+/// The `resolve_hash` [`runtime_open`] will recompute for `request`, i.e. the
+/// only value its cross-validation accepts.
+///
+/// Exists because that cross-validation became unconditional (configflux-zr6m):
+/// a caller that ASSEMBLES a `RuntimeOpenRequest` rather than forwarding one
+/// the loader produced can no longer present an arbitrary hash, and the recipe
+/// it must satisfy is crate-private. Exposing it concedes nothing — the recipe
+/// is keyless and public (ADR-0047 §5, ADR-0057 §D6), so the check is a
+/// consistency check and never an authenticity one, and anyone able to call this
+/// could already reimplement it from the ADRs.
+///
+/// It is deliberately NOT a way to make a mismatched payload open: the hash it
+/// returns is a function of the payload, so a caller that substitutes the
+/// resolved output gets a different hash rather than a free pass. The honest
+/// use is the reverse — assemble the request, then stamp the hash it earns.
+///
+/// Callers holding a real `ResolveResult` should keep forwarding
+/// `resolve_result.resolve_hash` unmodified. Going through this function instead
+/// would recompute what the loader already computed and, worse, would make the
+/// open's check vacuous for that caller: the hash would be derived from the very
+/// payload it is supposed to vouch for, so a payload edited after the resolve
+/// would sail through. Forwarding the loader's hash is what makes the check able
+/// to say anything at all.
+///
+/// `Err` only where the payload cannot be canonically serialized, the same
+/// condition that raises `E_RUNTIME_OPEN_INVALID` inside the open.
+pub fn expected_resolve_hash(request: &RuntimeOpenRequest) -> Result<String> {
+    compute_resolve_hash(
+        &request.model_hash,
+        &request.scope,
+        &request.context_tags,
+        &request.choices,
+        &request.resolved_output,
+        &request.defaulted_choices,
+        &request.implied_choices,
+    )
 }
 
 pub fn get_scope_metadata(request: GetScopeMetadataRequest) -> GetScopeMetadataResult {

@@ -7,11 +7,11 @@ use compiler::loader_api::{
     SelectionDelta, SelectionState, SoftwareBomV1, UnsatCore, EXPORT_PROFILE_CPP_EARLY_BINDING_V1,
     EXPORT_SOFTWARE_BOM_PROFILE_FULL_AUDIT, E_EXPORT_PROFILE_INVALID, E_LOADER_INDEX_INVALID,
     E_RESOLVE_CONTEXT_UNSATISFIED, E_RESOLVE_SOLVER_MODEL_UNAVAILABLE, E_SBOM_PROFILE_INVALID,
-    E_SELECTION_CONFLICT, E_SELECTION_SOLVER_MODEL_UNAVAILABLE, E_SELECTION_STATE_INVALID,
-    E_SELECTION_UNSATISFIABLE,
+    E_SELECTION_CONFLICT, E_SELECTION_INVALID_OPTION, E_SELECTION_SOLVER_MODEL_UNAVAILABLE,
+    E_SELECTION_STATE_INVALID, E_SELECTION_UNKNOWN_FACET, E_SELECTION_UNSATISFIABLE,
 };
 use compiler::product_api::{
-    compile_model, CompileModelRequest, DiagnosticSeverity, SourceManifestEntry,
+    compile_model, CompileModelRequest, DiagnosticSeverity, DiagnosticsReport, SourceManifestEntry,
     PRODUCT_SCHEMA_VERSION,
 };
 use serde::de::DeserializeOwned;
@@ -425,6 +425,7 @@ fn resolve_ok_for_scope(
         model_handle: handle.clone(),
         scope: scope.to_string(),
         selection_state,
+        implied_choices: Default::default(),
     };
     let (output, response): (RunOutput, ResolveResult) = run_json_command(&["resolve"], &request);
     assert_eq!(output.exit_code, EXIT_OK);
@@ -470,6 +471,43 @@ fn set_mode(path: &Path, mode: u32) {
     let mut perms = std::fs::metadata(path).expect("metadata").permissions();
     perms.set_mode(mode);
     std::fs::set_permissions(path, perms).expect("set permissions");
+}
+
+#[cfg(unix)]
+fn make_fifo(path: &Path) {
+    let status = std::process::Command::new("mkfifo")
+        .arg(path)
+        .status()
+        .expect("spawn mkfifo");
+    assert!(status.success(), "mkfifo exited with {status}");
+}
+
+/// Feed `len` bytes into `path` once something opens the read end.
+///
+/// The thread blocks in `open(2)` until a reader arrives, so a caller asserting
+/// that the transport refuses the FIFO WITHOUT reading it has to release the
+/// writer with `drain_fifo` before joining. That asymmetry is the point: a
+/// transport that reads the stream unblocks the writer by itself.
+#[cfg(unix)]
+fn spawn_fifo_writer(path: &Path, len: usize) -> std::thread::JoinHandle<()> {
+    let path = path.to_path_buf();
+    std::thread::spawn(move || {
+        let mut fifo = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("open fifo for writing");
+        // A reader that walks away mid-stream is not a failure of this writer.
+        let _ = fifo.write_all(&vec![b'a'; len]);
+    })
+}
+
+#[cfg(unix)]
+fn drain_fifo(path: &Path) {
+    let mut sink = Vec::new();
+    std::fs::File::open(path)
+        .expect("open fifo for reading")
+        .read_to_end(&mut sink)
+        .expect("drain fifo");
 }
 
 fn deterministic_noise_payload(seed: u64, len: usize) -> Vec<u8> {
@@ -666,6 +704,7 @@ fn run_full_chain_for_fixture(fixture: &InterpreterFixture) {
         model_handle: handle,
         scope: fixture.scope.to_string(),
         selection_state,
+        implied_choices: Default::default(),
     };
     let resolve_response: ResolveResult = assert_command_determinism_and_file_mode(
         "resolve",
@@ -780,6 +819,22 @@ fn int_001_happy_path_e2e_chain() {
 
     let resolve_result = resolve_ok(&handle, selection_state);
     let resolve_hash = resolve_result.resolve_hash.clone().expect("resolve hash");
+    // ADR-0059 D3: the `resolve` response carries the payload identity beside
+    // the resolution identity. It reaches the interpreter for free — same
+    // shared struct — so what INT-001 pins is that the CLI response actually
+    // serializes it, and that the two hashes are genuinely distinct values
+    // rather than one pre-image computed twice. `cfx` printing the same value
+    // for the same target is asserted across both front ends by
+    // cfx/tests/cfx_resolve_differential.py.
+    let resolved_output_hash = resolve_result
+        .resolved_output_hash
+        .clone()
+        .expect("resolve response must carry resolved_output_hash");
+    assert_eq!(resolved_output_hash.len(), 64, "sha256 hex");
+    assert_ne!(
+        resolved_output_hash, resolve_hash,
+        "the payload identity must not be the resolution identity"
+    );
 
     let export_request = ExportResolvedRequest {
         schema_version: PRODUCT_SCHEMA_VERSION,
@@ -893,6 +948,7 @@ fn int_005_resolve_integrity_failure_uses_resolve_family_code() {
         model_handle: handle.clone(),
         scope: S1_SCOPE.to_string(),
         selection_state: s1_empty_selection_state(&handle.model_hash),
+        implied_choices: Default::default(),
     };
     let (output, response): (RunOutput, ResolveResult) = run_json_command(&["resolve"], &request);
 
@@ -949,6 +1005,7 @@ fn int_007_determinism_replay_returns_byte_identical_json() {
         model_handle: handle.clone(),
         scope: S1_SCOPE.to_string(),
         selection_state: s1_full_selection_state(&handle.model_hash),
+        implied_choices: Default::default(),
     };
     let payload = serde_json::to_vec(&request).expect("serialize request");
 
@@ -1043,6 +1100,7 @@ fn fixture_pack_includes_s3_happy_path() {
         model_handle: handle.clone(),
         scope: S3_SCOPE.to_string(),
         selection_state: s3_full_selection_state(&handle.model_hash),
+        implied_choices: Default::default(),
     };
     let (output, response): (RunOutput, ResolveResult) = run_json_command(&["resolve"], &request);
     assert_eq!(output.exit_code, EXIT_OK);
@@ -1111,6 +1169,68 @@ fn int_012_transport_request_file_negative_matrix_is_deterministic() {
         assert_eq!(denied_first.stderr, denied_second.stderr);
         assert_transport_failure(&denied_first, E_INTERPRETER_CLI_REQUEST_IO);
         assert!(denied_first.stderr.contains("permission_denied"));
+    }
+
+    #[cfg(unix)]
+    {
+        // configflux-mtmi. Neither size check can refuse a path whose `stat()`
+        // size understates what a read returns -- a directory reports a small
+        // size and a FIFO reports none at all -- so the transport refuses
+        // anything that is not a regular file before it opens it. Only a
+        // regular file's recorded size bounds what the read will deliver.
+        let directory_path = io_dir.path.join("request-directory");
+        std::fs::create_dir_all(&directory_path).expect("create request directory");
+        let directory_first = run_open_with_request_file(&directory_path);
+        let directory_second = run_open_with_request_file(&directory_path);
+        assert_eq!(directory_first.stderr, directory_second.stderr);
+        assert_transport_failure(&directory_first, E_INTERPRETER_CLI_REQUEST_IO);
+        assert!(directory_first.stderr.contains("not a regular file"));
+
+        // The FIFO carries more than the bound accepts. Refusing it from its
+        // file type means none of that stream is ever buffered. The assertions
+        // run BEFORE the drain deliberately: a transport that reads the stream
+        // instead fails here, rather than blocking forever on the second
+        // invocation once the one writer has already been consumed.
+        let fifo_path = io_dir.path.join("request.fifo");
+        make_fifo(&fifo_path);
+        let fifo_writer = spawn_fifo_writer(&fifo_path, REQUEST_SIZE_LIMIT_BYTES + 2);
+        let fifo_first = run_open_with_request_file(&fifo_path);
+        assert_transport_failure(&fifo_first, E_INTERPRETER_CLI_REQUEST_IO);
+        assert!(fifo_first.stderr.contains("not a regular file"));
+        let fifo_second = run_open_with_request_file(&fifo_path);
+        assert_eq!(fifo_first.stderr, fifo_second.stderr);
+        drain_fifo(&fifo_path);
+        fifo_writer.join().expect("fifo writer");
+    }
+}
+#[test]
+fn transport_request_reader_is_bounded_one_byte_past_the_limit() {
+    // An endless stream: the `take` bound is the only thing that can end this
+    // read, so a reader waiting for EOF instead would never return at all. Both
+    // transports share this reader, which is what makes the FILE path bounded
+    // even though a file's own recorded size is not trustworthy
+    // (configflux-mtmi).
+    struct Endless;
+    impl Read for Endless {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            buf.fill(b'a');
+            Ok(buf.len())
+        }
+    }
+
+    let mut endless = Endless;
+    let capped = read_capped(&mut endless).expect("capped read");
+    assert_eq!(capped.len(), REQUEST_SIZE_LIMIT_BYTES + 1);
+
+    // The bound sits one byte PAST the limit and not on it, so a request of
+    // exactly the maximum accepted size still arrives whole.
+    let io_dir = io_temp_dir("transport-bound");
+    let at_limit_path = io_dir.path.join("at-limit.request.json");
+    std::fs::write(&at_limit_path, vec![b'a'; REQUEST_SIZE_LIMIT_BYTES])
+        .expect("write at-limit request");
+    match read_request_file(&at_limit_path) {
+        Ok(payload) => assert_eq!(payload.len(), REQUEST_SIZE_LIMIT_BYTES),
+        Err(_) => panic!("a request of exactly the maximum size must be read whole"),
     }
 }
 
@@ -1243,6 +1363,7 @@ fn command_error_exit_path_keeps_diagnostics_and_exit_code_mapping() {
         model_handle: handle.clone(),
         scope: S1_SCOPE.to_string(),
         selection_state: s1_empty_selection_state(&handle.model_hash),
+        implied_choices: Default::default(),
     };
 
     let (output, response): (RunOutput, ResolveResult) = run_json_command(&["resolve"], &request);
@@ -1427,6 +1548,7 @@ fn int_016_solver_session_single_path_e2e() {
         model_handle: handle.clone(),
         scope: S1_SCOPE.to_string(),
         selection_state: full_state,
+        implied_choices: Default::default(),
     };
     let (resolve_output, resolve_cli): (RunOutput, ResolveResult) =
         run_json_command(&["resolve"], &resolve_request);
@@ -1705,6 +1827,7 @@ fn dj7f_resolve_fails_closed_when_ccm_unavailable() {
             model_handle: handle,
             scope: S1_SCOPE.to_string(),
             selection_state: full_state,
+            implied_choices: Default::default(),
         };
         let (output, response): (RunOutput, ResolveResult) =
             run_json_command(&["resolve"], &request);
@@ -2321,6 +2444,7 @@ fn interpreter_resolve_rejects_a_constraint_violating_selection() {
             &handle.model_hash,
             &[("environment", "prod"), ("log_level", "debug")],
         ),
+        implied_choices: Default::default(),
     };
 
     let (output, response): (RunOutput, ResolveResult) = run_json_command(&["resolve"], &request);
@@ -2514,4 +2638,307 @@ fn interpreter_options_and_select_agree_about_a_constraint() {
         vec!["info".to_string()],
         "options must not offer what select would refuse"
     );
+}
+
+// ---------------------------------------------------------------------------
+// configflux-7uex — the tamper family at the interpreter seam.
+//
+// INT-004 above drives ONE verb (`explain`) with ONE tampered state. The seam
+// is where a hand-authored `SelectionState` actually arrives: `select`,
+// `options`, `explain` and `resolve` each deserialize the whole state from
+// stdin, so every field of it is caller-supplied and nothing between the JSON
+// and the engine re-derives it. The unit-level twins live in
+// `session_compose/src/tests.rs`; what these add is the pass over the real CLI
+// — argv in, a JSON request on stdin, an exit code and a diagnostic code out.
+//
+// Two families, because the two refusals are decided by different things.
+//
+//   A. A forged integrity binding (configflux-q50t). The state does not hash to
+//      what it says it does, so `validate_selection_state` refuses it without
+//      ever consulting the model. `explain` already returned the compiler's
+//      envelope for this; `select` composed its own `Ok` over it and `options`
+//      published an option list computed from it, which is why the class went
+//      unnoticed until a diff review found it.
+//
+//   B. An admissible-LOOKING state (configflux-eclx, ADR-0030 Amendment 2
+//      Rule 1). Every one of q50t's six bindings passes — the hash is
+//      canonical, the model and scope match and are non-empty, the tags do not
+//      contradict the choices — and the state still names a facet the model
+//      does not have, or gives a facet a value outside its domain. Not one of
+//      the six is a model check, so only the model can refuse this, and the
+//      replay cannot: it silently skips an assignment it cannot hold, so by the
+//      time the solver has answered, the offending entry is gone from the
+//      deployment being reasoned about.
+//
+// Family B is driven on all four verbs; family A adds the two `explain` does
+// not cover. Every case asserts the process exit code as well as the envelope,
+// because the exit code is the whole contract for a caller that pipes JSON and
+// reads `$?` — a refusal that surfaced as exit 0 would be a fail-open however
+// correct the diagnostic inside it was.
+// ---------------------------------------------------------------------------
+
+/// An S1 state sealed canonically against `model_hash` and `S1_SCOPE`, over
+/// caller-authored `choices` — the shape a hand-authored request carries at the
+/// seam. `s1_context_tags` rides along unchanged so the state stays realistic:
+/// `region` is a condition-only facet no chunk declares, so the screen leaves
+/// it alone (ADR-0030 Amendment 2 Rule 1 screens tags only where the model
+/// declares a CLOSED domain), and the one planted choice is the only thing the
+/// model can object to.
+fn s1_authored_selection_state(model_hash: &str, choices: &[(&str, &str)]) -> SelectionState {
+    canonical_selection_state(
+        model_hash.to_string(),
+        S1_SCOPE.to_string(),
+        s1_context_tags(),
+        choices
+            .iter()
+            .map(|(facet, option)| (facet.to_string(), option.to_string()))
+            .collect(),
+    )
+    .expect("authored selection state")
+}
+
+/// The first diagnostic's code on a report, as a placeholder-bearing accessor
+/// rather than an index, so a failing assertion names what actually came back
+/// instead of panicking on an empty vector before it can say anything.
+fn first_diagnostic_code(report: &DiagnosticsReport) -> &str {
+    report
+        .diagnostics
+        .first()
+        .map(|diagnostic| diagnostic.code.as_str())
+        .unwrap_or("<no diagnostic>")
+}
+
+/// A `select` request over `state`, with a delta the model admits and the state
+/// does not already carry. Both halves matter: an out-of-domain delta would let
+/// the delta's own refusal stand in for the state's, and a delta on a facet the
+/// state already holds short-circuits `session_compose::apply` straight to the
+/// compiler, so the wrapper's own screen would never be the thing under test.
+fn s1_select_request(handle: &ModelHandle, state: &SelectionState) -> ApplySelectionRequest {
+    ApplySelectionRequest {
+        schema_version: PRODUCT_SCHEMA_VERSION,
+        model_handle: handle.clone(),
+        scope: S1_SCOPE.to_string(),
+        selection_state: state.clone(),
+        selection_delta: SelectionDelta {
+            facet: "cooling_brand".to_string(),
+            option: "hydra".to_string(),
+        },
+    }
+}
+
+/// An `options` request over `state` for a facet the model knows, so an
+/// `E_SELECTION_UNKNOWN_FACET` that comes back is the STATE's and never the
+/// probe's.
+fn s1_options_request(handle: &ModelHandle, state: &SelectionState) -> GetSelectionOptionsRequest {
+    GetSelectionOptionsRequest {
+        schema_version: PRODUCT_SCHEMA_VERSION,
+        model_handle: handle.clone(),
+        scope: S1_SCOPE.to_string(),
+        selection_state: state.clone(),
+        facet: "cooling_brand".to_string(),
+        include_pruned_reasons: false,
+    }
+}
+
+/// An `explain` request over `state` probing an in-domain `(facet, option)`,
+/// for the same reason `s1_options_request` probes a known facet.
+fn s1_explain_request(handle: &ModelHandle, state: &SelectionState) -> ExplainRejectionRequest {
+    ExplainRejectionRequest {
+        schema_version: PRODUCT_SCHEMA_VERSION,
+        model_handle: handle.clone(),
+        scope: S1_SCOPE.to_string(),
+        selection_state: state.clone(),
+        rejected_option: SelectionDelta {
+            facet: "cooling_brand".to_string(),
+            option: "aeroflux".to_string(),
+        },
+    }
+}
+
+/// A `resolve` request over `state`, with no implied choices — the
+/// caller-supplied map configflux-v93p screens separately, held empty so the
+/// only thing under screen here is the state.
+fn s1_resolve_request(handle: &ModelHandle, state: &SelectionState) -> ResolveFromSelectionRequest {
+    ResolveFromSelectionRequest {
+        schema_version: PRODUCT_SCHEMA_VERSION,
+        model_handle: handle.clone(),
+        scope: S1_SCOPE.to_string(),
+        selection_state: state.clone(),
+        implied_choices: Default::default(),
+    }
+}
+
+/// Every selection verb the CLI exposes, driven over `state` through the real
+/// binary, each asserted to fail closed with `code`: exit 2 (command error),
+/// nothing on stderr, `status: error` in the envelope, and `code` as the first
+/// diagnostic. `explain` reports its refusal in `rejection` rather than
+/// `diagnostics` (ADR-0031 D2 makes a request that could not run a command
+/// error, not a rejection verdict), so its accessor differs; the contract does
+/// not.
+fn assert_every_verb_refuses_over_the_cli(
+    handle: &ModelHandle,
+    state: &SelectionState,
+    code: &str,
+) {
+    let (select_output, selected): (RunOutput, ApplySelectionResult) =
+        run_json_command(&["select"], &s1_select_request(handle, state));
+    assert_eq!(
+        select_output.exit_code, EXIT_COMMAND_ERROR,
+        "select exit code"
+    );
+    assert!(
+        select_output.stderr.is_empty(),
+        "select stderr must stay empty"
+    );
+    assert_eq!(selected.status, OperationStatus::Error, "select status");
+    assert_eq!(
+        first_diagnostic_code(&selected.diagnostics),
+        code,
+        "select: {:?}",
+        selected.diagnostics
+    );
+    assert!(
+        selected.selection_state.is_none(),
+        "select must not hand back a re-canonicalized state for one it refused"
+    );
+
+    let (options_output, listed): (RunOutput, GetSelectionOptionsResult) =
+        run_json_command(&["options"], &s1_options_request(handle, state));
+    assert_eq!(
+        options_output.exit_code, EXIT_COMMAND_ERROR,
+        "options exit code"
+    );
+    assert!(
+        options_output.stderr.is_empty(),
+        "options stderr must stay empty"
+    );
+    assert_eq!(listed.status, OperationStatus::Error, "options status");
+    assert_eq!(
+        first_diagnostic_code(&listed.diagnostics),
+        code,
+        "options: {:?}",
+        listed.diagnostics
+    );
+    assert!(
+        listed.valid_options.is_empty(),
+        "an error envelope carries no options: {:?}",
+        listed.valid_options
+    );
+
+    let (explain_output, explained): (RunOutput, ExplainRejectionResult) =
+        run_json_command(&["explain"], &s1_explain_request(handle, state));
+    assert_eq!(
+        explain_output.exit_code, EXIT_COMMAND_ERROR,
+        "explain exit code"
+    );
+    assert!(
+        explain_output.stderr.is_empty(),
+        "explain stderr must stay empty"
+    );
+    assert_eq!(explained.status, OperationStatus::Error, "explain status");
+    assert_eq!(
+        explained.rejection.code, code,
+        "explain: {:?}",
+        explained.rejection
+    );
+
+    let (resolve_output, resolved): (RunOutput, ResolveResult) =
+        run_json_command(&["resolve"], &s1_resolve_request(handle, state));
+    assert_eq!(
+        resolve_output.exit_code, EXIT_COMMAND_ERROR,
+        "resolve exit code"
+    );
+    assert!(
+        resolve_output.stderr.is_empty(),
+        "resolve stderr must stay empty"
+    );
+    assert_eq!(resolved.status, OperationStatus::Error, "resolve status");
+    assert_eq!(
+        first_diagnostic_code(&resolved.diagnostics),
+        code,
+        "resolve: {:?}",
+        resolved.diagnostics
+    );
+}
+
+/// Family A at the seam — the two verbs INT-004 does not reach.
+///
+/// The state is `s1_empty_selection_state` with its hash overwritten, and the
+/// delta names a facet it does not carry, which is precisely the
+/// configflux-q50t shape: with the delta absent from both maps,
+/// `session_compose::apply` used to take the solver's accept and emit its OWN
+/// `Ok` envelope plus a freshly canonicalized hash, never asking the compiler
+/// that would have refused the state. `options` had the mirror-image hole —
+/// legacy's `Error` status survived its merge, but the solver's `valid_options`
+/// replaced the empty list the refusal carried, publishing options enumerated
+/// over an environment the engine had just called incoherent.
+#[test]
+fn interpreter_select_and_options_refuse_a_forged_selection_state_hash() {
+    let cmp_dir = emitted_cmp_dir("7uex-forged-hash");
+    let handle = open_handle(&cmp_dir);
+    let mut forged = s1_empty_selection_state(&handle.model_hash);
+    forged.selection_state_hash = "00".repeat(32);
+
+    let (select_output, selected): (RunOutput, ApplySelectionResult) =
+        run_json_command(&["select"], &s1_select_request(&handle, &forged));
+    assert_eq!(select_output.exit_code, EXIT_COMMAND_ERROR);
+    assert!(select_output.stderr.is_empty());
+    assert_eq!(selected.status, OperationStatus::Error);
+    assert_eq!(
+        first_diagnostic_code(&selected.diagnostics),
+        E_SELECTION_STATE_INVALID,
+        "select: {:?}",
+        selected.diagnostics
+    );
+    assert!(
+        selected.selection_state.is_none(),
+        "select must not re-canonicalize a state whose seal does not hold"
+    );
+
+    let (options_output, listed): (RunOutput, GetSelectionOptionsResult) =
+        run_json_command(&["options"], &s1_options_request(&handle, &forged));
+    assert_eq!(options_output.exit_code, EXIT_COMMAND_ERROR);
+    assert!(options_output.stderr.is_empty());
+    assert_eq!(listed.status, OperationStatus::Error);
+    assert_eq!(
+        first_diagnostic_code(&listed.diagnostics),
+        E_SELECTION_STATE_INVALID,
+        "options: {:?}",
+        listed.diagnostics
+    );
+    assert!(
+        listed.valid_options.is_empty(),
+        "options must publish nothing over a state it refused: {:?}",
+        listed.valid_options
+    );
+}
+
+/// Family B at the seam, unknown-facet half — a state naming a facet the model
+/// has no symbol for at all. Nothing about it is malformed: it hashes to what
+/// it claims, it is sealed against this model and scope, and its tags agree
+/// with its choices. The `.ccm` simply has no variable for `nosuch_facet`, so
+/// the replay skips it and every verb would otherwise answer about a deployment
+/// carrying a facet that does not exist.
+#[test]
+fn interpreter_every_verb_refuses_a_choice_on_an_unknown_facet() {
+    let cmp_dir = emitted_cmp_dir("7uex-unknown-facet");
+    let handle = open_handle(&cmp_dir);
+    let state = s1_authored_selection_state(&handle.model_hash, &[("nosuch_facet", "x")]);
+
+    assert_every_verb_refuses_over_the_cli(&handle, &state, E_SELECTION_UNKNOWN_FACET);
+}
+
+/// Family B at the seam, out-of-domain half — a facet the model does know,
+/// carrying a value it does not admit. S1's `cooling_model` is inferred from
+/// the `control_driver` override conditions, so its domain is exactly
+/// `{a9, x200}` and `x999` is outside it. The caller's own choices never widen
+/// that domain — it is read from the model alone — which is what makes this
+/// refusable at all.
+#[test]
+fn interpreter_every_verb_refuses_a_choice_outside_its_facets_domain() {
+    let cmp_dir = emitted_cmp_dir("7uex-out-of-domain");
+    let handle = open_handle(&cmp_dir);
+    let state = s1_authored_selection_state(&handle.model_hash, &[("cooling_model", "x999")]);
+
+    assert_every_verb_refuses_over_the_cli(&handle, &state, E_SELECTION_INVALID_OPTION);
 }

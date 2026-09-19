@@ -93,7 +93,7 @@ banner "Step 3: Produce the resolved config with cfx resolve"
 # byte-for-byte — which the runtime handoff below consumes. `--out` also
 # exports the C++ early-binding snapshot (a side artifact this example does
 # not otherwise use).
-printf '{"schema_version":4,"model_hash":"","scope":"%s","context_tags":{},"choices":{},"selection_state_hash":""}\n' \
+printf '{"schema_version":5,"model_hash":"","scope":"%s","context_tags":{},"choices":{},"selection_state_hash":""}\n' \
   "${SCOPE}" > "${OUT_DIR}/selection.json"
 "${CFX}" resolve \
   --model "${OUT_DIR}/cmp.manifest.json" \
@@ -121,12 +121,29 @@ banner "Step 4: Runtime — runtime-open (handoff from the resolve snapshot)"
 # Reshape the resolve snapshot into the runtime-open request envelope. The
 # `.ccm` reference is the sibling ccm/ directory the compile step emitted next
 # to cmp.manifest.json: ADR-0030 D2 makes a usable `.ccm` a hard precondition
-# for runtime-open, so the handoff must thread it through. All other fields
-# beyond the core lineage default safely.
+# for runtime-open, so the handoff must thread it through.
+#
+# `defaulted_choices` and `implied_choices` are two of the three keys a
+# projection must never drop. Both fold into the `resolve_hash` pre-image, and
+# runtime-open recomputes that hash before it opens anything, so a handoff that
+# forgets either one fails with E_RUNTIME_HASH_MISMATCH on any model where a
+# facet takes its declared default or is inferred from the constraints. A
+# resolve omits the key entirely when its map is empty, which is what `// {}`
+# covers: carry both by construction rather than relying on a selection that
+# happens to bind every facet explicitly.
+#
+# `closed_facet_domains` is the third, and it is not a hash key at all: it does
+# NOT fold into the `resolve_hash` pre-image, so dropping it never fails the
+# open. What it costs is attribution. A device holds a `.ccm` and a resolve
+# result, never the chunk set the `facets:` declarations live in (ADR-0060 D2),
+# so this table is the only channel by which a facet's closed-ness reaches the
+# runtime. Drop it and a write refused over a closed facet is reported as an
+# over-constrained model instead of naming the constraint it breaks. A resolve
+# omits this key too when the table is empty, which the same `// {}` covers.
 jq -n \
   --slurpfile r "${OUT_DIR}/resolve.result.json" \
   --arg ccm_ref "${OUT_DIR}/ccm" \
-  '{schema_version: 4,
+  '{schema_version: 5,
      model_hash: $r[0].model_hash,
      ccm_ref: $ccm_ref,
      resolve_hash: $r[0].resolve_hash,
@@ -135,7 +152,10 @@ jq -n \
      resolved_component_dependencies: ($r[0].resolved_component_dependencies // {}),
      resolved_artifacts: ($r[0].resolved_artifacts // {}),
      context_tags: ($r[0].context_tags // {}),
-     choices: ($r[0].choices // {})}' \
+     choices: ($r[0].choices // {}),
+     defaulted_choices: ($r[0].defaulted_choices // {}),
+     implied_choices: ($r[0].implied_choices // {}),
+     closed_facet_domains: ($r[0].closed_facet_domains // {})}' \
   > "${OUT_DIR}/runtime_open.request.json"
 "${RUNTIME}" runtime-open \
   --request-file "${OUT_DIR}/runtime_open.request.json" \
@@ -146,7 +166,7 @@ banner "Step 5: Runtime — get-scope-metadata"
 jq -n \
   --slurpfile ro "${OUT_DIR}/runtime_open.result.json" \
   --arg scope_root "${SCOPE_ROOT}" \
-  '{schema_version: 4, runtime_snapshot: $ro[0].runtime_snapshot, scope_root: $scope_root}' \
+  '{schema_version: 5, runtime_snapshot: $ro[0].runtime_snapshot, scope_root: $scope_root}' \
   > "${OUT_DIR}/get_scope_metadata.request.json"
 "${RUNTIME}" get-scope-metadata \
   --request-file "${OUT_DIR}/get_scope_metadata.request.json" \
@@ -160,7 +180,7 @@ banner "Step 6: Runtime — list-parameters"
 jq -n \
   --slurpfile ro "${OUT_DIR}/runtime_open.result.json" \
   --arg scope_root "${SCOPE_ROOT}" \
-  '{schema_version: 4, runtime_snapshot: $ro[0].runtime_snapshot, scope_root: $scope_root}' \
+  '{schema_version: 5, runtime_snapshot: $ro[0].runtime_snapshot, scope_root: $scope_root}' \
   > "${OUT_DIR}/list_parameters.request.json"
 "${RUNTIME}" list-parameters \
   --request-file "${OUT_DIR}/list_parameters.request.json" \

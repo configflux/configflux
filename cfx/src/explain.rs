@@ -16,6 +16,10 @@
 //     the solver apply, not the compiler's legacy narrowing, is what makes cfx
 //     find the same conflict the interpreter would (ADR-0030): a cross-facet
 //     exclusion the compiler under-models is still caught here.
+//   * the resolve-context check that follows the apply loop is
+//     `session_compose::resolve` — the SAME seam `cfx resolve` composes, so the
+//     two verbs see the same solver-inferred bindings (ADR-0057 §D6) and cannot
+//     disagree about a selection the constraints already decide.
 //   * the labeled minimal core comes from `session_compose::explain`, which
 //     sources it from `solver::Session::explain_rejection` (ADR-0031 D3). Its
 //     `ExplainRejectionResult` is emitted BYTE-FOR-BYTE for `--format json`, so
@@ -31,12 +35,12 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use compiler::loader_api::{
-    resolve_from_selection, ApplySelectionRequest, ExplainRejectionRequest, ExplainRejectionResult,
+    ApplySelectionRequest, ExplainRejectionRequest, ExplainRejectionResult,
     ResolveFromSelectionRequest, ResolveResult, SelectionDelta,
 };
 use compiler::product_api::{OperationStatus, PRODUCT_SCHEMA_VERSION};
 
-use crate::pipeline::{self, OpenedModel, PipelineError, SelectPair};
+use crate::pipeline::{self, CellSource, OpenedModel, PipelineError, SelectPair};
 
 /// The outcome of `cfx explain`.
 pub enum ExplainOutcome {
@@ -87,7 +91,7 @@ pub fn run(
         context_tags,
         choices,
         base_state,
-    } = pipeline::open_and_init(model, selection_file, selects)?;
+    } = pipeline::open_and_init(model, &CellSource::from_selection_file(selection_file), selects)?;
 
     // Apply each choice with the solver-authoritative `session_compose::apply`
     // (the interpreter `select` seam). The first REJECT is the choice to
@@ -135,14 +139,24 @@ pub fn run(
     // boolean facet satisfiability. It does NOT run the resolve-context
     // condition evaluation `cfx resolve` performs, where an active condition
     // that references an unbound tag makes the selection unsatisfiable. Run that
-    // SAME check now — the exact `resolve_from_selection` call the resolve
+    // SAME check now — the exact `session_compose::resolve` call the resolve
     // pipeline composes — so explain reaches resolve's verdict instead of
     // falsely reporting the selection satisfiable (configflux-2awb.6 / sc69).
-    let resolved = resolve_from_selection(ResolveFromSelectionRequest {
+    //
+    // It MUST be the `session_compose` seam and not `compiler::loader_api::
+    // resolve_from_selection`: inference lives behind that seam (ADR-0057 §D6),
+    // so a compiler-direct call here would resolve with NO implied bindings
+    // while `cfx resolve` resolves with them — and the two verbs would
+    // contradict each other on any model whose constraints force a facet. Both
+    // directions are reachable: explain calling a selection resolve accepts,
+    // and explain accepting one resolve rejects. `cfx_resolve_explain_
+    // consistency` pins it over a pack that actually implies something.
+    let resolved = session_compose::resolve(ResolveFromSelectionRequest {
         schema_version: PRODUCT_SCHEMA_VERSION,
         model_handle: handle,
         scope,
         selection_state: state,
+        implied_choices: Default::default(),
     });
     if resolved.status == OperationStatus::Error {
         // Classify with the SAME family `cfx resolve` uses (`pipeline::classify`):

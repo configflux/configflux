@@ -1,0 +1,31 @@
+{
+    "package": "s_facet_equality",
+    "version": "1.0.0",
+    "definitions": {
+        "container_slot": {
+            "type": "string",
+            "doc": "Deployment-selectable container size class",
+            "lifecycle": "runtime",
+            "safety": "q_m",
+            "access": "technician"
+        }
+    },
+    "facets": {
+        "line_container": {
+            "values": ["c1", "c2"],
+            "default": "c1",
+            "doc": "Container the vision and compute services draw from."
+        },
+        "sorter_container": {
+            "values": ["c1", "c2"],
+            "default": "c1",
+            "doc": "Container the sorter service draws from."
+        }
+    },
+    "constraints": {
+        "groups_equal": {
+            "condition": "sorter_container == line_container",
+            "doc": "The sorter and the line must draw from the same container in a given deployment. The two facets stay independently bindable; this constraint ties them together rather than merging them into one facet."
+        }
+    }
+}

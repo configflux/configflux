@@ -578,6 +578,7 @@ fn resolve_result_for_spec(
         model_handle: handle.clone(),
         scope: spec.scope.to_string(),
         selection_state,
+        implied_choices: Default::default(),
     };
     let result = resolve_from_selection(request);
     assert_eq!(result.status, OperationStatus::Ok);
@@ -618,6 +619,11 @@ fn runtime_open_request_from_resolve(
         // ADR-0047 §5 lockstep: copy the resolve's auto-bound-default provenance
         // so runtime_open reproduces the same resolve_hash the loader emitted.
         defaulted_choices: result.defaulted_choices.clone(),
+        implied_choices: result.implied_choices.clone(),
+        // ADR-0060 D8: the closed-facet table travels the same way — the
+        // resolver computed it, the projection forwards it, and the runtime
+        // rejection sites read it off the snapshot.
+        closed_facet_domains: result.closed_facet_domains.clone(),
         committed_overlay: std::collections::BTreeMap::new(),
         dirty_overlay: std::collections::BTreeMap::new(),
         dirty_generations: std::collections::BTreeMap::new(),
@@ -711,6 +717,43 @@ where
 fn run_017_request_io_path(request_path: &Path) -> RunOutput {
     let request_path_str = request_path.to_string_lossy().into_owned();
     run_cli(&["runtime-open", "--request-file", &request_path_str], b"")
+}
+
+#[cfg(unix)]
+fn make_fifo(path: &Path) {
+    let status = std::process::Command::new("mkfifo")
+        .arg(path)
+        .status()
+        .expect("spawn mkfifo");
+    assert!(status.success(), "mkfifo exited with {status}");
+}
+
+/// Feed `len` bytes into `path` once something opens the read end.
+///
+/// The thread blocks in `open(2)` until a reader arrives, so a caller asserting
+/// that the transport refuses the FIFO WITHOUT reading it has to release the
+/// writer with `drain_fifo` before joining. That asymmetry is the point: a
+/// transport that reads the stream unblocks the writer by itself.
+#[cfg(unix)]
+fn spawn_fifo_writer(path: &Path, len: usize) -> std::thread::JoinHandle<()> {
+    let path = path.to_path_buf();
+    std::thread::spawn(move || {
+        let mut fifo = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("open fifo for writing");
+        // A reader that walks away mid-stream is not a failure of this writer.
+        let _ = fifo.write_all(&vec![b'a'; len]);
+    })
+}
+
+#[cfg(unix)]
+fn drain_fifo(path: &Path) {
+    let mut sink = Vec::new();
+    std::fs::File::open(path)
+        .expect("open fifo for reading")
+        .read_to_end(&mut sink)
+        .expect("drain fifo");
 }
 
 #[test]
@@ -1137,6 +1180,75 @@ fn run_017_transport_request_file_io_failures() {
     assert_eq!(malformed.exit_code, EXIT_TRANSPORT_ERROR);
     assert!(malformed.stdout.is_empty());
     assert!(malformed.stderr.contains(E_RUNTIME_CLI_REQUEST_INVALID));
+
+    #[cfg(unix)]
+    {
+        // configflux-mtmi. Neither size check can refuse a path whose `stat()`
+        // size understates what a read returns -- a directory reports a small
+        // size and a FIFO reports none at all -- so the transport refuses
+        // anything that is not a regular file before it opens it. Only a
+        // regular file's recorded size bounds what the read will deliver.
+        let directory_path = temp.path.join("request-directory");
+        std::fs::create_dir_all(&directory_path).expect("create request directory");
+        let directory_first = run_017_request_io_path(&directory_path);
+        let directory_second = run_017_request_io_path(&directory_path);
+        assert_eq!(directory_first.exit_code, EXIT_TRANSPORT_ERROR);
+        assert!(directory_first.stdout.is_empty());
+        assert_eq!(directory_first.stderr, directory_second.stderr);
+        assert!(directory_first.stderr.contains(E_RUNTIME_CLI_REQUEST_IO));
+        assert!(directory_first.stderr.contains("not a regular file"));
+
+        // The FIFO carries more than the bound accepts. Refusing it from its
+        // file type means none of that stream is ever buffered. The assertions
+        // run BEFORE the drain deliberately: a transport that reads the stream
+        // instead fails here, rather than blocking forever on the second
+        // invocation once the one writer has already been consumed.
+        let fifo_path = temp.path.join("request.fifo");
+        make_fifo(&fifo_path);
+        let fifo_writer = spawn_fifo_writer(&fifo_path, REQUEST_SIZE_LIMIT_BYTES + 2);
+        let fifo_first = run_017_request_io_path(&fifo_path);
+        assert_eq!(fifo_first.exit_code, EXIT_TRANSPORT_ERROR);
+        assert!(fifo_first.stdout.is_empty());
+        assert!(fifo_first.stderr.contains(E_RUNTIME_CLI_REQUEST_IO));
+        assert!(fifo_first.stderr.contains("not a regular file"));
+        let fifo_second = run_017_request_io_path(&fifo_path);
+        assert_eq!(fifo_first.stderr, fifo_second.stderr);
+        drain_fifo(&fifo_path);
+        fifo_writer.join().expect("fifo writer");
+    }
+}
+#[test]
+fn transport_request_reader_is_bounded_one_byte_past_the_limit() {
+    // An endless stream: the `take` bound is the only thing that can end this
+    // read, so a reader waiting for EOF instead would never return at all. Both
+    // transports share this reader, which is what makes the FILE path bounded
+    // even though a file's own recorded size is not trustworthy
+    // (configflux-mtmi).
+    struct Endless;
+    impl Read for Endless {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            buf.fill(b'a');
+            Ok(buf.len())
+        }
+    }
+
+    let mut endless = Endless;
+    let capped = read_capped(&mut endless).expect("capped read");
+    assert_eq!(capped.len(), REQUEST_SIZE_LIMIT_BYTES + 1);
+
+    // The bound sits one byte PAST the limit and not on it, so a request of
+    // exactly the maximum accepted size still arrives whole.
+    let io_dir = TempDirGuard {
+        path: unique_fixture_dir("transport-bound"),
+        manifest_ref: String::new(),
+    };
+    let at_limit_path = io_dir.path.join("at-limit.request.json");
+    std::fs::write(&at_limit_path, vec![b'a'; REQUEST_SIZE_LIMIT_BYTES])
+        .expect("write at-limit request");
+    match read_request_file(&at_limit_path) {
+        Ok(payload) => assert_eq!(payload.len(), REQUEST_SIZE_LIMIT_BYTES),
+        Err(_) => panic!("a request of exactly the maximum size must be read whole"),
+    }
 }
 
 #[test]
@@ -2546,6 +2658,12 @@ const SOLVER_FIXTURE_DEFS: &str = r#"{
     }
 }"#;
 
+// ADR-0064: the handle DECLARES the facet it is the handle for, and is
+// deliberately NOT named after it — under the retired last-segment guess
+// `brand_selector` named no facet at all, so every case below that still reaches
+// the solver reaches it through the declaration. Beside it sits a parameter that
+// merely SHARES the facet's name and declares nothing, which is the shape the
+// guess used to enforce and the declaration must leave alone.
 const SOLVER_FIXTURE_COMPONENTS: &str = r#"{
     "package": "s_solver",
     "version": "1.0.0",
@@ -2553,15 +2671,25 @@ const SOLVER_FIXTURE_COMPONENTS: &str = r#"{
         "climate": {
             "type": "controller",
             "params": {
-                "cooling_brand": {
+                "brand_selector": {
                     "inherits": "brand_slot",
                     "type": "string",
                     "doc": "Runtime cooling brand selection",
-                    "value": "hydra",
+                    "facet": "cooling_brand",
                     "lifecycle": "runtime",
                     "safety": "q_m",
                     "access": "technician",
                     "req_id": "req_solver_001"
+                },
+                "cooling_brand": {
+                    "inherits": "brand_slot",
+                    "type": "string",
+                    "doc": "Free-text label that shares the facet's name and nothing else",
+                    "value": "hydra",
+                    "lifecycle": "runtime",
+                    "safety": "q_m",
+                    "access": "technician",
+                    "req_id": "req_solver_002"
                 }
             }
         }
@@ -2569,7 +2697,11 @@ const SOLVER_FIXTURE_COMPONENTS: &str = r#"{
 }"#;
 
 const SOLVER_FIXTURE_SCOPE: &str = "component:climate";
-const SOLVER_FIXTURE_WRITE_PATH: &str = "component.climate.param.cooling_brand";
+/// The DECLARED handle of the `cooling_brand` facet (ADR-0064 D1).
+const SOLVER_FIXTURE_WRITE_PATH: &str = "component.climate.param.brand_selector";
+/// A parameter that only shares the facet's name. It declares no binding, so it
+/// is never constraint-checked and names no modeled facet to explain.
+const SOLVER_FIXTURE_UNBOUND_PATH: &str = "component.climate.param.cooling_brand";
 
 /// Compile the inline solver fixture, returning a guard that keeps the
 /// emitted CMP package *and* its `.ccm` sibling on disk for the lifetime of
@@ -2632,6 +2764,7 @@ fn resolve_solver_fixture_base(
         model_handle: handle,
         scope: SOLVER_FIXTURE_SCOPE.to_string(),
         selection_state,
+        implied_choices: Default::default(),
     };
     let result = resolve_from_selection(request);
     assert_eq!(
@@ -2745,10 +2878,11 @@ fn run_036_set_parameter_solver_option_validation() {
 // Reuses the `s_solver` fixture from run_036: the `cooling_brand` facet is
 // pinned to `hydra` and excludes `aeroflux` by the `brand_guard` policy, so
 // `aeroflux` is a genuine constraint conflict (a labeled `unsat_core`), `hydra`
-// is a valid option (no core), and a non-modeled `param_key` is an unknown
-// facet (fail-closed exit 2, no core). The {parameter,value} -> {facet,option}
-// mapping under test is `component.climate.param.cooling_brand` -> facet
-// `cooling_brand`, value string -> option.
+// is a valid option (no core), and a path naming no declared binding is an
+// unknown facet (fail-closed exit 2, no core). The {parameter,value} ->
+// {facet,option} mapping under test is `component.climate.param.brand_selector`
+// -> facet `cooling_brand` (ADR-0064 D5.4: the facet the parameter DECLARES,
+// not the path's last segment), value string -> option.
 // ---------------------------------------------------------------------------
 
 /// Open the `s_solver` fixture and return its snapshot, asserting the `.ccm`
@@ -2820,7 +2954,17 @@ fn run_046_explain_rejection_solver_unsat_core() {
         .expect("conflict rejection must carry an unsat_core");
     assert_eq!(
         core.rejected.facet, "cooling_brand",
-        "the rejected atom must name the candidate facet"
+        "the rejected atom must name the facet the parameter DECLARES (ADR-0064 \
+         D5.4), which this path is deliberately not named after"
+    );
+    assert!(
+        conflict_response
+            .rejection
+            .hint
+            .as_deref()
+            .is_some_and(|hint| hint.contains("cooling_brand")),
+        "the hint must name the declared facet; got {:?}",
+        conflict_response.rejection.hint
     );
     assert_eq!(core.rejected.option, "aeroflux");
     assert!(core.minimal, "M4 deletion-based extraction yields a minimal core");
@@ -2912,6 +3056,38 @@ fn run_047_explain_rejection_unknown_facet_fails_closed() {
     assert_eq!(
         unknown_response.diagnostics.diagnostics[0].code,
         E_SELECTION_UNKNOWN_FACET
+    );
+
+    // ADR-0064 D5.4: a parameter that EXISTS and merely shares the facet's name
+    // declares no binding, so it names no modeled facet either — same envelope,
+    // and the reason says so. Under the retired last-segment guess this very
+    // path was the one the solver governed.
+    let unbound_request = RuntimeExplainRejectionRequest {
+        schema_version: PRODUCT_SCHEMA_VERSION,
+        runtime_snapshot: open_solver_fixture_snapshot(&cmp_dir),
+        path: SOLVER_FIXTURE_UNBOUND_PATH.to_string(),
+        value: Value::String("aeroflux".to_string()),
+    };
+    let (unbound_output, unbound_response): (RunOutput, RuntimeExplainRejectionResult) =
+        run_json_command(&["explain-rejection"], &unbound_request);
+    assert_eq!(
+        unbound_output.exit_code, EXIT_COMMAND_ERROR,
+        "a parameter with no declared binding must fail closed at exit 2; stderr={}",
+        unbound_output.stderr
+    );
+    assert_eq!(unbound_response.status, OperationStatus::Error);
+    assert_eq!(unbound_response.rejection.code, E_SELECTION_UNKNOWN_FACET);
+    assert!(
+        unbound_response.rejection.unsat_core.is_none(),
+        "there is no modeled facet, so there is no core"
+    );
+    assert!(
+        unbound_response
+            .rejection
+            .message
+            .contains("declares no facet binding"),
+        "the reason must say the parameter declares no facet binding; got {:?}",
+        unbound_response.rejection.message
     );
 }
 
@@ -3015,20 +3191,32 @@ fn emitted_labeled_mus_fixture_dir() -> TempDirGuard {
     }
 }
 
-/// Resolve the labeled-MUS fixture under the empty base selection (the runtime
-/// `apply_selection` path validates against declared param values, not the
-/// solver BDD domain, so it cannot itself select the in-domain-but-not-default
-/// `cpu=highperf`; the prior selection is injected into the snapshot's
-/// `choices` after open instead — see `open_labeled_mus_snapshot`).
+/// Resolve the labeled-MUS fixture under the empty base selection: every facet
+/// takes its declared default, and each bound parameter takes that default as
+/// its value (ADR-0064 D3).
 fn resolve_labeled_mus_fixture_base(
     cmp_dir: &TempDirGuard,
+) -> compiler::loader_api::ResolveResult {
+    resolve_labeled_mus_fixture(cmp_dir, BTreeMap::new())
+}
+
+/// Resolve the labeled-MUS fixture under `choices`.
+///
+/// A bound parameter's value IS the facet's effective value (ADR-0064 D3), so a
+/// prior selection has exactly one place to live: the selection this resolve
+/// runs under. It used to be injected into `snapshot.choices` after open, which
+/// left the handle's baseline and the choice disagreeing — a state a declared
+/// binding makes incoherent.
+fn resolve_labeled_mus_fixture(
+    cmp_dir: &TempDirGuard,
+    choices: BTreeMap<String, String>,
 ) -> compiler::loader_api::ResolveResult {
     let handle = open_handle(cmp_dir);
     let selection_state = canonical_selection_state(
         handle.model_hash.clone(),
         LABELED_MUS_FIXTURE_SCOPE.to_string(),
         BTreeMap::new(),
-        BTreeMap::new(),
+        choices,
     )
     .expect("selection state");
     let result = resolve_from_selection(ResolveFromSelectionRequest {
@@ -3036,6 +3224,7 @@ fn resolve_labeled_mus_fixture_base(
         model_handle: handle,
         scope: LABELED_MUS_FIXTURE_SCOPE.to_string(),
         selection_state,
+        implied_choices: Default::default(),
     });
     assert_eq!(
         result.status,
@@ -3046,11 +3235,17 @@ fn resolve_labeled_mus_fixture_base(
     result
 }
 
-/// Open the labeled-MUS fixture and return its snapshot with the prior
-/// selection `cpu=highperf` injected into `choices` — the committed state the
-/// runtime `explain-rejection` wrapper replays through the solver (ADR-0017 §3)
-/// before deciding the candidate. The cross-facet `requires` then makes
-/// `cooling=air` a genuine conflict against that replayed pin.
+/// Open the labeled-MUS fixture under the prior selection `cpu = highperf` —
+/// the committed state the runtime `explain-rejection` wrapper replays through
+/// the solver (ADR-0017 §3) before deciding the candidate. The cross-facet
+/// `requires` then makes `cooling = air` a genuine conflict against it.
+///
+/// The selection is made at RESOLVE time and propagates onto the bound `cpu`
+/// parameter (ADR-0064 D3), so the handle and the facet agree. The previous
+/// shape — resolving under the empty selection and inserting into
+/// `snapshot.choices` after open — produced a snapshot whose handle said
+/// `standard` while its `choices` said `highperf`; under a declared binding
+/// that state has no model behind it.
 fn open_labeled_mus_snapshot(cmp_dir: &TempDirGuard) -> RuntimeSnapshot {
     let ccm_ref = cmp_dir.path.join("ccm");
     assert!(
@@ -3058,7 +3253,9 @@ fn open_labeled_mus_snapshot(cmp_dir: &TempDirGuard) -> RuntimeSnapshot {
         "product compile path must emit the .ccm sibling at {}",
         ccm_ref.display()
     );
-    let resolve_result = resolve_labeled_mus_fixture_base(cmp_dir);
+    let mut choices = BTreeMap::new();
+    choices.insert("cpu".to_string(), "highperf".to_string());
+    let resolve_result = resolve_labeled_mus_fixture(cmp_dir, choices);
     let mut open_request = runtime_open_request_from_resolve(&resolve_result);
     open_request.ccm_ref = ccm_ref.to_string_lossy().into_owned();
 
@@ -3066,20 +3263,51 @@ fn open_labeled_mus_snapshot(cmp_dir: &TempDirGuard) -> RuntimeSnapshot {
         run_json_command(&["runtime-open"], &open_request);
     assert_eq!(open_output.exit_code, EXIT_OK, "open stderr={}", open_output.stderr);
     assert_eq!(open_response.status, OperationStatus::Ok);
-    let mut snapshot = open_response.runtime_snapshot.expect("runtime_snapshot");
-    // Inject the prior solver selection the explain accounts for. The runtime
-    // wrapper replays `snapshot.choices` via the solver (which knows the full
-    // BDD option domain), so the cross-facet conflict is genuine.
+    open_response.runtime_snapshot.expect("runtime_snapshot")
+}
+
+/// The resolved parameter behind `component.rig.param.<key>` of an opened
+/// labeled-MUS snapshot.
+fn labeled_mus_param<'a>(
+    snapshot: &'a RuntimeSnapshot,
+    key: &str,
+) -> &'a compiler::resolved_models::ResolvedParameter {
     snapshot
-        .choices
-        .insert("cpu".to_string(), "highperf".to_string());
-    snapshot
+        .resolved_output
+        .get("rig")
+        .expect("resolved_output must carry the 'rig' scope root")
+        .components
+        .get("rig")
+        .expect("the 'rig' scope root must carry the 'rig' component")
+        .params
+        .get(key)
+        .unwrap_or_else(|| panic!("resolved param '{key}'"))
 }
 
 #[test]
 fn run_048_explain_rejection_labeled_mus_has_no_raw_indices() {
     let cmp_dir = emitted_labeled_mus_fixture_dir();
     let snapshot = open_labeled_mus_snapshot(&cmp_dir);
+
+    // ADR-0064 D3/D4: the chosen `cpu = highperf` PROPAGATED onto the bound
+    // parameter, and the binding travelled to the runtime inside
+    // `resolved_output`. The handle and the facet cannot disagree, which is why
+    // the prior selection no longer has to be injected after open.
+    assert_eq!(
+        labeled_mus_param(&snapshot, "cpu").value,
+        Value::String("highperf".to_string()),
+        "the declared handle carries the facet's chosen value"
+    );
+    assert_eq!(
+        labeled_mus_param(&snapshot, "cpu").facet.as_deref(),
+        Some("cpu"),
+        "the declared binding reaches the runtime inside resolved_output"
+    );
+    assert_eq!(
+        snapshot.choices.get("cpu").map(String::as_str),
+        Some("highperf"),
+        "the opened choice is the selection the resolve ran under"
+    );
 
     // A genuine cross-facet conflict: `cooling = air` is forbidden under the
     // committed `cpu = highperf` pin (highperf REQUIRES liquid). A rejection
@@ -3145,7 +3373,7 @@ fn run_048_explain_rejection_labeled_mus_has_no_raw_indices() {
     // consistent under the pin: SUCCESS (exit 0) with no core (ADR-0030 D5).
     let valid_request = RuntimeExplainRejectionRequest {
         schema_version: PRODUCT_SCHEMA_VERSION,
-        runtime_snapshot: snapshot,
+        runtime_snapshot: snapshot.clone(),
         path: LABELED_MUS_COOLING_WRITE_PATH.to_string(),
         value: Value::String("liquid".to_string()),
     };
@@ -3160,6 +3388,33 @@ fn run_048_explain_rejection_labeled_mus_has_no_raw_indices() {
     assert!(
         valid_response.rejection.unsat_core.is_none(),
         "a valid option has no conflict, so no core is emitted"
+    );
+
+    // An in-session WRITE to the handle outranks the opened choice (tier 1 over
+    // tier 3 of the session assignment). Writing `cpu = standard` releases the
+    // pin, so the very candidate rejected above — `cooling = air` — is now
+    // explained as consistent. This is the precedence the write path and the
+    // explain path must share, asserted on the explain side.
+    let relaxed =
+        accept_labeled_mus_write(snapshot, LABELED_MUS_CPU_WRITE_PATH, "standard");
+    let relaxed_request = RuntimeExplainRejectionRequest {
+        schema_version: PRODUCT_SCHEMA_VERSION,
+        runtime_snapshot: relaxed,
+        path: LABELED_MUS_COOLING_WRITE_PATH.to_string(),
+        value: Value::String("air".to_string()),
+    };
+    let (relaxed_output, relaxed_response): (RunOutput, RuntimeExplainRejectionResult) =
+        run_json_command(&["explain-rejection"], &relaxed_request);
+    assert_eq!(
+        relaxed_output.exit_code, EXIT_OK,
+        "explaining a now-consistent candidate succeeds; stderr={}",
+        relaxed_output.stderr
+    );
+    assert_eq!(relaxed_response.status, OperationStatus::Ok);
+    assert!(
+        relaxed_response.rejection.unsat_core.is_none(),
+        "the in-session write outranks the opened choice, so there is no \
+         conflict left to explain"
     );
 }
 
@@ -3328,10 +3583,14 @@ fn run_051_explain_rejection_surfaces_agree_on_the_named_constraint() {
 const LABELED_MUS_CPU_WRITE_PATH: &str = "component.rig.param.cpu";
 const LABELED_MUS_PSU_WRITE_PATH: &str = "component.rig.param.psu";
 const LABELED_MUS_CONSTRAINT_ID: &str = "highperf_requires_liquid";
+/// The `cooling` parameter of the second scope root `with_cooling_twin` adds.
+/// Its component id differs from `rig`, so the path resolves to exactly one
+/// scope root; only the facet projection ever sees both.
+const LABELED_MUS_TWIN_COOLING_WRITE_PATH: &str = "component.spare_rig.param.cooling";
 
-/// Open the labeled-MUS fixture with NO prior selection injected — the
-/// reproduction's starting point, and the shape `open_labeled_mus_snapshot`
-/// deliberately is not (it pins `cpu=highperf` in `choices`).
+/// Open the labeled-MUS fixture with NO prior selection — the reproduction's
+/// starting point, and the shape `open_labeled_mus_snapshot` deliberately is not
+/// (it resolves under `cpu = highperf`).
 fn open_labeled_mus_session(cmp_dir: &TempDirGuard) -> RuntimeSnapshot {
     let ccm_ref = cmp_dir.path.join("ccm");
     let resolve_result = resolve_labeled_mus_fixture_base(cmp_dir);
@@ -3353,26 +3612,27 @@ fn open_labeled_mus_session(cmp_dir: &TempDirGuard) -> RuntimeSnapshot {
 }
 
 /// The baseline values the assignment's lowest tier reads, asserted rather than
-/// assumed. The projection walks
-/// `resolved_output[<scope root>].components[<component>].params[<key>].value`,
-/// and the three key spellings in play (scope id `component:rig`, scope-root key
+/// assumed — together with the DECLARED binding that tier is now keyed by
+/// (ADR-0064 D5.2). The projection walks
+/// `resolved_output[<scope root>].components[<component>].params[<key>]`, and
+/// the three key spellings in play (scope id `component:rig`, scope-root key
 /// `rig`, dotted overlay path `component.rig.param.cooling`) make a silent miss
 /// easy — a miss would leave the assignment empty and every case below green.
+///
+/// The three values are the facets' declared defaults, because each parameter
+/// binds its facet and authors no value of its own (D2.3/D3).
 fn assert_labeled_mus_baseline(snapshot: &RuntimeSnapshot) {
-    let scope = snapshot
-        .resolved_output
-        .get("rig")
-        .expect("resolved_output must carry the 'rig' scope root");
-    let params = &scope
-        .components
-        .get("rig")
-        .expect("the 'rig' scope root must carry the 'rig' component")
-        .params;
     for (key, expected) in [("cpu", "standard"), ("cooling", "liquid"), ("psu", "gold")] {
+        let parameter = labeled_mus_param(snapshot, key);
         assert_eq!(
-            params.get(key).expect("resolved param").value,
+            parameter.value,
             Value::String(expected.to_string()),
             "baseline value for facet-bound param '{key}'"
+        );
+        assert_eq!(
+            parameter.facet.as_deref(),
+            Some(key),
+            "'{key}' must reach the runtime carrying its declared binding"
         );
     }
 }
@@ -3782,43 +4042,96 @@ fn run_059_write_enforcement_unset_facets_stay_free() {
     let _ = accept_labeled_mus_write(without_cpu, LABELED_MUS_COOLING_WRITE_PATH, "air");
 }
 
-/// D2's skip-on-disagreement rule. `parse_param_key` maps a path to a facet by
-/// last segment, which is many-to-one: two paths in different scope roots can
-/// land on one facet. When their values DISAGREE the facet is omitted from the
-/// assignment — treated as unset, and therefore free — so iteration order can
-/// never decide whether a write is accepted. The agreeing case is asserted
-/// alongside it, otherwise the disagreeing case would pass just as well if the
-/// second scope root were ignored entirely.
+/// ADR-0064 D5.1: enforcement follows the DECLARED binding, so a parameter that
+/// merely shares a facet's name is not that facet's handle and is never
+/// constraint-checked — while the bound handle, in the very same session state,
+/// is. The unbound twin is given a value that DISAGREES with the handle's, which
+/// under the retired last-segment guess dropped the `cooling` facet from the
+/// assignment entirely and let a violating write through; the declared binding
+/// leaves the facet intact.
+///
+/// The collision case this test used to pin (two paths mapping to one facet) is
+/// now a compile-time refusal, asserted by the compiler half's own test
+/// (configflux-tcp5, ADR-0064 D2.4); `run_070` covers the runtime's fail-closed
+/// response should one reach it anyway.
 #[test]
-fn run_060_write_enforcement_disagreeing_paths_leave_the_facet_free() {
+fn run_060_write_enforcement_declared_binding_beats_a_shared_name() {
     let cmp_dir = emitted_labeled_mus_fixture_dir();
     let snapshot = open_labeled_mus_session(&cmp_dir);
 
-    // Both scope roots say `cooling = air`: they agree, the agreed value is used,
-    // and `cpu = highperf` is rejected. This proves the projection really reads
-    // the second scope root.
-    let agreeing = with_second_cooling_scope(&snapshot, "air", "air");
-    let (agree_output, agree_response): (RunOutput, SetParameterResult) = run_json_command(
-        &["set-parameter"],
-        &labeled_mus_write(agreeing, LABELED_MUS_CPU_WRITE_PATH, "highperf"),
-    );
-    assert_constraint_rejected(&agree_output, &agree_response);
+    // A second scope root carries an UNBOUND `cooling` parameter saying `air`,
+    // while the bound handle still says `liquid`. `cpu = highperf` is legal on
+    // its own (highperf with liquid cooling and a gold psu is satisfiable).
+    let shadowed = with_cooling_twin(&snapshot, "air", false);
+    let dirty = accept_labeled_mus_write(shadowed, LABELED_MUS_CPU_WRITE_PATH, "highperf");
 
-    // The same two paths now disagree (`liquid` vs `air`). The facet is omitted,
-    // so `cpu = highperf` is accepted. A silent last-wins would pick `air` here
-    // and reject.
-    let disagreeing = with_second_cooling_scope(&snapshot, "liquid", "air");
-    let _ = accept_labeled_mus_write(disagreeing, LABELED_MUS_CPU_WRITE_PATH, "highperf");
+    // (a) The UNBOUND twin is not constraint-checked. Writing it to `air` under
+    // the pending `cpu = highperf` would violate `highperf_requires_liquid` if
+    // it named the facet — which is exactly what the last-segment guess made it
+    // do. It declares no binding, so the write is accepted.
+    let _ = accept_labeled_mus_write(dirty.clone(), LABELED_MUS_TWIN_COOLING_WRITE_PATH, "air");
+
+    // (b) The BOUND handle, same state, same value: enforced and rejected. The
+    // twin's disagreeing value must not omit the facet — the retired rule would
+    // have dropped it here and accepted.
+    let (output, response): (RunOutput, SetParameterResult) = run_json_command(
+        &["set-parameter"],
+        &labeled_mus_write(dirty, LABELED_MUS_COOLING_WRITE_PATH, "air"),
+    );
+    assert_constraint_rejected(&output, &response);
 }
 
-/// A snapshot carrying a SECOND scope root whose component also has a `cooling`
-/// param, so two distinct paths map to the one `cooling` facet. The component id
-/// differs from `rig` so the written path still resolves to exactly one scope
-/// root; only the facet projection sees both.
-fn with_second_cooling_scope(
+/// ADR-0064 D5.2: two parameters declaring ONE facet and holding different
+/// values is a compile-time refusal (D2.4), so no open can produce it. Reaching
+/// it anyway means the snapshot and its model disagree, and the write fails
+/// CLOSED with `E_SELECTION_ENGINE_DIVERGENCE` — the opposite of the retired
+/// rule, which silently omitted the facet and let the write through.
+///
+/// The snapshot is hand-assembled from an opened one, which is the only way to
+/// build the state at all.
+#[test]
+fn run_070_write_enforcement_divergent_binding_fails_closed() {
+    let cmp_dir = emitted_labeled_mus_fixture_dir();
+    let snapshot = open_labeled_mus_session(&cmp_dir);
+
+    let diverged = with_cooling_twin(&snapshot, "air", true);
+    let (output, response): (RunOutput, SetParameterResult) = run_json_command(
+        &["set-parameter"],
+        &labeled_mus_write(diverged, LABELED_MUS_CPU_WRITE_PATH, "highperf"),
+    );
+    assert_eq!(
+        output.exit_code, EXIT_COMMAND_ERROR,
+        "a divergent binding must fail closed (exit 2); stderr={}",
+        output.stderr
+    );
+    assert_eq!(response.status, OperationStatus::Error);
+    assert_eq!(
+        response.diagnostics.diagnostics[0].code, E_SELECTION_ENGINE_DIVERGENCE,
+        "an impossible snapshot is an engine divergence, not a policy violation; got {:?}",
+        response.diagnostics.diagnostics
+    );
+    assert!(
+        response.runtime_snapshot.is_none(),
+        "a fail-closed write changes nothing, so no snapshot is returned"
+    );
+
+    // The control: the SAME twin, same value, without the second DECLARATION is
+    // inert, so the identical write is accepted. The declaration is what
+    // diverges, not the value.
+    let inert = with_cooling_twin(&snapshot, "air", false);
+    let _ = accept_labeled_mus_write(inert, LABELED_MUS_CPU_WRITE_PATH, "highperf");
+}
+
+/// A snapshot carrying a SECOND scope root whose cloned component also has a
+/// `cooling` param holding `twin_cooling`. `bind_twin` decides whether the clone
+/// KEEPS its `facet` declarations: `false` is the name coincidence ADR-0064
+/// makes inert, `true` is the two-binders state D2.4 refuses at compile time.
+/// The component id differs from `rig`, so a written path still resolves to
+/// exactly one scope root; only the facet projection sees both.
+fn with_cooling_twin(
     snapshot: &RuntimeSnapshot,
-    first_cooling: &str,
-    second_cooling: &str,
+    twin_cooling: &str,
+    bind_twin: bool,
 ) -> RuntimeSnapshot {
     let mut snapshot = snapshot.clone();
     let mut second = snapshot
@@ -3827,25 +4140,16 @@ fn with_second_cooling_scope(
         .expect("scope root")
         .clone();
     let mut component = second.components.remove("rig").expect("component");
-    component
-        .params
-        .get_mut("cooling")
-        .expect("cooling param")
-        .value = Value::String(second_cooling.to_string());
+    for (key, parameter) in component.params.iter_mut() {
+        if !bind_twin {
+            parameter.facet = None;
+        }
+        if key == "cooling" {
+            parameter.value = Value::String(twin_cooling.to_string());
+        }
+    }
     second.components.insert("spare_rig".to_string(), component);
     snapshot.resolved_output.insert("spare".to_string(), second);
-
-    snapshot
-        .resolved_output
-        .get_mut("rig")
-        .expect("scope root")
-        .components
-        .get_mut("rig")
-        .expect("component")
-        .params
-        .get_mut("cooling")
-        .expect("cooling param")
-        .value = Value::String(first_cooling.to_string());
     snapshot
 }
 
@@ -3938,6 +4242,124 @@ fn run_039_ccm_usable_for_open_predicate() {
     assert!(
         ccm_usable_for_open(&ccm_ref.to_string_lossy()),
         "the solver fixture's emitted .ccm must be usable"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// configflux-nnwa: the `.ccm` an open binds must belong to the model the
+// snapshot claims.
+//
+// ADR-0030 D2's precondition asks only whether the artifact LOADS; it never
+// asked WHICH model it is bound to. A snapshot could therefore carry
+// `model_hash` of model A while `ccm_ref` named a `.ccm` compiled from model B,
+// and every solver-backed decision on that session — write acceptance, the
+// rejection core, the constraint roster — was then computed against B while the
+// snapshot's lineage fields claimed A. This completes D2 with the lineage bind.
+// ---------------------------------------------------------------------------
+
+/// Opening one fixture's snapshot against ANOTHER fixture's `.ccm` fails closed
+/// with `E_RUNTIME_OPEN_SOLVER_MODEL_UNAVAILABLE` and no snapshot, while the
+/// same snapshot opened against its OWN `.ccm` still succeeds.
+///
+/// The foreign `.ccm` is a real, loadable artifact with a populated symbol
+/// table, so the D2 usability check passes and the refusal can only come from
+/// the lineage bind. Two further properties are pinned here: the lineage
+/// refusal is reported AHEAD of the ADR-0060 D6 domain-table check — a
+/// wrong-model `.ccm` would otherwise surface as an unknown facet symbol,
+/// naming the wrong cause — and the diagnostic echoes NEITHER hash.
+#[test]
+fn run_071_runtime_open_fails_closed_on_a_ccm_bound_to_another_model() {
+    let cmp_dir = emitted_solver_fixture_dir();
+    let own_ccm = cmp_dir.path.join("ccm");
+    let resolve_result = resolve_solver_fixture_base(&cmp_dir);
+
+    let foreign_dir = emitted_labeled_mus_fixture_dir();
+    let foreign_ccm = foreign_dir.path.join("ccm");
+    let foreign_model_hash = open_handle(&foreign_dir).model_hash;
+    assert!(
+        foreign_ccm.join("ccm.manifest.json").is_file(),
+        "the second fixture must emit a usable .ccm sibling at {}",
+        foreign_ccm.display()
+    );
+    assert_ne!(
+        foreign_model_hash, resolve_result.model_hash,
+        "the two fixtures must be different models for this test to mean anything"
+    );
+    assert!(
+        crate::solver_validation::ccm_usable_for_open(&foreign_ccm.to_string_lossy()),
+        "the foreign .ccm must pass the ADR-0030 D2 usability check, so this test \
+         exercises the lineage bind and not that check"
+    );
+
+    let mut open_request = runtime_open_request_from_resolve(&resolve_result);
+    open_request.ccm_ref = foreign_ccm.to_string_lossy().into_owned();
+    let (output, response): (RunOutput, RuntimeOpenResult) =
+        run_json_command(&["runtime-open"], &open_request);
+
+    assert_eq!(
+        output.exit_code, EXIT_COMMAND_ERROR,
+        "runtime-open must fail closed when ccm_ref names a foreign model"
+    );
+    assert_eq!(response.status, OperationStatus::Error);
+    assert!(
+        response.runtime_snapshot.is_none(),
+        "a foreign-model open must return no snapshot"
+    );
+    let diagnostic = &response.diagnostics.diagnostics[0];
+    assert_eq!(
+        diagnostic.code, E_RUNTIME_OPEN_SOLVER_MODEL_UNAVAILABLE,
+        "the lineage refusal reuses the open model-unavailable code, and is \
+         reported ahead of the ADR-0060 D6 domain-table check"
+    );
+    for hash in [&resolve_result.model_hash, &foreign_model_hash] {
+        assert!(
+            !diagnostic.message.contains(hash.as_str()),
+            "the diagnostic message must name the class, never echo a model hash"
+        );
+        assert!(
+            !diagnostic
+                .hint
+                .as_deref()
+                .unwrap_or_default()
+                .contains(hash.as_str()),
+            "the diagnostic hint must name the class, never echo a model hash"
+        );
+    }
+
+    // The arm above is caught today only INCIDENTALLY, by the D6 table check,
+    // and under the wrong cause. Drop the domain table — valid, and the shape
+    // every pre-ADR-0060 integrator sends (D7) — and nothing but the lineage
+    // bind stands between a foreign `.ccm` and an opened session.
+    let mut bare_request = runtime_open_request_from_resolve(&resolve_result);
+    bare_request.ccm_ref = foreign_ccm.to_string_lossy().into_owned();
+    bare_request.closed_facet_domains = Default::default();
+    let (output, response): (RunOutput, RuntimeOpenResult) =
+        run_json_command(&["runtime-open"], &bare_request);
+    assert_eq!(
+        output.exit_code, EXIT_COMMAND_ERROR,
+        "a foreign-model open must fail closed with no domain table to catch it"
+    );
+    assert_eq!(response.status, OperationStatus::Error);
+    assert!(
+        response.runtime_snapshot.is_none(),
+        "a foreign-model open must return no snapshot"
+    );
+    assert_eq!(
+        response.diagnostics.diagnostics[0].code, E_RUNTIME_OPEN_SOLVER_MODEL_UNAVAILABLE,
+        "the lineage bind, not the domain table, is what refuses a foreign model"
+    );
+
+    // The same snapshot against its OWN `.ccm` still opens: the bind is a gate,
+    // not a blanket rejection.
+    let mut own_request = runtime_open_request_from_resolve(&resolve_result);
+    own_request.ccm_ref = own_ccm.to_string_lossy().into_owned();
+    let (output, response): (RunOutput, RuntimeOpenResult) =
+        run_json_command(&["runtime-open"], &own_request);
+    assert_eq!(output.exit_code, EXIT_OK, "stderr={}", output.stderr);
+    assert_eq!(response.status, OperationStatus::Ok);
+    assert!(
+        response.runtime_snapshot.is_some(),
+        "a snapshot whose model_hash matches its .ccm must still open"
     );
 }
 
@@ -4168,7 +4590,7 @@ fn run_042_ffi_open_execute_snapshot_and_close_round_trip() {
     );
     assert!(!handle.is_null());
 
-    let execute_request = CString::new(r#"{"schema_version":4}"#).expect("cstring");
+    let execute_request = CString::new(r#"{"schema_version":5}"#).expect("cstring");
     let mut execute_response_json: *mut c_char = ptr::null_mut();
     let execute_status = unsafe {
         configflux_runtime_session_execute_json(
@@ -4213,7 +4635,7 @@ fn run_043_ffi_execute_rejects_unknown_operation() {
         configflux_runtime_string_free(response_json);
     }
 
-    let execute_request = CString::new(r#"{"schema_version":4}"#).expect("cstring");
+    let execute_request = CString::new(r#"{"schema_version":5}"#).expect("cstring");
     let mut execute_response_json: *mut c_char = ptr::null_mut();
     let execute_status = unsafe {
         configflux_runtime_session_execute_json(
@@ -4246,8 +4668,11 @@ fn run_044_ffi_invalid_json_is_mapped_deterministically() {
 }
 
 /// The handshake rejects a major-version mismatch and reports the current ABI
-/// version (now 1.1 after configflux-u32v). The minor bump keeps existing
-/// `expected_minor = 0` clients compatible (`expected_minor <= ABI minor`).
+/// version (now 1.2 after configflux-tkwt / ADR-0060 D5; 1.1 after
+/// configflux-u32v). Each minor bump keeps existing lower-`expected_minor`
+/// clients compatible (`expected_minor <= ABI minor`). The assertions below are
+/// symbolic and stay green across a bump — the version text is the part that
+/// must not be left stale.
 #[test]
 fn run_045_ffi_handshake_version_contract() {
     let mut version = ConfigFluxRuntimeAbiVersion {
@@ -4260,19 +4685,54 @@ fn run_045_ffi_handshake_version_contract() {
     assert_eq!(version.major, CONFIGFLUX_RUNTIME_C_ABI_VERSION_MAJOR);
     assert_eq!(version.minor, CONFIGFLUX_RUNTIME_C_ABI_VERSION_MINOR);
 
-    // A current-major, minor=0 client still handshakes Ok against ABI 1.1.
-    let mut v2 = ConfigFluxRuntimeAbiVersion {
+    // ADR-0064 D5.5: the minor moved 2 -> 3 to advertise that a resolved
+    // parameter may carry `facet` and that enforcement follows declared
+    // bindings. The exported symbols and their signatures are unchanged.
+    assert_eq!(
+        CONFIGFLUX_RUNTIME_C_ABI_VERSION_MINOR, 3,
+        "the declared-binding behaviour is advertised as ABI 1.3"
+    );
+
+    // Every minor up to and including the current one still handshakes Ok, so
+    // no existing client is invalidated by the bump.
+    for expected_minor in 0..=CONFIGFLUX_RUNTIME_C_ABI_VERSION_MINOR {
+        let mut seen = ConfigFluxRuntimeAbiVersion {
+            major: 0,
+            minor: 0,
+            patch: 0,
+        };
+        let ok = unsafe {
+            configflux_runtime_abi_handshake(
+                CONFIGFLUX_RUNTIME_C_ABI_VERSION_MAJOR,
+                expected_minor,
+                &mut seen,
+            )
+        };
+        assert_eq!(
+            ok,
+            ConfigFluxRuntimeAbiStatus::Ok,
+            "an expected_minor={expected_minor} client must remain compatible with ABI 1.3"
+        );
+        assert_eq!(seen.minor, CONFIGFLUX_RUNTIME_C_ABI_VERSION_MINOR);
+    }
+
+    // A client expecting a minor this build does not implement is refused.
+    let mut future = ConfigFluxRuntimeAbiVersion {
         major: 0,
         minor: 0,
         patch: 0,
     };
-    let ok = unsafe {
-        configflux_runtime_abi_handshake(CONFIGFLUX_RUNTIME_C_ABI_VERSION_MAJOR, 0, &mut v2)
+    let mismatch = unsafe {
+        configflux_runtime_abi_handshake(
+            CONFIGFLUX_RUNTIME_C_ABI_VERSION_MAJOR,
+            CONFIGFLUX_RUNTIME_C_ABI_VERSION_MINOR + 1,
+            &mut future,
+        )
     };
     assert_eq!(
-        ok,
-        ConfigFluxRuntimeAbiStatus::Ok,
-        "an expected_minor=0 client must remain compatible with ABI 1.1"
+        mismatch,
+        ConfigFluxRuntimeAbiStatus::VersionMismatch,
+        "expected_minor above the ABI minor must be refused"
     );
 }
 
@@ -4349,4 +4809,805 @@ fn run_050_transport_request_invalid_does_not_echo_field_values() {
         "diagnostic must not echo request field values, got: {}",
         output.stderr
     );
+}
+
+// ---------------------------------------------------------------------------
+// configflux-tkwt / ADR-0060 — closed-facet domain entailment on the RUNTIME
+// explain surface.
+//
+// configflux-pt6v taught attribution to complete a core clause that mentions a
+// closed facet ONLY negatively: `[aeroflux, !hydra, !a9]` over a closed
+// `cooling_model = {a9, x200}` entails `x200`, so `aeroflux_excludes_x200`
+// evaluates genuinely False instead of `Unknown` (ADR-0054 §2 preserved, not
+// weakened). That completion needs the model's closed-facet declarations, which
+// `session_compose::explain` reads from its `ModelHandle` — and the runtime has
+// none, so both runtime rejection sites passed an EMPTY map and kept reporting
+// the model as over-constrained. ADR-0060 carries the table on the runtime OPEN
+// contract instead: the resolver computes it, `ResolveResult` records it, the
+// documented projection forwards it, and `runtime_open` copies it onto the
+// snapshot the two rejection sites already hold.
+//
+// The fixture is the pt6v reproduction, driven through the REAL runtime path
+// (`runtime-open` → `explain-rejection` / `set-parameter`) rather than a
+// compiler-side unit test: `cooling_brand` defaults to `aeroflux`, so the
+// session's baseline assignment pins it without any injected choice, and
+// writing `cooling_model = x200` is a genuine conflict whose MUS mentions
+// `cooling_model` only negatively.
+// ---------------------------------------------------------------------------
+
+/// Pin (a): `cooling_model` closed, declared `[a9, x200]`.
+const ENTAILMENT_DEFS_CLOSED: &str = r#"{
+    "package": "s_entailment",
+    "version": "1.0.0",
+    "definitions": {
+        "brand_slot": {
+            "type": "string",
+            "doc": "Runtime-selectable cooling brand",
+            "lifecycle": "runtime",
+            "safety": "q_m",
+            "access": "technician"
+        },
+        "model_slot": {
+            "type": "string",
+            "doc": "Runtime-selectable cooling model",
+            "lifecycle": "runtime",
+            "safety": "q_m",
+            "access": "technician"
+        }
+    },
+    "facets": {
+        "cooling_brand": {
+            "values": ["aeroflux", "hydra"],
+            "default": "aeroflux",
+            "doc": "Cooling brand."
+        },
+        "cooling_model": {
+            "values": ["a9", "x200"],
+            "default": "a9",
+            "doc": "Cooling model."
+        }
+    },
+    "constraints": {
+        "aeroflux_excludes_x200": {
+            "condition": "cooling_brand != 'aeroflux' || cooling_model != 'x200'",
+            "doc": "The aeroflux brand does not ship the x200 model."
+        }
+    }
+}"#;
+
+/// Pin (b): the SAME model with `cooling_model` declared `[x200, a9]`.
+/// configflux-gpwf hypothesised that declared value order rescued attribution;
+/// pt6v refuted that for the shipped build. Pinned here so the runtime surface
+/// cannot start depending on which value happens to sort first.
+const ENTAILMENT_DEFS_CLOSED_REVERSED: &str = r#"{
+    "package": "s_entailment",
+    "version": "1.0.0",
+    "definitions": {
+        "brand_slot": {
+            "type": "string",
+            "doc": "Runtime-selectable cooling brand",
+            "lifecycle": "runtime",
+            "safety": "q_m",
+            "access": "technician"
+        },
+        "model_slot": {
+            "type": "string",
+            "doc": "Runtime-selectable cooling model",
+            "lifecycle": "runtime",
+            "safety": "q_m",
+            "access": "technician"
+        }
+    },
+    "facets": {
+        "cooling_brand": {
+            "values": ["aeroflux", "hydra"],
+            "default": "aeroflux",
+            "doc": "Cooling brand."
+        },
+        "cooling_model": {
+            "values": ["x200", "a9"],
+            "default": "a9",
+            "doc": "Cooling model."
+        }
+    },
+    "constraints": {
+        "aeroflux_excludes_x200": {
+            "condition": "cooling_brand != 'aeroflux' || cooling_model != 'x200'",
+            "doc": "The aeroflux brand does not ship the x200 model."
+        }
+    }
+}"#;
+
+/// Pin (c): both facets `open: true`. An open facet is synthesized with
+/// at-most-one ONLY (`compiler_core::synthesize_facet_cardinality`), so nothing
+/// is entailed about it and `closed_facet_domains` omits it — the runtime opens
+/// with an EMPTY table. Attribution must still name the constraint here, because
+/// the MUS carries a positive literal for each facet. This is the no-regression
+/// pin: it passes today and must keep passing.
+const ENTAILMENT_DEFS_OPEN: &str = r#"{
+    "package": "s_entailment",
+    "version": "1.0.0",
+    "definitions": {
+        "brand_slot": {
+            "type": "string",
+            "doc": "Runtime-selectable cooling brand",
+            "lifecycle": "runtime",
+            "safety": "q_m",
+            "access": "technician"
+        },
+        "model_slot": {
+            "type": "string",
+            "doc": "Runtime-selectable cooling model",
+            "lifecycle": "runtime",
+            "safety": "q_m",
+            "access": "technician"
+        }
+    },
+    "facets": {
+        "cooling_brand": {
+            "values": ["aeroflux", "hydra"],
+            "default": "aeroflux",
+            "open": true,
+            "doc": "Cooling brand."
+        },
+        "cooling_model": {
+            "values": ["a9", "x200"],
+            "default": "a9",
+            "open": true,
+            "doc": "Cooling model."
+        }
+    },
+    "constraints": {
+        "aeroflux_excludes_x200": {
+            "condition": "cooling_brand != 'aeroflux' || cooling_model != 'x200'",
+            "doc": "The aeroflux brand does not ship the x200 model."
+        }
+    }
+}"#;
+
+const ENTAILMENT_COMPONENTS: &str = r#"{
+    "package": "s_entailment",
+    "version": "1.0.0",
+    "components": {
+        "climate": {
+            "type": "controller",
+            "params": {
+                "cooling_brand": {
+                    "inherits": "brand_slot",
+                    "type": "string",
+                    "doc": "Runtime cooling brand selection",
+                    "facet": "cooling_brand",
+                    "lifecycle": "runtime",
+                    "safety": "q_m",
+                    "access": "technician",
+                    "req_id": "req_entailment_001"
+                },
+                "cooling_model": {
+                    "inherits": "model_slot",
+                    "type": "string",
+                    "doc": "Runtime cooling model selection",
+                    "facet": "cooling_model",
+                    "lifecycle": "runtime",
+                    "safety": "q_m",
+                    "access": "technician",
+                    "req_id": "req_entailment_002"
+                }
+            }
+        }
+    }
+}"#;
+
+const ENTAILMENT_SCOPE: &str = "component:climate";
+const ENTAILMENT_MODEL_WRITE_PATH: &str = "component.climate.param.cooling_model";
+const ENTAILMENT_CONSTRAINT_ID: &str = "aeroflux_excludes_x200";
+const ENTAILMENT_CONSTRAINT_CONDITION: &str =
+    "cooling_brand != 'aeroflux' || cooling_model != 'x200'";
+
+/// Compile one of the three entailment fixture variants, keeping the emitted
+/// CMP package and its `.ccm` sibling on disk for the test's lifetime.
+fn emitted_entailment_fixture_dir(definitions: &str) -> TempDirGuard {
+    let path = unique_fixture_dir("entailment");
+
+    let compile_result = compile_model(CompileModelRequest {
+        schema_version: PRODUCT_SCHEMA_VERSION,
+        source_manifest: vec![
+            SourceManifestEntry {
+                source_id: "scenarios/s_entailment/00_definitions.toml".to_string(),
+                inline_content: definitions.to_string(),
+            },
+            SourceManifestEntry {
+                source_id: "scenarios/s_entailment/10_components.toml".to_string(),
+                inline_content: ENTAILMENT_COMPONENTS.to_string(),
+            },
+        ],
+        output_dir: Some(path_display(&path)),
+        cluster_size: None,
+        budget: None,
+        stamp_time: false,
+    });
+    assert_eq!(
+        compile_result.status,
+        OperationStatus::Ok,
+        "entailment fixture compilation failed: {:?}",
+        compile_result.verify_report.diagnostics.diagnostics
+    );
+
+    TempDirGuard {
+        path,
+        manifest_ref: compile_result
+            .compiled_model_package_ref
+            .expect("compiled_model_package_ref"),
+    }
+}
+
+/// Resolve the entailment fixture under the empty base selection. Both facets
+/// carry a declared default (`aeroflux` / `a9`), which ADR-0047 §5 auto-binds,
+/// so the resolve is satisfiable and the runtime's baseline assignment already
+/// pins `cooling_brand = aeroflux` without any injected choice.
+fn resolve_entailment_fixture_base(
+    cmp_dir: &TempDirGuard,
+) -> compiler::loader_api::ResolveResult {
+    let handle = open_handle(cmp_dir);
+    let selection_state = canonical_selection_state(
+        handle.model_hash.clone(),
+        ENTAILMENT_SCOPE.to_string(),
+        BTreeMap::new(),
+        BTreeMap::new(),
+    )
+    .expect("selection state");
+    let result = resolve_from_selection(ResolveFromSelectionRequest {
+        schema_version: PRODUCT_SCHEMA_VERSION,
+        model_handle: handle,
+        scope: ENTAILMENT_SCOPE.to_string(),
+        selection_state,
+        implied_choices: Default::default(),
+    });
+    assert_eq!(
+        result.status,
+        OperationStatus::Ok,
+        "entailment fixture resolve failed: {:?}",
+        result.diagnostics.diagnostics
+    );
+    result
+}
+
+/// Open the entailment fixture through the runtime CLI and return its snapshot.
+fn open_entailment_snapshot(cmp_dir: &TempDirGuard) -> RuntimeSnapshot {
+    let ccm_ref = cmp_dir.path.join("ccm");
+    assert!(
+        ccm_ref.join("ccm.manifest.json").is_file(),
+        "product compile path must emit the .ccm sibling at {}",
+        ccm_ref.display()
+    );
+    let resolve_result = resolve_entailment_fixture_base(cmp_dir);
+    let mut open_request = runtime_open_request_from_resolve(&resolve_result);
+    open_request.ccm_ref = ccm_ref.to_string_lossy().into_owned();
+
+    let (output, response): (RunOutput, RuntimeOpenResult) =
+        run_json_command(&["runtime-open"], &open_request);
+    assert_eq!(output.exit_code, EXIT_OK, "open stderr={}", output.stderr);
+    assert_eq!(response.status, OperationStatus::Ok);
+    let snapshot = response.runtime_snapshot.expect("runtime_snapshot");
+    // The baseline tier is what pins `cooling_brand`; a silent miss in that
+    // projection would leave the assignment empty and make every case below
+    // pass (or fail) for the wrong reason.
+    let params = &snapshot
+        .resolved_output
+        .get("climate")
+        .expect("resolved_output must carry the 'climate' scope root")
+        .components
+        .get("climate")
+        .expect("the 'climate' scope root must carry the 'climate' component")
+        .params;
+    for (key, expected) in [("cooling_brand", "aeroflux"), ("cooling_model", "a9")] {
+        assert_eq!(
+            params.get(key).expect("resolved param").value,
+            Value::String(expected.to_string()),
+            "baseline value for facet-bound param '{key}'"
+        );
+    }
+    snapshot
+}
+
+/// Drive `explain-rejection` for `cooling_model = x200` and return the core.
+fn explain_entailment_conflict(snapshot: RuntimeSnapshot) -> compiler::loader_api::UnsatCore {
+    let request = RuntimeExplainRejectionRequest {
+        schema_version: PRODUCT_SCHEMA_VERSION,
+        runtime_snapshot: snapshot,
+        path: ENTAILMENT_MODEL_WRITE_PATH.to_string(),
+        value: Value::String("x200".to_string()),
+    };
+    let (output, response): (RunOutput, RuntimeExplainRejectionResult) =
+        run_json_command(&["explain-rejection"], &request);
+    assert_eq!(
+        output.exit_code, EXIT_OK,
+        "a rejection explanation is a success (exit 0); stderr={}",
+        output.stderr
+    );
+    response
+        .rejection
+        .unsat_core
+        .expect("a genuine cross-facet conflict must carry an unsat_core")
+}
+
+/// Assert a core names `aeroflux_excludes_x200` and quotes its condition.
+fn assert_names_entailment_constraint(core: &compiler::loader_api::UnsatCore, label: &str) {
+    assert!(
+        core.conflicting_constraints.iter().any(|constraint| {
+            constraint.kind == ConstraintKind::ModelRule
+                && constraint.constraint_id.as_deref() == Some(ENTAILMENT_CONSTRAINT_ID)
+                && constraint.summary == ENTAILMENT_CONSTRAINT_CONDITION
+        }),
+        "{label}: the core must name the violated constraint by id and quote its \
+         condition; got {:?}",
+        core.conflicting_constraints
+    );
+}
+
+/// Pin (a). A closed two-value facet appearing only negatively in the core must
+/// be completed by domain entailment, so the runtime `explain-rejection`
+/// surface names `aeroflux_excludes_x200` instead of reporting the model as
+/// over-constrained.
+#[test]
+fn run_061_closed_facet_domain_entailment_names_the_constraint_on_explain() {
+    let cmp_dir = emitted_entailment_fixture_dir(ENTAILMENT_DEFS_CLOSED);
+    let snapshot = open_entailment_snapshot(&cmp_dir);
+    let core = explain_entailment_conflict(snapshot);
+    assert_names_entailment_constraint(&core, "closed [a9, x200]");
+}
+
+/// Pin (b). Declared value order must not decide attribution (configflux-gpwf's
+/// hypothesis, refuted by pt6v and pinned here for the runtime surface).
+#[test]
+fn run_062_closed_facet_domain_entailment_ignores_declared_value_order() {
+    let cmp_dir = emitted_entailment_fixture_dir(ENTAILMENT_DEFS_CLOSED_REVERSED);
+    let snapshot = open_entailment_snapshot(&cmp_dir);
+    let core = explain_entailment_conflict(snapshot);
+    assert_names_entailment_constraint(&core, "closed [x200, a9]");
+}
+
+/// Pin (c). With both facets OPEN the table is empty by construction, and the
+/// core carries a positive literal per facet — attribution already worked here
+/// and must not regress.
+#[test]
+fn run_063_closed_facet_domain_open_facets_still_name_the_constraint() {
+    let cmp_dir = emitted_entailment_fixture_dir(ENTAILMENT_DEFS_OPEN);
+    let snapshot = open_entailment_snapshot(&cmp_dir);
+    let core = explain_entailment_conflict(snapshot);
+    assert_names_entailment_constraint(&core, "open both facets");
+}
+
+/// Pin (a) through the WRITE path. `set-parameter` reaches the same shared
+/// converter via `write_enforcement::explain_core`, and ADR-0054 §6's
+/// machine-consumer contract puts the attribution on the diagnostic's
+/// `entity_path` — the only way a client tells a policy violation from the
+/// other `E_SELECTION_CONFLICT` causes.
+#[test]
+fn run_064_closed_facet_domain_entailment_names_the_constraint_on_a_write() {
+    let cmp_dir = emitted_entailment_fixture_dir(ENTAILMENT_DEFS_CLOSED);
+    let snapshot = open_entailment_snapshot(&cmp_dir);
+
+    let request = SetParameterRequest {
+        schema_version: PRODUCT_SCHEMA_VERSION,
+        runtime_snapshot: snapshot,
+        path: ENTAILMENT_MODEL_WRITE_PATH.to_string(),
+        value: Value::String("x200".to_string()),
+        intent: compiler::runtime_api::OverrideIntent::default(),
+        actor: None,
+        reason: None,
+    };
+    let (output, response): (RunOutput, SetParameterResult) =
+        run_json_command(&["set-parameter"], &request);
+    assert_eq!(
+        output.exit_code, EXIT_COMMAND_ERROR,
+        "a constraint-violating write is a domain rejection (exit 2); stderr={}",
+        output.stderr
+    );
+    assert_eq!(
+        response.diagnostics.diagnostics[0].code, E_SELECTION_CONFLICT,
+        "precondition: this must be the constraint rejection"
+    );
+    let core = response
+        .unsat_core
+        .as_ref()
+        .expect("a constraint rejection carries the shared unsat core");
+    assert_names_entailment_constraint(core, "write path");
+    assert_eq!(
+        response.diagnostics.diagnostics[0].entity_path.as_deref(),
+        Some("constraints/aeroflux_excludes_x200"),
+        "ADR-0054 §6: a constraint violation attributes to constraints/<id>"
+    );
+}
+
+/// The documented interpreter-resolve → runtime-open projection
+/// (`examples/04-fleet-edge-node/README.md`), applied to the `ResolveResult`
+/// **JSON** and nothing else. `ccm_ref` is the one field a device supplies
+/// locally: it names an artifact path, not a resolve output, so no projection
+/// of the resolve result can produce it.
+fn entailment_open_request_json_from_resolve_json(
+    resolve_json: &serde_json::Value,
+    ccm_ref: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": PRODUCT_SCHEMA_VERSION,
+        "model_hash": resolve_json["model_hash"],
+        "resolve_hash": resolve_json["resolve_hash"],
+        "scope": resolve_json["scope"],
+        "resolved_output": resolve_json["resolved_output"],
+        "resolved_component_dependencies":
+            resolve_json.get("resolved_component_dependencies").cloned()
+                .unwrap_or_else(|| serde_json::json!({})),
+        "resolved_artifacts": resolve_json.get("resolved_artifacts").cloned()
+            .unwrap_or_else(|| serde_json::json!({})),
+        "context_tags": resolve_json.get("context_tags").cloned()
+            .unwrap_or_else(|| serde_json::json!({})),
+        "choices": resolve_json.get("choices").cloned()
+            .unwrap_or_else(|| serde_json::json!({})),
+        "defaulted_choices": resolve_json.get("defaulted_choices").cloned()
+            .unwrap_or_else(|| serde_json::json!({})),
+        "closed_facet_domains": resolve_json.get("closed_facet_domains").cloned()
+            .unwrap_or_else(|| serde_json::json!({})),
+        "ccm_ref": ccm_ref,
+    })
+}
+
+/// Open from a raw JSON payload through the CLI, returning the whole result so
+/// a caller can assert on either the snapshot or the fail-closed diagnostic.
+fn open_from_json(payload: &serde_json::Value) -> (RunOutput, RuntimeOpenResult) {
+    let bytes = serde_json::to_vec(payload).expect("serialize open payload");
+    let output = run_cli(&["runtime-open"], &bytes);
+    let response =
+        serde_json::from_slice::<RuntimeOpenResult>(&output.stdout).expect("parse open response");
+    (output, response)
+}
+
+/// ADR-0060 acceptance 2 — the producer-reachability pin, and the one that
+/// would have failed against the reviewed draft. It holds NO `ModelHandle`:
+/// the open payload is built from the serialized `ResolveResult` alone by the
+/// documented projection, which is what a real device has. If the resolver did
+/// not record the table, or the projection did not forward it, the rejection
+/// here degrades to over-constrained and this fails — which is exactly the
+/// "shipped inert on the surface it exists to fix" outcome the ADR guards.
+#[test]
+fn run_065_closed_facet_domain_reaches_the_runtime_from_resolve_json_alone() {
+    let cmp_dir = emitted_entailment_fixture_dir(ENTAILMENT_DEFS_CLOSED);
+    let ccm_ref = cmp_dir.path.join("ccm").to_string_lossy().into_owned();
+    let resolve_result = resolve_entailment_fixture_base(&cmp_dir);
+
+    // Cross the JSON boundary deliberately: from here on the test holds bytes,
+    // not the typed `ResolveResult`, and certainly not a `ModelHandle`.
+    let resolve_json: serde_json::Value =
+        serde_json::from_str(&serde_json::to_string(&resolve_result).expect("serialize resolve"))
+            .expect("resolve json");
+    assert!(
+        !resolve_json["closed_facet_domains"]["cooling_model"].is_null(),
+        "the resolve envelope must carry the closed-facet table; got {resolve_json}"
+    );
+
+    let payload = entailment_open_request_json_from_resolve_json(&resolve_json, &ccm_ref);
+    let (output, response) = open_from_json(&payload);
+    assert_eq!(output.exit_code, EXIT_OK, "open stderr={}", output.stderr);
+    let snapshot = response.runtime_snapshot.expect("runtime_snapshot");
+    assert!(
+        !snapshot.closed_facet_domains.is_empty(),
+        "the projected table must survive onto the snapshot"
+    );
+
+    let core = explain_entailment_conflict(snapshot);
+    assert_names_entailment_constraint(&core, "projected from resolve JSON");
+}
+
+/// ADR-0060 acceptance 3 / D7 — an open payload WITHOUT the field stays valid
+/// and reproduces the pre-ADR-0060 output exactly. Failing an open on a missing
+/// DIAGNOSTIC input would break every existing integrator for a message-quality
+/// feature, so an absent table is honest degradation, not an error. This is the
+/// pin that keeps `#[serde(default)]` load-bearing rather than decorative.
+#[test]
+fn run_066_closed_facet_domain_omitted_reports_the_model_over_constrained() {
+    let cmp_dir = emitted_entailment_fixture_dir(ENTAILMENT_DEFS_CLOSED);
+    let ccm_ref = cmp_dir.path.join("ccm").to_string_lossy().into_owned();
+    let resolve_result = resolve_entailment_fixture_base(&cmp_dir);
+    let resolve_json: serde_json::Value =
+        serde_json::from_str(&serde_json::to_string(&resolve_result).expect("serialize resolve"))
+            .expect("resolve json");
+
+    let mut payload = entailment_open_request_json_from_resolve_json(&resolve_json, &ccm_ref);
+    payload
+        .as_object_mut()
+        .expect("open payload object")
+        .remove("closed_facet_domains")
+        .expect("precondition: the projection carried the key");
+
+    let (output, response) = open_from_json(&payload);
+    assert_eq!(
+        output.exit_code, EXIT_OK,
+        "a payload without the field must still open; stderr={}",
+        output.stderr
+    );
+    let snapshot = response.runtime_snapshot.expect("runtime_snapshot");
+    assert!(
+        snapshot.closed_facet_domains.is_empty(),
+        "an absent key must default to an EMPTY table — never a table guessed \
+         from the symbol table (D7)"
+    );
+
+    let core = explain_entailment_conflict(snapshot);
+    assert!(
+        core.conflicting_constraints.iter().any(|constraint| {
+            constraint.kind == ConstraintKind::ModelRule
+                && constraint.constraint_id.is_none()
+                && constraint.summary == MODEL_OVER_CONSTRAINED_SUMMARY
+        }),
+        "without domains the surface must degrade to the pre-ADR-0060 \
+         over-constrained gloss, not fabricate an attribution; got {:?}",
+        core.conflicting_constraints
+    );
+}
+
+/// A valid open payload whose closed-facet table has been tampered with to name
+/// a value the compiled model never declared.
+fn entailment_payload_with_unknown_domain_value(cmp_dir: &TempDirGuard) -> serde_json::Value {
+    let ccm_ref = cmp_dir.path.join("ccm").to_string_lossy().into_owned();
+    let resolve_result = resolve_entailment_fixture_base(cmp_dir);
+    let resolve_json: serde_json::Value =
+        serde_json::from_str(&serde_json::to_string(&resolve_result).expect("serialize resolve"))
+            .expect("resolve json");
+    let mut payload = entailment_open_request_json_from_resolve_json(&resolve_json, &ccm_ref);
+    payload["closed_facet_domains"]["cooling_model"] =
+        serde_json::json!(["a9", "x200", "z999_not_in_this_model"]);
+    payload
+}
+
+/// ADR-0060 acceptance 4 (CLI) / D6 — a table the bound `.ccm` cannot account
+/// for FAILS the open, with no snapshot. Every other field on the open contract
+/// already fails closed on corruption; leaving this one unchecked would make it
+/// the first whose corruption degrades behaviour silently. The check is what
+/// removes that inconsistency, and it is the cheap half of the hole
+/// `Deserialize` opens on a type whose Rust API cannot represent an open facet.
+#[test]
+fn run_067_closed_facet_domain_unknown_symbol_fails_the_cli_open_closed() {
+    let cmp_dir = emitted_entailment_fixture_dir(ENTAILMENT_DEFS_CLOSED);
+    let payload = entailment_payload_with_unknown_domain_value(&cmp_dir);
+
+    let (output, response) = open_from_json(&payload);
+    assert_eq!(
+        output.exit_code, EXIT_COMMAND_ERROR,
+        "an unaccountable domain table is a domain rejection (exit 2); stderr={}",
+        output.stderr
+    );
+    assert_eq!(response.status, OperationStatus::Error);
+    assert!(
+        response.runtime_snapshot.is_none(),
+        "a fail-closed open must return NO snapshot"
+    );
+    assert_eq!(
+        response.diagnostics.diagnostics[0].code,
+        compiler::runtime_api::E_RUNTIME_OPEN_FACET_DOMAIN_UNKNOWN,
+    );
+    assert!(
+        response.diagnostics.diagnostics[0]
+            .message
+            .contains("cooling_model.z999_not_in_this_model"),
+        "the diagnostic must name the offending symbol; got {}",
+        response.diagnostics.diagnostics[0].message
+    );
+}
+
+/// ADR-0060 acceptance 4 (C ABI) / D6 — the same fail-closed contract on the
+/// SDK entrypoint. Both entrypoints share
+/// `runtime_open_with_solver_validation` precisely so this cannot drift; the
+/// pin exists because configflux-u32v is the regression where it did.
+#[test]
+fn run_068_closed_facet_domain_unknown_symbol_fails_the_abi_open_closed() {
+    let cmp_dir = emitted_entailment_fixture_dir(ENTAILMENT_DEFS_CLOSED);
+    let payload = entailment_payload_with_unknown_domain_value(&cmp_dir);
+    let request_json =
+        CString::new(serde_json::to_string(&payload).expect("serialize")).expect("cstring");
+
+    let mut handle: *mut ConfigFluxRuntimeSessionHandle = ptr::null_mut();
+    let mut response_json: *mut c_char = ptr::null_mut();
+    let status = unsafe {
+        configflux_runtime_session_open(request_json.as_ptr(), &mut handle, &mut response_json)
+    };
+    // The boundary status is Ok — the call itself is well formed; the rejection
+    // is a runtime-domain error carried in the response envelope, exactly as the
+    // D2 precondition reports its own (`run_041`).
+    assert_eq!(
+        status,
+        ConfigFluxRuntimeAbiStatus::Ok,
+        "boundary status stays Ok; the rejection rides in the envelope"
+    );
+    assert!(handle.is_null(), "no session handle on a fail-closed open");
+    assert!(!response_json.is_null(), "the failure envelope is returned");
+    let response: RuntimeOpenResult =
+        serde_json::from_str(&unsafe { take_c_string(response_json) }).expect("open response");
+    assert_eq!(response.status, OperationStatus::Error);
+    assert!(response.runtime_snapshot.is_none());
+    assert_eq!(
+        response.diagnostics.diagnostics[0].code,
+        compiler::runtime_api::E_RUNTIME_OPEN_FACET_DOMAIN_UNKNOWN,
+    );
+}
+
+/// ADR-0060 acceptance 5 — the parity sibling of `run_051`, on a model where
+/// parity can now actually break. `run_051`'s fixture has no negative-only
+/// closed facet, so it agreed while the runtime passed an empty table and
+/// `session_compose` passed a real one. This one does: the two surfaces must
+/// report ONE core over a conflict whose attribution depends entirely on the
+/// closed-facet completion.
+#[test]
+fn run_069_closed_facet_domain_surfaces_agree_on_the_named_constraint() {
+    let cmp_dir = emitted_entailment_fixture_dir(ENTAILMENT_DEFS_CLOSED);
+    let mut snapshot = open_entailment_snapshot(&cmp_dir);
+    // Pin the sibling facet through `choices` on BOTH surfaces, so the two
+    // replays are the same replay: the runtime projects the snapshot's total
+    // known assignment, `session_compose` replays the selection state, and this
+    // is the shape where those coincide.
+    snapshot
+        .choices
+        .insert("cooling_brand".to_string(), "aeroflux".to_string());
+    assert!(
+        !snapshot.choices.contains_key("cooling_model"),
+        "fixture precondition: the committed state must not pin the explained facet"
+    );
+
+    let runtime_core = explain_entailment_conflict(snapshot.clone());
+
+    let handle = open_handle(&cmp_dir);
+    let selection_state = canonical_selection_state(
+        handle.model_hash.clone(),
+        ENTAILMENT_SCOPE.to_string(),
+        BTreeMap::new(),
+        snapshot.choices.clone(),
+    )
+    .expect("selection state");
+    let composed = session_compose::explain(ExplainRejectionRequest {
+        schema_version: PRODUCT_SCHEMA_VERSION,
+        model_handle: handle,
+        scope: ENTAILMENT_SCOPE.to_string(),
+        selection_state,
+        rejected_option: SelectionDelta {
+            facet: "cooling_model".to_string(),
+            option: "x200".to_string(),
+        },
+    });
+    let composed_core = composed
+        .rejection
+        .unsat_core
+        .expect("session_compose must explain the same conflict with a core");
+
+    assert_eq!(
+        runtime_core, composed_core,
+        "the runtime and session_compose explain surfaces must report one core \
+         over a negative-only closed facet"
+    );
+    assert_names_entailment_constraint(&runtime_core, "parity");
+    assert_eq!(
+        crate::explain_renderer::render_unsat_core(&runtime_core),
+        crate::explain_renderer::render_unsat_core(&composed_core),
+        "both surfaces must render one text"
+    );
+}
+
+/// configflux-8gah: an expected id aimed at the operation that does not declare
+/// it must be REFUSED at the transport, not silently dropped.
+///
+/// The two compare-and-swap fields are named differently and live on different
+/// operations, so serde used to discard a mis-aimed one and the write proceeded
+/// with no expectation enforced — exit 0, status ok. That is invisible to the
+/// caller most likely to be relying on the guard: a script that checks the exit
+/// code. Both directions are therefore driven through the real command with
+/// `--request-file`, the way an integrator sends one.
+///
+/// configflux-8zcp extends this to the wrong DEPTH as well as the wrong
+/// operation: an expectation nested inside the write entry it is meant to guard
+/// was dropped the same way, and the batch applied with `applied_count` 1 and
+/// status ok. The third case below is that one.
+///
+/// The diagnostic names the failure CLASS, not the field. serde's unknown-field
+/// message embeds the caller's own key, and `run_050` pins that the transport
+/// never echoes caller-supplied text (`docs/runtime-cli-contract.md` §7). An
+/// unrecognized field is its own category so the operator is not told the value
+/// had the wrong type when the type was fine and the field was the fault.
+#[test]
+fn run_051_transport_refuses_a_mis_aimed_compare_and_swap_expectation() {
+    let temp = TempDirGuard {
+        path: unique_fixture_dir("run-051"),
+        manifest_ref: String::new(),
+    };
+
+    let snapshot = serde_json::json!({
+        "schema_version": 1,
+        "model_hash": "m",
+        "resolve_hash": "r",
+        "scope": "all",
+        "resolved_output": {}
+    });
+    let digest = "70a8b15a84768a8f922387e61866ab183a2c368516c6b457e73295ec6245354a";
+
+    // Each case sends a guard the operation cannot reach — the sibling
+    // operation's expectation, or its own nested one level too deep. Both are
+    // the same mistake: an unguarded write rather than a rejection.
+    let cases = [
+        (
+            "set-parameters-atomically",
+            serde_json::json!({
+                "schema_version": 1,
+                "runtime_snapshot": snapshot,
+                "writes": [],
+                "actor": "operator",
+                "expected_base_configuration_id": digest
+            }),
+            "expected_base_configuration_id",
+        ),
+        (
+            "commit-configuration",
+            serde_json::json!({
+                "schema_version": 1,
+                "runtime_snapshot": snapshot,
+                "actor": "operator",
+                "expected_working_configuration_id": digest
+            }),
+            "expected_working_configuration_id",
+        ),
+        // configflux-8zcp: the operation's OWN expectation, nested inside the
+        // write entry it is meant to guard. The request's own slot is left empty
+        // because that is the caller's belief — the nested copy is the guard.
+        (
+            "set-parameters-atomically",
+            serde_json::json!({
+                "schema_version": 1,
+                "runtime_snapshot": snapshot,
+                "writes": [{
+                    "path": "component.heat_exchanger.param.setpoint_trim",
+                    "value": 0.42,
+                    "expected_working_configuration_id": digest
+                }],
+                "actor": "operator"
+            }),
+            "expected_working_configuration_id",
+        ),
+    ];
+
+    for (command, payload, mis_aimed_field) in cases {
+        let request_path = temp.path.join(format!("{command}.request.json"));
+        std::fs::write(
+            &request_path,
+            serde_json::to_vec(&payload).expect("serialize request"),
+        )
+        .expect("write request file");
+        let request_path_str = request_path.to_string_lossy().into_owned();
+
+        let output = run_cli(&[command, "--request-file", &request_path_str], b"");
+
+        assert_eq!(
+            output.exit_code, EXIT_TRANSPORT_ERROR,
+            "'{mis_aimed_field}' sent to {command} must fail the command, not be dropped so the \
+             write applies with no compare-and-swap enforced. stderr: {}",
+            output.stderr
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "a refused request emits no response envelope, got: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(
+            output.stderr.contains(E_RUNTIME_CLI_REQUEST_INVALID),
+            "the refusal is a request-invalid transport error, got: {}",
+            output.stderr
+        );
+        assert!(
+            output.stderr.contains("unrecognized request field"),
+            "the diagnostic must name the failure class — the field is not one this operation \
+             declares — rather than reporting it as a type or value fault, which would send the \
+             operator to inspect a digest that is perfectly well formed. Got: {}",
+            output.stderr
+        );
+        assert!(
+            !output.stderr.contains(mis_aimed_field),
+            "the offending key is caller-supplied text, so §7's non-leaky stderr policy holds \
+             here exactly as run_050 pins it for values. Got: {}",
+            output.stderr
+        );
+    }
 }

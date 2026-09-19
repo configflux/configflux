@@ -92,6 +92,187 @@ fn validate_selection_state(
     })
 }
 
+/// Screen every assignment a `SelectionState` already carries against the
+/// MODEL, returning one diagnostic per offending entry (ADR-0030 Amendment 2
+/// Rule 1, configflux-eclx).
+///
+/// # Why this is separate from `validate_selection_state`
+///
+/// That function is integrity-only: schema version, scope, the model and scope
+/// the state is sealed against, its canonical hash, and tags that do not
+/// contradict choices (configflux-q50t). Not one of the six is a MODEL check,
+/// so a state naming a facet the model does not have — or a value outside a
+/// facet's domain — passes all six. The whole state is caller-supplied at the
+/// SDK seam, the hash is keyless, and a key would protect nothing (the party
+/// who could forge a state is the party running the binary). The authority is
+/// the model, so the screen is a model check.
+///
+/// # The predicate
+///
+/// `choices` get exactly the DELTA's predicate — the same one `apply_selection`
+/// applies to the single new choice, now applied to the ones already there.
+/// Every legitimate choice passed it once already, as a delta.
+///
+/// `context_tags` are screened ONLY where the model declares a CLOSED domain.
+/// A tag on an open, condition-only, or unmentioned facet is the deployment's
+/// business: `facet_domain` widens such a facet with whatever the assignment
+/// supplies, and the shipped corpus depends on it — S1's smoke resolves with
+/// `region=us` against a model whose only mention of `region` is the condition
+/// `region == 'eu'`. Screening those would refuse a working scenario.
+///
+/// Every offending entry is reported, choices first and then tags, each walk in
+/// `BTreeMap` order — the convention `screen_implied_choices` set for the
+/// sibling caller-supplied map (configflux-v93p), so a caller with two bad
+/// entries is not made to discover the second only after fixing the first. The
+/// two existing codes are reused; this introduces none.
+fn screen_selection_assignments(
+    model: &SelectionConstraintModel,
+    selection_state: &SelectionState,
+) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
+
+    for (facet, option) in &selection_state.choices {
+        let Some(domain) = model.facet_domains.get(facet) else {
+            diagnostics.push(Diagnostic {
+                code: E_SELECTION_UNKNOWN_FACET.to_string(),
+                severity: DiagnosticSeverity::Error,
+                message: format!(
+                    "Unknown selection facet '{}' in selection_state.choices",
+                    facet
+                ),
+                source_id: None,
+                entity_path: None,
+                hint: Some("Choose a facet discovered from model conditions".to_string()),
+            });
+            continue;
+        };
+        if !domain.contains(option) {
+            diagnostics.push(Diagnostic {
+                code: E_SELECTION_INVALID_OPTION.to_string(),
+                severity: DiagnosticSeverity::Error,
+                message: format!(
+                    "Invalid option '{}' for facet '{}' in selection_state.choices",
+                    option, facet
+                ),
+                source_id: None,
+                entity_path: None,
+                hint: Some(format!("Valid options: {}", sorted_options(domain))),
+            });
+        }
+    }
+
+    for (facet, option) in &selection_state.context_tags {
+        // `Some(&false)` and not `!= Some(&true)`: an undeclared facet records
+        // no openness at all, and it must be left alone rather than treated as
+        // closed. Both halves of the tag rule hang on this line.
+        if model.facet_open.get(facet) != Some(&false) {
+            continue;
+        }
+        let Some(declared) = model.declared_values.get(facet) else {
+            continue;
+        };
+        if !declared.contains(option) {
+            diagnostics.push(Diagnostic {
+                code: E_SELECTION_INVALID_OPTION.to_string(),
+                severity: DiagnosticSeverity::Error,
+                message: format!(
+                    "Invalid option '{}' for facet '{}' in selection_state.context_tags",
+                    option, facet
+                ),
+                source_id: None,
+                entity_path: None,
+                // The DECLARED values, not the widened `facet_domains`: a tag
+                // on a closed facet is admissible exactly where the author said
+                // it was, and listing a condition-inferred value would invite a
+                // second refusal.
+                hint: Some(format!("Valid options: {}", sorted_options(declared))),
+            });
+        }
+    }
+
+    diagnostics
+}
+
+/// A facet's admissible values as the `Valid options: ...` hint renders them.
+/// Sorted rather than insertion-ordered so the text is stable whatever order a
+/// chunk happened to declare the values in — the same shape `apply_selection`
+/// and `screen_implied_choices` already emit for these two codes.
+fn sorted_options(values: &BTreeSet<String>) -> String {
+    let mut options: Vec<String> = values.iter().cloned().collect();
+    options.sort();
+    options.join(", ")
+}
+
+/// [`screen_selection_assignments`] for the one operation that does not already
+/// hold a `SelectionConstraintModel` when it needs the verdict
+/// (`resolve_from_selection`, which loads a `ResolveModel` instead).
+///
+/// # A model that will not load
+///
+/// The screen REFUSES. It cannot report the state — it has no model to screen
+/// the state against — so it reports the package, under the code and hint
+/// `resolve_from_selection` renders for its own load failure.
+///
+/// It stays silent in exactly one case: when the caller's own loader refuses
+/// the package too. That caller renders the canonical failure a line later, and
+/// pre-empting it would replace a specific report of the corruption with a
+/// second, differently worded one for no gain.
+///
+/// Reading the package is the common case of that overlap (a missing index, a
+/// modified chunk) and it is no longer reached from here: since configflux-8nhr
+/// the caller reads the package ONCE, through [`load_package`], and hands the
+/// result to this screen — so a package that will not read never gets this far,
+/// and the caller renders its own refusal for it exactly as before. What is
+/// left here is the overlap the two model BUILDERS still have over a package
+/// that read cleanly.
+///
+/// Where the two loaders DISAGREE, silence was a fail-open. This one parses
+/// every constraint expression and every lowered conjunct on the way in and
+/// bails on a duplicate constraint id; `load_resolve_model` does none of that
+/// parsing. On a package only this loader refuses, returning no diagnostics let
+/// resolve proceed with the state unscreened — the one thing Rule 1 exists to
+/// prevent — on an assumption about the caller that does not hold.
+fn screen_selection_state_from(
+    package: &LoadedPackage,
+    selection_state: &SelectionState,
+) -> Vec<Diagnostic> {
+    match load_selection_constraint_model_from(package) {
+        Ok(model) => screen_selection_assignments(&model, selection_state),
+        Err(err) => {
+            if load_resolve_model_from(package).is_err() {
+                return Vec::new();
+            }
+            vec![Diagnostic {
+                code: E_RESOLVE_MODEL_INVALID.to_string(),
+                severity: DiagnosticSeverity::Error,
+                message: err.to_string(),
+                source_id: Some(package.model_handle.index_ref.clone()),
+                entity_path: None,
+                hint: Some("Re-open a valid CMP model handle before resolve".to_string()),
+            }]
+        }
+    }
+}
+
+/// [`screen_selection_state_from`] for a caller that has not read the package.
+///
+/// Reading it is the only thing this adds. The silent case the doc above
+/// describes — "the caller's own loader refuses the package too" — is exactly
+/// the read that fails here: `load_index` and the integrity walk are the whole
+/// of the two loaders' overlap, so a package this cannot read is a package
+/// `load_resolve_model` cannot read either, and the screen stays silent for the
+/// caller to report.
+#[allow(dead_code)] // The handle-taking screen, kept beside its three loaders.
+fn screen_selection_state(
+    model_handle: &ModelHandle,
+    selection_state: &SelectionState,
+) -> Vec<Diagnostic> {
+    match load_package(model_handle, SELECTION_FUNNEL) {
+        Ok(package) => screen_selection_state_from(&package, selection_state),
+        Err(_) => Vec::new(),
+    }
+}
+
 fn merge_assignments(selection_state: &SelectionState) -> Result<BTreeMap<String, String>> {
     let mut merged = selection_state.context_tags.clone();
     for (facet, option) in &selection_state.choices {
@@ -110,22 +291,151 @@ fn merge_assignments(selection_state: &SelectionState) -> Result<BTreeMap<String
     Ok(merged)
 }
 
-fn load_selection_constraint_model(model_handle: &ModelHandle) -> Result<SelectionConstraintModel> {
+/// Frame a [`crate::link_verify`] charset refusal as the funnel's ordinary load
+/// error (ADR-0063 Amendment 1 Decision 1).
+///
+/// `funnel` is the word the integrity check a few lines above already uses
+/// ("Selection" / "Resolve"), so the two refusals from one funnel read as a
+/// pair, and `chunk_set_ref` names WHICH package failed — the thing an op-level
+/// diagnostic cannot recover for itself.
+///
+/// The rule's own message is spliced into the text rather than layered on as an
+/// `anyhow` context. Every public op renders `err.to_string()`, which prints the
+/// OUTERMOST message and nothing else, so a `.with_context` frame would replace
+/// the symbol class, the owning id and the offending symbol with the frame —
+/// exactly the three things the refusal exists to name.
+///
+/// The `CodedError` is deliberately dropped with it. These ops map a load
+/// failure to their own frozen code (`E_LOADER_INDEX_INVALID`,
+/// `E_RESOLVE_MODEL_INVALID`); the ingest-side `E_COMPILE_INPUT_INVALID` the
+/// rule carries is the code for an authored model, and no package fault should
+/// be able to steer a loader diagnostic onto it.
+fn symbol_charset_refusal(
+    funnel: &str,
+    model_handle: &ModelHandle,
+    err: anyhow::Error,
+) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{} model symbol check failed for chunk directory '{}': {}; the package must be \
+         recompiled with a toolchain that enforces the authored-symbol rule",
+        funnel,
+        model_handle.chunk_set_ref,
+        err
+    )
+}
+
+/// The two words a load refusal names the reading funnel by, shared with
+/// [`symbol_charset_refusal`] so one funnel's two refusals read as a pair.
+const SELECTION_FUNNEL: &str = "Selection";
+const RESOLVE_FUNNEL: &str = "Resolve";
+
+/// One package, read once: its index and every chunk that index names, parsed
+/// and integrity-checked, alongside the handle they were read through
+/// (configflux-8nhr).
+///
+/// The three model builders below used to take a `ModelHandle` each and each
+/// begin by reading the index and walking every chunk — so `resolve_from_
+/// selection`, which runs all three, read the index three times and opened and
+/// parsed every chunk file six (the integrity walk opens them, then each
+/// builder's own walk opens them again). A package is immutable for the length
+/// of one call, so those reads returned the same bytes every time. This type is
+/// those bytes, read once and handed to all three.
+///
+/// Deliberately NOT a cache: it lives for one call and nothing holds it
+/// afterwards, so no operation can answer from a package that has since changed
+/// on disk. `ModelHandle` is what crosses the process boundary and it is
+/// untouched.
+pub(crate) struct LoadedPackage {
+    index: ir::IrIndex,
+    /// The parsed chunks, in `index.chunks` order — the order
+    /// `ir::verify_index_integrity_loading` returns them in, so a builder can
+    /// zip them against the index entries they were checked against.
+    chunks: Vec<ir::IrChunk>,
+    model_handle: ModelHandle,
+}
+
+/// Read and integrity-check one package, keeping what the walk parsed.
+///
+/// `funnel` names the reading funnel in the integrity refusal, exactly as
+/// [`symbol_charset_refusal`] takes it. It is a parameter rather than a
+/// constant because the two funnels word that refusal differently and every op
+/// renders `err.to_string()`: a selection op must keep reporting "Selection
+/// model integrity check failed …" and the resolve path "Resolve model …",
+/// which is what they each reported when they owned this prefix themselves.
+fn load_package(model_handle: &ModelHandle, funnel: &str) -> Result<LoadedPackage> {
     let index = ir::load_index(&model_handle.index_ref)
         .with_context(|| format!("Failed to load index '{}'", model_handle.index_ref))?;
     let chunk_dir = PathBuf::from(&model_handle.chunk_set_ref);
-    ir::verify_index_integrity(&index, &chunk_dir).with_context(|| {
+    let chunks = ir::verify_index_integrity_loading(&index, &chunk_dir).with_context(|| {
         format!(
-            "Selection model integrity check failed for chunk directory '{}'",
-            model_handle.chunk_set_ref
+            "{} model integrity check failed for chunk directory '{}'",
+            funnel, model_handle.chunk_set_ref
         )
     })?;
+    Ok(LoadedPackage {
+        index,
+        chunks,
+        model_handle: model_handle.clone(),
+    })
+}
+
+/// [`load_selection_constraint_model_from`] for a caller that has not read the
+/// package — the shape the six `selection_ops` entry points and
+/// [`closed_facet_domains`] ask through.
+fn load_selection_constraint_model(model_handle: &ModelHandle) -> Result<SelectionConstraintModel> {
+    let package = load_package(model_handle, SELECTION_FUNNEL)?;
+    load_selection_constraint_model_from(&package)
+}
+
+fn load_selection_constraint_model_from(
+    package: &LoadedPackage,
+) -> Result<SelectionConstraintModel> {
+    let model_handle = &package.model_handle;
+    let index = &package.index;
 
     let mut model = SelectionConstraintModel::default();
-    for chunk_ref in &index.chunks {
-        let chunk_path = chunk_dir.join(format!("chunk-{}.cfir", chunk_ref.chunk_hash));
-        let chunk = ir::load_chunk(&chunk_path)
-            .with_context(|| format!("Failed to load chunk '{}'", chunk_path.display()))?;
+    // ADR-0057 §D3: a binding's value domain is its CATALOGUE's entry ids, and
+    // the catalogue may be declared in another chunk — a shared catalogue unit
+    // is the normal shape. So the two namespaces are gathered across the whole
+    // walk and projected onto facets once it finishes, rather than per chunk.
+    let mut catalogues: std::collections::BTreeMap<String, crate::schema::Catalogue> =
+        std::collections::BTreeMap::new();
+    let mut bindings: std::collections::BTreeMap<String, crate::schema::Binding> =
+        std::collections::BTreeMap::new();
+    // ADR-0057 §D4: the `derive` and `accepts` lowerings need the WHOLE model —
+    // a component may require a binding declared in another chunk — so both
+    // namespaces are gathered across the walk and lowered once it finishes,
+    // exactly as the binding-to-facet projection below is.
+    let mut components: std::collections::BTreeMap<String, crate::schema::Component> =
+        std::collections::BTreeMap::new();
+    // Origin entity -> the chunk that declared it, so a lowered conjunct's
+    // rejection names a file like an authored constraint's does. Kept per
+    // namespace rather than in one map: a binding and a component may legally
+    // share an id (they are different id spaces), and one map would let the
+    // later chunk's entry answer for the earlier one's conjunct.
+    let mut binding_sources: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
+    let mut component_sources: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
+    for (chunk_ref, chunk) in index.chunks.iter().zip(package.chunks.iter()) {
+        catalogues.extend(chunk.catalogues.iter().map(|(k, v)| (k.clone(), v.clone())));
+        bindings.extend(chunk.bindings.iter().map(|(k, v)| (k.clone(), v.clone())));
+        for id in chunk.bindings.keys() {
+            binding_sources.insert(id.clone(), chunk_ref.source_id.clone());
+        }
+        for id in chunk.components.keys() {
+            component_sources.insert(id.clone(), chunk_ref.source_id.clone());
+        }
+        components.extend(chunk.components.iter().map(|(k, v)| (k.clone(), v.clone())));
+
+        // ADR-0063 Amendment 1 Decision 1, per chunk and BEFORE this chunk's
+        // declared values enter any domain or any of its constraint text is
+        // parsed. `chunk.facets` is a `BTreeMap`, so the first refusal is
+        // id-ascending within the chunk and chunks are walked in index order.
+        for (id, facet) in &chunk.facets {
+            crate::link_verify::check_facet_symbols(id, facet)
+                .map_err(|err| symbol_charset_refusal("Selection", model_handle, err))?;
+        }
 
         // ADR-0047 §4: seed each declared facet's domain from its declaration
         // BEFORE the condition walk widens it. `facet_domains` is a set-union
@@ -185,10 +495,71 @@ fn load_selection_constraint_model(model_handle: &ModelHandle) -> Result<Selecti
         }
     }
 
+    // ADR-0057 §D3: a binding's value domain is its catalogue's entry ids, and
+    // the projection is needed twice below — once as the symbols to re-check,
+    // once as the declarations to seed — so it is built once here.
+    let projected = crate::interface_summary::binding_facets(&catalogues, &bindings);
+
+    // ADR-0063 Amendment 1 Decision 1, over the two pack-global namespaces the
+    // walk has now finished gathering, plus the facets those bindings project.
+    // Catalogue entry ids and binding ids are checked as what they ARE before
+    // the projected pass sees them as facet values and facet keys, so no symbol
+    // is reported twice or under the wider wording (`validate_symbol_charset`).
+    crate::link_verify::validate_symbol_charset(&projected, &catalogues, bindings.keys())
+        .map_err(|err| symbol_charset_refusal("Selection", model_handle, err))?;
+
+    // ADR-0057 §D3: seed every binding through the SAME entry point a declared
+    // facet uses, so `cfx options` lists it with `[closed, default: ...]`, its
+    // entries are offered in catalogue order, and an unknown facet still gets
+    // E_SELECTION_UNKNOWN_FACET. Seeding is a set union into `facet_domains`,
+    // so running it after the per-chunk condition walk composes identically to
+    // running it inside the loop.
+    seed_facet_domains_from_declarations(&projected, &mut model);
+
     // Per-chunk walks are already id-ascending (`IrChunk.constraints` is a
     // `BTreeMap`), but chunks are visited in index order, so sort once here to
     // make the id-ascending commitment hold across the whole pack.
     model.constraints.sort_by(|a, b| a.id.cmp(&b.id));
+
+    // ADR-0057 §D4: the lowered conjuncts are appended AFTER the sort, in the
+    // emitter's fold order (derive, then accepts). Sorting the union would
+    // interleave them with the authored ids and leave the selection surfaces
+    // disagreeing with the `.ccm` about which rule is "first" — the one thing
+    // `first_violated_constraint` reports.
+    //
+    // A conjunct whose expression will not parse is a corrupt package, exactly
+    // as an authored constraint's is: this lowering built the text itself, from
+    // data THIS loader has just re-validated against the ADR-0063 authored-
+    // symbol rule (`link_verify::validate_symbol_charset` and the per-chunk
+    // `check_facet_symbols` above, Amendment 1) — not from data some earlier
+    // `link_verify` run is assumed to have accepted, which is what the comment
+    // used to claim and what configflux-h3rm measured to be false: that run
+    // happened in whichever compiler PRODUCED the package, possibly one
+    // predating the rule, and every package hash is self-consistent and
+    // unkeyed. So failing closed here reports the corruption instead of
+    // silently dropping a rule the `.ccm` still asserts.
+    for lowered in crate::lowering::lowered_root_conjuncts(&bindings, &components) {
+        let expr = parse_condition_expr(&lowered.condition).with_context(|| {
+            format!(
+                "Lowered conjunct '{}' has an unparseable expression '{}'",
+                lowered.id, lowered.condition
+            )
+        })?;
+        let sources = if lowered
+            .id
+            .starts_with(crate::lowering::DERIVE_ATTRIBUTION_PREFIX)
+        {
+            &binding_sources
+        } else {
+            &component_sources
+        };
+        model.constraints.push(SelectionConstraint {
+            id: lowered.id,
+            condition: lowered.condition,
+            expr,
+            source_id: sources.get(&lowered.origin).cloned().unwrap_or_default(),
+        });
+    }
 
     Ok(model)
 }
@@ -230,31 +601,91 @@ fn seed_facet_domains_from_declarations(
     }
 }
 
+/// The declared value domains of the model's CLOSED facets, for unsat-core
+/// attribution (configflux-pt6v, ADR-0054 §5.4).
+///
+/// `cfx explain` names the constraint a rejection broke by reconstructing the
+/// partial assignment each core clause forbids. A facet that appears in a
+/// clause only NEGATIVELY has no asserted literal to read, so the assignment
+/// used to be silently incomplete and the policy over that facet evaluated
+/// `Unknown` — not a violation (§2) — degrading the explanation to
+/// "the model is over-constrained here". For a CLOSED facet the model itself
+/// asserts `exactly_one_of` over the declared values, so "all declared values
+/// but one negated" ENTAILS the remaining one; completing the assignment that
+/// way makes the constraint evaluate genuinely `False` and preserves §2 rather
+/// than weakening it.
+///
+/// Openness and the declared value roster already travel together in
+/// `SelectionConstraintModel` (ADR-0047 §4/§6 Amendment 1), seeded from the
+/// authored `facets:` declarations — so this reads the model sources, and NOT
+/// the `.ccm`: the artifact's roster carries `{id, condition, root_index}` per
+/// constraint and no facet data at all, and putting openness there would change
+/// `.ccm` emission and rotate `ccm_hash` across every committed fixture.
+///
+/// OPEN facets are deliberately omitted, not flagged: an open facet is
+/// synthesized with at-most-one only, so nothing may ever be entailed about it,
+/// and [`ClosedFacetDomains`] is the type that makes carrying one impossible.
+pub fn closed_facet_domains(model_handle: &ModelHandle) -> Result<ClosedFacetDomains> {
+    let package = load_package(model_handle, SELECTION_FUNNEL)?;
+    closed_facet_domains_from(&package)
+}
+
+/// [`closed_facet_domains`] over a package the caller has already read.
+fn closed_facet_domains_from(package: &LoadedPackage) -> Result<ClosedFacetDomains> {
+    let model = load_selection_constraint_model_from(package)?;
+    let mut domains = ClosedFacetDomains::default();
+    for (facet, open) in &model.facet_open {
+        if *open {
+            continue;
+        }
+        if let Some(values) = model.declared_values.get(facet) {
+            domains.insert(facet.clone(), values.clone());
+        }
+    }
+    Ok(domains)
+}
+
+/// [`load_resolve_model_from`] for a caller that has not read the package.
+#[allow(dead_code)] // The handle-taking funnel shape, kept beside its two peers.
 fn load_resolve_model(model_handle: &ModelHandle) -> Result<ResolveModel> {
-    let index = ir::load_index(&model_handle.index_ref)
-        .with_context(|| format!("Failed to load index '{}'", model_handle.index_ref))?;
-    let chunk_dir = PathBuf::from(&model_handle.chunk_set_ref);
-    ir::verify_index_integrity(&index, &chunk_dir).with_context(|| {
-        format!(
-            "Resolve model integrity check failed for chunk directory '{}'",
-            model_handle.chunk_set_ref
-        )
-    })?;
+    let package = load_package(model_handle, RESOLVE_FUNNEL)?;
+    load_resolve_model_from(&package)
+}
+
+fn load_resolve_model_from(package: &LoadedPackage) -> Result<ResolveModel> {
+    let model_handle = &package.model_handle;
+    let index = &package.index;
 
     let mut definitions = HashMap::new();
     let mut components = HashMap::new();
     let mut artifacts = HashMap::new();
     let mut facets: HashMap<String, crate::schema::Facet> = HashMap::new();
     let mut constraints: HashMap<String, crate::schema::Constraint> = HashMap::new();
+    let mut catalogues: HashMap<String, crate::schema::Catalogue> = HashMap::new();
+    let mut bindings: HashMap<String, crate::schema::Binding> = HashMap::new();
     // ADR-0054 §6 / configflux-emmg: the declaring chunk, captured here because
     // this walk is the only place that knows it. `Config` is the authored shape
     // and must not learn about chunks, so it rides alongside in `ResolveModel`.
+    // ADR-0057 §D4 extends the same map to the lowered conjuncts, keyed by
+    // attribution id.
     let mut constraint_sources: BTreeMap<String, String> = BTreeMap::new();
+    // Origin entity -> declaring chunk, per namespace. Two maps rather than
+    // one: a binding and a component may legally share an id, and one map would
+    // let the later chunk answer for the earlier one's conjunct.
+    let mut binding_sources: BTreeMap<String, String> = BTreeMap::new();
+    let mut component_sources: BTreeMap<String, String> = BTreeMap::new();
 
-    for chunk_ref in &index.chunks {
-        let chunk_path = chunk_dir.join(format!("chunk-{}.cfir", chunk_ref.chunk_hash));
-        let chunk = ir::load_chunk(&chunk_path)
-            .with_context(|| format!("Failed to load chunk '{}'", chunk_path.display()))?;
+    for (chunk_ref, chunk) in index.chunks.iter().zip(package.chunks.iter()) {
+        // The walk below moves each namespace out of the chunk, and the package
+        // outlives this builder, so it takes its own copy. Cloning the parsed
+        // value is what replaces re-reading and re-parsing the file.
+        let chunk = chunk.clone();
+        for id in chunk.bindings.keys() {
+            binding_sources.insert(id.clone(), chunk_ref.source_id.clone());
+        }
+        for id in chunk.components.keys() {
+            component_sources.insert(id.clone(), chunk_ref.source_id.clone());
+        }
 
         // ADR-0047 §5: carry declared facets into the resolve-time `Config` so
         // the auto-bind step can seed each declared default. The at-most-one-
@@ -280,6 +711,24 @@ fn load_resolve_model(model_handle: &ModelHandle) -> Result<ResolveModel> {
                 );
             }
             constraint_sources.insert(constraint_id, chunk_ref.source_id.clone());
+        }
+
+        // ADR-0057 §D2/§D3: catalogues and bindings ride the resolve-time
+        // `Config` verbatim, exactly as facets and constraints do, so the
+        // resolve view is a faithful picture of the authored model. Fail closed
+        // on a duplicate for the same reason the namespaces above do.
+        for (catalogue_id, catalogue) in chunk.catalogues {
+            if catalogues.insert(catalogue_id.clone(), catalogue).is_some() {
+                anyhow::bail!(
+                    "Duplicate catalogue '{}' appears across chunks",
+                    catalogue_id
+                );
+            }
+        }
+        for (binding_id, binding) in chunk.bindings {
+            if bindings.insert(binding_id.clone(), binding).is_some() {
+                anyhow::bail!("Duplicate binding '{}' appears across chunks", binding_id);
+            }
         }
 
         for (definition_id, definition) in chunk.definitions {
@@ -308,6 +757,53 @@ fn load_resolve_model(model_handle: &ModelHandle) -> Result<ResolveModel> {
         }
     }
 
+    // ADR-0057 §D3: from the resolve layer's point of view a binding simply IS
+    // one more declared closed facet, so it is merged into `facets` here rather
+    // than special-cased at the two places that read them (the declared-default
+    // auto-bind and the unbound-facet diagnostic). The authored `bindings` map
+    // rides alongside untouched — configflux-secb.6 reads it to place each
+    // requirement's entry inside the resolved snapshot.
+    facets.extend(crate::interface_summary::binding_facets(
+        &catalogues,
+        &bindings,
+    ));
+
+    // ADR-0063 Amendment 1 Decision 1: the four symbol classes, re-checked over
+    // the maps the walk above built, BEFORE the lowering below turns them into
+    // condition text. `facets` already holds the declared facets UNION the
+    // binding projection, so one call covers both — and the catalogue and
+    // binding passes run first inside `validate_symbol_charset`, so an entry id
+    // or a binding id is reported as what it is rather than as a facet value or
+    // a facet key.
+    crate::link_verify::validate_symbol_charset(&facets, &catalogues, bindings.keys())
+        .map_err(|err| symbol_charset_refusal("Resolve", model_handle, err))?;
+
+    // ADR-0057 §D4: lower the `derive` tables and `accepts` lists into the same
+    // root conjuncts the `.ccm` carries, and record each one's declaring chunk
+    // alongside the authored constraints'. They ride BESIDE `config` rather
+    // than inside `config.constraints`: `Config` is the AUTHORED shape and a
+    // faithful view of what the user wrote, and secb.6 reads `config.bindings`
+    // and `config.components` back out of it to place each requirement's entry
+    // in the snapshot.
+    let lowered_conjuncts: Vec<(String, String)> =
+        crate::lowering::lowered_root_conjuncts(&bindings, &components)
+            .into_iter()
+            .map(|lowered| {
+                let source = if lowered
+                    .id
+                    .starts_with(crate::lowering::DERIVE_ATTRIBUTION_PREFIX)
+                {
+                    binding_sources.get(&lowered.origin)
+                } else {
+                    component_sources.get(&lowered.origin)
+                };
+                if let Some(source) = source {
+                    constraint_sources.insert(lowered.id.clone(), source.clone());
+                }
+                (lowered.id, lowered.condition)
+            })
+            .collect();
+
     Ok(ResolveModel {
         config: crate::schema::Config {
             package: "merged_root".to_string(),
@@ -317,8 +813,11 @@ fn load_resolve_model(model_handle: &ModelHandle) -> Result<ResolveModel> {
             artifacts,
             facets,
             constraints,
+            catalogues,
+            bindings,
         },
         constraint_sources,
+        lowered_conjuncts,
     })
 }
 
@@ -403,18 +902,35 @@ fn canonicalize_json_value(value: serde_json::Value) -> serde_json::Value {
     }
 }
 
+/// Loader-side adapter over the ONE resolve-hash recipe
+/// (`crate::resolve_hash::compute_resolve_hash`), which `runtime_api` reaches
+/// through an adapter of its own.
+///
+/// It holds NO part of the recipe — no pre-image struct, no field order, no
+/// skip-if-empty rule, no hashing. All it does is project the caller's
+/// `SelectionState` onto the pre-image's nested selection-state object. That
+/// projection is the one thing the two paths genuinely differ on and must keep
+/// differing on: the loader passes the state's OWN `schema_version`,
+/// `model_hash` and `scope`, while the runtime (which never sees a
+/// `SelectionState`) substitutes the product schema version and the request's
+/// outer values. `validate_selection_state` has already refused any resolve
+/// where those disagree, which is what makes the substitution sound.
+///
+/// `resolved_output` must already be canonicalized — the caller passes the same
+/// value it stores on the result (see `canonicalize_resolved_output`), so the
+/// hash covers exactly the bytes the consumer reads.
 fn compute_resolve_hash(
     model_hash: &str,
     scope: &str,
     selection_state: &SelectionState,
     resolved_output: &serde_json::Value,
     defaulted_choices: &BTreeMap<String, String>,
+    implied_choices: &BTreeMap<String, String>,
 ) -> Result<String> {
-    let canonical = ResolveHashCanonical {
-        schema_version: PRODUCT_SCHEMA_VERSION,
+    crate::resolve_hash::compute_resolve_hash(
         model_hash,
         scope,
-        selection_state: SelectionStateCanonical {
+        SelectionStateCanonical {
             schema_version: selection_state.schema_version,
             model_hash: &selection_state.model_hash,
             scope: &selection_state.scope,
@@ -423,10 +939,40 @@ fn compute_resolve_hash(
         },
         resolved_output,
         defaulted_choices,
+        implied_choices,
+    )
+}
+
+/// ADR-0059 D3: hash the delivered payload alone.
+///
+/// ONE implementation, and deliberately NOT folded into the shared resolve-hash
+/// pre-image (ADR-0059 M3). That pre-image, `crate::resolve_hash`, covers
+/// `{schema_version, model_hash, scope, selection_state, resolved_output,
+/// defaulted_choices, implied_choices}` and is what `runtime_open` recomputes to
+/// raise `E_RUNTIME_HASH_MISMATCH`. This hash is a SIBLING of it, not a member,
+/// so the recomputed value — and therefore the mismatch decision — is
+/// bit-identical before and after this feature. Adding it to
+/// `ResolveHashCanonical` would rotate every pinned `resolve_hash` in the
+/// goldens for nothing: `resolve_hash` already covers these bytes through
+/// `resolved_output`.
+///
+/// configflux-y2ai note: this comment used to warn that the runtime carried its
+/// own copy of the resolve-hash recipe. It no longer does — there is one recipe
+/// in `crate::resolve_hash` and both paths call it.
+///
+/// `resolved_output` must already be canonicalized (see
+/// `canonicalize_resolved_output`), the same value the caller feeds
+/// `compute_resolve_hash` and stores on the result, so the hash covers exactly
+/// the bytes the consumer reads.
+fn compute_resolved_output_hash(scope: &str, resolved_output: &serde_json::Value) -> Result<String> {
+    let canonical = ResolvedOutputHashCanonical {
+        schema_version: PRODUCT_SCHEMA_VERSION,
+        scope,
+        resolved_output,
     };
 
-    let bytes =
-        serde_json::to_vec(&canonical).context("Failed to canonicalize resolve hash payload")?;
+    let bytes = serde_json::to_vec(&canonical)
+        .context("Failed to canonicalize resolved output hash payload")?;
     Ok(sha256_hex(&bytes))
 }
 
@@ -2049,9 +2595,12 @@ fn resolve_ok(
     context_tags: BTreeMap<String, String>,
     choices: BTreeMap<String, String>,
     defaulted_choices: BTreeMap<String, String>,
+    implied_choices: BTreeMap<String, String>,
+    closed_facet_domains: ClosedFacetDomains,
     resolved_component_dependencies: BTreeMap<String, BTreeMap<String, Vec<String>>>,
     resolved_artifacts: BTreeMap<String, crate::schema::Artifact>,
     resolve_hash: String,
+    resolved_output_hash: String,
     resolved_output: serde_json::Value,
 ) -> ResolveResult {
     let diagnostics = DiagnosticsReport {
@@ -2067,10 +2616,13 @@ fn resolve_ok(
         scope,
         selection_state_hash,
         resolve_hash: Some(resolve_hash),
+        resolved_output_hash: Some(resolved_output_hash),
         resolved_output: Some(resolved_output),
         context_tags,
         choices,
         defaulted_choices,
+        implied_choices,
+        closed_facet_domains,
         resolved_component_dependencies,
         resolved_artifacts,
         error_count: diagnostics.error_count,
@@ -2087,6 +2639,16 @@ fn resolve_failed(
     context_tags: BTreeMap<String, String>,
     choices: BTreeMap<String, String>,
     defaulted_choices: BTreeMap<String, String>,
+    // ADR-0057 §D6: carried on the constraint-violation arm for the same reason
+    // `defaulted_choices` is — a policy can be violated by a value the USER
+    // never typed, and a rejection that hides where the value came from cannot
+    // be acted on. Empty on every other failure arm, which is also what
+    // `session_compose` always passes: its fixpoint aborts wholesale the moment
+    // a facet has no valid option left, so nothing has been implied by the time
+    // a rejection is reachable through that path. A compiler-direct caller can
+    // still pass a non-empty map and violate a constraint with it, which is
+    // exactly the case this parameter exists to report.
+    implied_choices: BTreeMap<String, String>,
     resolved_component_dependencies: BTreeMap<String, BTreeMap<String, Vec<String>>>,
     resolved_artifacts: BTreeMap<String, crate::schema::Artifact>,
     diagnostics: Vec<Diagnostic>,
@@ -2099,10 +2661,18 @@ fn resolve_failed(
         scope,
         selection_state_hash,
         resolve_hash: None,
+        // ADR-0059 D3: present iff `resolved_output` is. A rejected resolve
+        // delivers no payload, so it offers no payload identity to compare.
+        resolved_output_hash: None,
         resolved_output: None,
         context_tags,
         choices,
         defaulted_choices,
+        implied_choices,
+        // ADR-0060 D8.2: a rejected resolve delivers no payload and therefore
+        // offers no declarations to attribute against, exactly as it offers no
+        // `resolved_output_hash` (ADR-0059 D3).
+        closed_facet_domains: ClosedFacetDomains::default(),
         resolved_component_dependencies,
         resolved_artifacts,
         error_count: diagnostics.error_count,
@@ -2232,6 +2802,42 @@ fn extract_missing_tag(err: &anyhow::Error) -> Option<String> {
     None
 }
 
+/// Pull the binding id and the requiring `<component>.<slot>` list out of the
+/// resolver's unbound-requirement failure (`resolver::REQUIREMENT_UNBOUND_MARKER`).
+/// `None` when no such cause exists.
+///
+/// The two literals below are LOAD-BEARING, not descriptive. This is a text
+/// match over the whole `anyhow` cause chain, so any other error message that
+/// ever begins a phrase with the marker would be reclassified as
+/// `E_RESOLVE_FACET_UNBOUND` and reported as a usage error the caller can fix by
+/// binding a facet — which, for an unrelated fault, would be a wrong and
+/// confidently-worded diagnostic. Reword the resolver's `bail!` and this scan
+/// together, or not at all; the marker is `pub(crate)` on the resolver precisely
+/// so both sides read the same constant.
+///
+/// Injection is not a concern today: a binding id is `#snakeId`, so it can
+/// contain neither the quote nor the semicolon that separate the two captures,
+/// and the slicing is byte-safe because both literals are ASCII and are located
+/// with `find`. That argument depends on the id grammar, so it is the thing to
+/// re-check if ids ever widen.
+fn extract_unbound_requirement(err: &anyhow::Error) -> Option<(String, String)> {
+    const MARKER: &str = crate::resolver::REQUIREMENT_UNBOUND_MARKER;
+    const REQUIRED_BY: &str = "' is unbound; required by ";
+    for cause in err.chain() {
+        let text = cause.to_string();
+        let Some(start) = text.find(MARKER) else {
+            continue;
+        };
+        let rest = &text[start + MARKER.len()..];
+        if let Some(end) = rest.find(REQUIRED_BY) {
+            let binding = rest[..end].to_string();
+            let required_by = rest[end + REQUIRED_BY.len()..].to_string();
+            return Some((binding, required_by));
+        }
+    }
+    None
+}
+
 /// Resolve-error mapper that is aware of declared facets (ADR-0047 §5). When the
 /// underlying failure is an unbound tag an active condition needs, AND that tag
 /// is a DECLARED facet with NO default, emit the precise `E_RESOLVE_FACET_UNBOUND`
@@ -2241,10 +2847,38 @@ fn extract_missing_tag(err: &anyhow::Error) -> Option<String> {
 /// unbound *undeclared* facet, or a declared facet that DOES have a default
 /// (which the auto-bind seeds, so it never reaches here) — defers to the legacy
 /// `map_resolve_error`, keeping pre-ADR behavior byte-identical.
+///
+/// ADR-0057 §D7 adds one arm ahead of that one. A binding no active condition
+/// mentions but a component REQUIRES reaches here through a different failure —
+/// nothing evaluated a condition, so there is no "Missing tag" cause — and it is
+/// the same user-fixable situation, so it earns the same code plus the one thing
+/// the facet arm cannot say: which components were waiting for it. A binding IS
+/// a declared closed facet by the time this runs (`load_resolve_model` merges
+/// them), so the declared domain is read from the same table.
 fn map_resolve_error_with_facets(
     err: anyhow::Error,
     facets: &HashMap<String, crate::schema::Facet>,
 ) -> Diagnostic {
+    if let Some((binding, required_by)) = extract_unbound_requirement(&err) {
+        let domain = facets
+            .get(&binding)
+            .map(|facet| facet.values.join(", "))
+            .unwrap_or_default();
+        return Diagnostic {
+            code: E_RESOLVE_FACET_UNBOUND.to_string(),
+            severity: DiagnosticSeverity::Error,
+            message: format!(
+                "Declared facet '{binding}' is unbound and has no default, but a component \
+                 requires it; declared domain: [{domain}]; required by {required_by}"
+            ),
+            source_id: None,
+            entity_path: None,
+            hint: Some(format!(
+                "Select facet '{binding}' (or set it in context_tags), or add a default or a \
+                 derive table to its declaration"
+            )),
+        };
+    }
     if let Some(tag) = extract_missing_tag(&err) {
         if let Some(facet) = facets.get(&tag) {
             if facet.default.is_none() {

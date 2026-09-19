@@ -30,18 +30,52 @@ package(default_visibility = ["//visibility:private"])
 # interpreter/src/explain_renderer.rs prints for an attributed clause, so an
 # edit to the renderer must re-run this test. Without the dep edge a wording
 # regression stays cached PASSED.
+# configflux-x5gb.3 / ADR-0061 D1: a hand-curated member of //validation:use_cases
+# (the only guard on the explorer surface, and one of the two members that do not
+# satisfy the process-level rule). The package is default_visibility private, so
+# the suite needs this narrow grant — //validation only, not public.
 py_test(
     name = "fixture_schema_test",
     size = "small",
     timeout = "short",
+    visibility = ["//validation:__pkg__"],
     srcs = ["fixture_schema_test.py"],
     data = glob([
         "fixtures/*.json",
+        # configflux-p6sw: the README quotes the snapshot's resolve_hash, and the
+        # test now pins that quotation to the fixture. Without the dep edge a
+        # prose-only edit leaves this test cached PASSED over a stale citation.
+        "fixtures/README.md",
         "js/explain_view.js",
+        # configflux-secb.6 / ADR-0057 D7: the fourth instance of the same
+        # argument. The test reads the requirement-table keys out of the
+        # Resolution view, so a rename there must re-run this test rather than
+        # leave it cached PASSED over a table that renders empty cells.
+        "js/resolution_view.js",
         "js/schema.js",
     ]) + [
         "//compiler:src/product_api.rs",
         "//compiler:tests/fixtures/byte-stability-baselines.json",
     ],
     imports = ["."],
+)
+
+# configflux-ulbg: the shell/python sources //tools:schema_version_lint_test
+# scans for stale product `schema_version` literals. Bazel globs stop at package
+# boundaries, so each owning package has to hand its own scripts over; the test
+# cross-checks the union against tools/publishignore_manifest.txt and fails when
+# a package is missing rather than skipping it in silence. This package is
+# default_visibility private, so the grant is narrow: //tools only.
+filegroup(
+    name = "schema_version_scan_sources",
+    srcs = glob(
+        [
+            "**/*.py",
+            "**/*.sh",
+        ],
+        # sdk/cpp has no python and validation has no shell; a package holding
+        # only one of the two kinds is normal and must not fail analysis.
+        allow_empty = True,
+    ),
+    visibility = ["//tools:__pkg__"],
 )

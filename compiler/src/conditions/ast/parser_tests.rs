@@ -250,3 +250,122 @@ mod parser_cardinality_tests {
         );
     }
 }
+
+// ----------------------------------------------------------------------------
+// configflux-secb.2 / ADR-0057 §D5: facet-to-facet comparison. A predicate's
+// right-hand side may be an UNQUOTED identifier naming another declared facet
+// or binding, so a constraint can require two independently bound choices to
+// hold the same value without merging them into one facet. A QUOTED right-hand
+// side keeps its literal meaning, so every model authored before this change
+// parses unchanged.
+// ----------------------------------------------------------------------------
+mod facet_comparison_tests {
+    use super::super::{parse_condition_expr, ConditionExpr, ConditionPredicateOp};
+
+    fn compare(left: &str, op: ConditionPredicateOp, right: &str) -> ConditionExpr {
+        ConditionExpr::FacetCompare {
+            left: left.to_string(),
+            op,
+            right: right.to_string(),
+        }
+    }
+
+    #[test]
+    fn unquoted_rhs_parses_as_facet_equality() {
+        let expr = parse_condition_expr("a == b").unwrap();
+        assert_eq!(expr, compare("a", ConditionPredicateOp::Eq, "b"));
+    }
+
+    #[test]
+    fn unquoted_rhs_parses_as_facet_inequality() {
+        let expr = parse_condition_expr("a != b").unwrap();
+        assert_eq!(expr, compare("a", ConditionPredicateOp::NotEq, "b"));
+    }
+
+    #[test]
+    fn facet_comparison_composes_with_boolean_operators() {
+        let expr = parse_condition_expr("!(a == b) || c == 'x'").unwrap();
+        assert_eq!(
+            expr,
+            ConditionExpr::Or(
+                Box::new(ConditionExpr::Not(Box::new(compare(
+                    "a",
+                    ConditionPredicateOp::Eq,
+                    "b"
+                )))),
+                Box::new(parse_condition_expr("c == 'x'").unwrap()),
+            )
+        );
+    }
+
+    #[test]
+    fn facet_comparison_nests_inside_cardinality_call() {
+        let expr = parse_condition_expr("any_of(a == b, c == 'x')").unwrap();
+        assert_eq!(
+            expr,
+            ConditionExpr::AnyOf(vec![
+                compare("a", ConditionPredicateOp::Eq, "b"),
+                parse_condition_expr("c == 'x'").unwrap(),
+            ])
+        );
+    }
+
+    #[test]
+    fn quoted_rhs_still_parses_as_a_literal_predicate() {
+        // The whole point of the quoting rule: `b` in quotes is the value `b`,
+        // not the facet `b`. Every pre-existing model depends on this.
+        let expr = parse_condition_expr("a == 'b'").unwrap();
+        match expr {
+            ConditionExpr::Predicate(ref p) => {
+                assert_eq!(p.tag, "a");
+                assert_eq!(p.value, "b");
+                assert_eq!(p.op, ConditionPredicateOp::Eq);
+            }
+            other => panic!("expected Predicate, got {other:?}"),
+        }
+        assert_eq!(expr, parse_condition_expr("a == \"b\"").unwrap());
+    }
+
+    #[test]
+    fn numeric_rhs_is_rejected() {
+        // An identifier must start with an ASCII lowercase letter, so a bare
+        // number is neither a literal nor a facet name.
+        let err = parse_condition_expr("a == 3").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("quoted string literal") && msg.contains("identifier"),
+            "error must name both accepted right-hand sides, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn trailing_identifier_after_facet_comparison_is_rejected() {
+        let err = parse_condition_expr("a == b c").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("Unexpected trailing input"),
+            "err: {msg}"
+        );
+    }
+
+    #[test]
+    fn facet_comparison_tolerates_surrounding_whitespace() {
+        let tight = parse_condition_expr("a==b").unwrap();
+        let loose = parse_condition_expr("  a   ==   b  ").unwrap();
+        assert_eq!(tight, compare("a", ConditionPredicateOp::Eq, "b"));
+        assert_eq!(tight, loose);
+    }
+
+    #[test]
+    fn facet_comparison_operands_may_carry_digits_and_underscores() {
+        let expr = parse_condition_expr("sorter_container != line_container2").unwrap();
+        assert_eq!(
+            expr,
+            compare(
+                "sorter_container",
+                ConditionPredicateOp::NotEq,
+                "line_container2"
+            )
+        );
+    }
+}

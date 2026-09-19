@@ -29,7 +29,7 @@ use compiler::loader_api::{
 };
 use compiler::product_api::{OperationStatus, PRODUCT_SCHEMA_VERSION};
 
-use crate::pipeline::{self, PipelineError, SelectPair};
+use crate::pipeline::{self, CellSource, PipelineError, SelectPair};
 
 /// One facet's listing: the facet name, whether it is already fixed (a
 /// `--select` choice or an immutable context-tag pin) or still open, and the
@@ -56,7 +56,7 @@ pub fn run(
     selection_file: Option<&Path>,
     selects: &[SelectPair],
 ) -> Result<OptionsOutcome, PipelineError> {
-    let prepared = pipeline::prepare(model, selection_file, selects)?;
+    let prepared = pipeline::prepare(model, &CellSource::from_selection_file(selection_file), selects)?;
 
     let facet_names = list_selection_facets(&prepared.handle)
         .map_err(|err| PipelineError::usage(format!("unable to list model facets ({err})")))?;

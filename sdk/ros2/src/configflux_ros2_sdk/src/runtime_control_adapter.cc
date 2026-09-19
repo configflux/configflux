@@ -159,8 +159,8 @@ RuntimeControlResult RuntimeControlAdapter::CommitConfiguration(
     payload.append(EscapeJsonString(*request.context.reason));
     payload.push_back('"');
   }
-  if (request.expected_base_configuration_id.has_value() &&
-      !request.expected_base_configuration_id->empty()) {
+  // Forwarded exactly as sent, blank included; the runtime refuses a blank one.
+  if (request.expected_base_configuration_id.has_value()) {
     payload.append(R"(,"expected_base_configuration_id":")");
     payload.append(EscapeJsonString(*request.expected_base_configuration_id));
     payload.push_back('"');

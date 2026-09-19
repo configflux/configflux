@@ -174,6 +174,7 @@ fn resolve_hash_for_scope(handle: &ModelHandle, scope: &str) -> Result<String> {
         model_handle: handle.clone(),
         scope: scope.to_string(),
         selection_state,
+        implied_choices: Default::default(),
     });
     if resolve_result.status != OperationStatus::Ok {
         anyhow::bail!(

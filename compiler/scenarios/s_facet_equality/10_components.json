@@ -1,0 +1,36 @@
+{
+    "package": "s_facet_equality",
+    "version": "1.0.0",
+    "components": {
+        "line": {
+            "type": "controller",
+            "params": {
+                "container": {
+                    "inherits": "container_slot",
+                    "type": "string",
+                    "doc": "Container the line draws from",
+                    "value": "c1",
+                    "lifecycle": "runtime",
+                    "safety": "q_m",
+                    "access": "technician",
+                    "req_id": "req_facet_equality_001"
+                }
+            }
+        },
+        "sorter": {
+            "type": "controller",
+            "params": {
+                "container": {
+                    "inherits": "container_slot",
+                    "type": "string",
+                    "doc": "Container the sorter draws from",
+                    "value": "c1",
+                    "lifecycle": "runtime",
+                    "safety": "q_m",
+                    "access": "technician",
+                    "req_id": "req_facet_equality_002"
+                }
+            }
+        }
+    }
+}

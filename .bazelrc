@@ -4,7 +4,6 @@
 # Explicitly disable the legacy WORKSPACE mode (we are strictly Bzlmod)
 common --noenable_workspace
 common --enable_bzlmod
---experimental_disk_cache_gc_max_size 5G
 
 # Enforce stricter environment isolation to prevent "it works on my machine" issues.
 # This stops variables like $PATH from leaking into the build actions.
@@ -30,7 +29,7 @@ build --disk_cache=.cache/bazel-disk-cache
 # (the working cache had reached ~43G). Bazel garbage-collects the cache down to
 # this ceiling after the server has been idle (default 5m). Applies to every
 # invocation (gate, resource_guard, direct), whatever disk_cache path is in use.
-build --experimental_disk_cache_gc_max_size=60G
+build --experimental_disk_cache_gc_max_size=20G
 
 # "Build without the Bytes": Only download artifacts when actually needed.
 # This speeds up remote builds significantly.

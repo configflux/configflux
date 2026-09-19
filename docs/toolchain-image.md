@@ -1,7 +1,7 @@
 # ConfigFlux toolchain container image
 
-The official toolchain image packages the three ConfigFlux command-line tools —
-`compiler`, `interpreter`, and `runtime` — together with the exact pinned `cue`
+The official toolchain image packages the four ConfigFlux command-line tools —
+`cfx`, `compiler`, `interpreter`, and `runtime` — together with the exact pinned `cue`
 evaluator the project builds against. It lets you run the toolchain **anywhere a
 container runtime runs**, on any host where installing native binaries is
 inconvenient or unavailable. The image is a run-and-exit toolchain: it reads
@@ -29,7 +29,7 @@ Prefer the digest form for reproducible runs.
 
 ## Invocation contract
 
-Pick the tool you want as the **first argument** (all three are on `PATH`
+Pick the tool you want as the **first argument** (all four are on `PATH`
 inside the image), mount your working directory at `/work`, and run. On a
 native Linux Docker daemon, pass `-u` so emitted files are owned by you:
 
@@ -42,7 +42,7 @@ docker run --rm \
   compiler <args...>
 ```
 
-The same shape runs `interpreter` and `runtime` — just change the first
+The same shape runs `cfx`, `interpreter` and `runtime` — just change the first
 argument. A bare run with no command prints a usage banner, so the image is
 self-documenting:
 
@@ -72,9 +72,11 @@ id**: it assumes no named account, its bundled tools are world-readable and
 executable, and it writes only under `/work` (plus a writable `/tmp`). The
 variation above is entirely in the `docker`/`podman` flags, not the image.
 
-> **Trial users:** the `cfx` wrapper shipped in the dogfood package detects your
-> runtime and selects these flags automatically (override with `CFX_USER_MODE`
-> and `CFX_MOUNT_OPT`). Prefer it over a hand-written `docker run`.
+> **Tip:** a small launcher script can detect your container runtime and choose
+> these flags for you — pass `-u` only when `docker info` reports a native
+> rootful Linux daemon, and add `:z` when SELinux is enforcing. The runtime table
+> above is the complete contract such a script has to honour. Inside the image,
+> `cfx` is the ConfigFlux resolver CLI, not a launcher.
 
 ### Everything happens under `/work`
 
@@ -87,7 +89,7 @@ pass paths relative to it.
 
 | Component | Notes |
 |-----------|-------|
-| `compiler`, `interpreter`, `runtime` | The three release binaries, identical to the bytes shipped in the release tarballs for the same version. |
+| `cfx`, `compiler`, `interpreter`, `runtime` | The four release binaries, identical to the bytes shipped in the release tarballs for the same version. |
 | `cue` | The exact pinned CUE evaluator the project builds against. Because the CUE version is load-bearing for model semantics, bundling the pinned evaluator means a compile/resolve run inside the image reproduces the same `model_hash` as the host build. |
 | `LICENSE`, `NOTICE` | Bundled under `/usr/local/share/configflux/`. |
 
@@ -104,6 +106,26 @@ packaging boundary does not change the result. This is what makes the image
 safe for reproducible, deploy-time configuration generation: pin the image by
 digest and the toolchain — binaries and evaluator alike — is fixed.
 
+### Refreshing the pinned base image
+
+*Maintainers.* The image is built on a `distroless` base pinned by **index
+digest** rather than by a floating tag. A pinned digest is reproducible, but it
+never picks up upstream fixes on its own, so it is re-resolved and re-recorded
+**at every release cut**.
+
+Re-resolve the current index digest:
+
+```bash
+docker buildx imagetools inspect gcr.io/distroless/static-debian12:latest
+```
+
+Use the value on the `Digest:` line. That is the multi-platform *index* digest,
+which is what keeps `docker build` selecting `linux/amd64` reproducibly — not
+one of the per-platform manifest digests listed beneath it.
+
+Then update **both** the digest and the `Resolved <date>` line in
+`docker/toolchain.Dockerfile`.
+
 ## Verifying authenticity
 
 Published images are signed with cosign keyless signing, the same mechanism the
@@ -112,7 +134,12 @@ identity:
 
 ```bash
 cosign verify \
-  --certificate-identity-regexp 'https://github.com/configflux/configflux/.*' \
+  --certificate-identity-regexp '^https://github\.com/configflux/configflux/\.github/workflows/release\.yml@refs/tags/v.*$' \
+  --certificate-github-workflow-ref 'refs/tags/v<version>' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   ghcr.io/configflux/toolchain@sha256:<digest>
 ```
+
+Replace `<version>` with the version you downloaded; the certificate is bound
+to that release's workflow run, so a signature from another release does not
+verify.

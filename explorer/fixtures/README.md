@@ -1,8 +1,10 @@
-# Explorer fixtures — scenario S1 (water pump)
+# Explorer fixtures — scenario S1 (water pump), plus one requirements sample
 
 These JSON files are the sample artifacts the model explorer loads: real
-ConfigFlux pipeline output for scenario **S1 (water pump)**, carrying the
-current product schema version (`schema_version: 4`). The hermetic Bazel test
+ConfigFlux pipeline output, carrying the current product schema version
+(`schema_version: 5`). Four are scenario **S1 (water pump)**; the fifth is a
+resolved snapshot that delivers catalogue entries, which S1 does not use. The
+hermetic Bazel test
 `//explorer:fixture_schema_test` guards them: it reads
 `PRODUCT_SCHEMA_VERSION` from `compiler/src/product_api.rs` rather than restating
 it, so bumping the product schema version fails that test until these fixtures
@@ -15,6 +17,7 @@ updated to match.
 | `s1-facets.json` | `cfx options --format json` — `[GetSelectionOptionsResult]` | Model view (facet → option tree) |
 | `s1-resolve-snapshot.json` | `cfx resolve --format json` — `ResolveResult` | Resolution view (params table + hash lineage) |
 | `s1-explain-conflict.json` | `cfx explain --format json` — `ExplainRejectionResult` | Explain view (labeled unsat core) |
+| `s-requires-resolve-snapshot.json` | `cfx resolve --format json` — `ResolveResult` | Resolution view (requirements table) |
 
 ## Data provenance
 
@@ -48,7 +51,7 @@ solver's own — including the `constraint_id` naming the rule it came from —
 not an illustration of one.
 
 `s1-resolve-snapshot.json` is the one fixture the commands below do **not**
-reproduce, and this is deliberate. Its `resolve_hash` (`1f93f566…`) is the
+reproduce, and this is deliberate. Its `resolve_hash` (`9b3e63b9…`) is the
 authentic S1 smoke value recorded in
 `compiler/tests/fixtures/byte-stability-baselines.json`, which comes from a
 `component:thermal_control`-scoped, context-only resolution run in process. Step
@@ -59,6 +62,16 @@ pins the fixture to that baseline so the two cannot drift apart. Its `model_hash
 and `selection_state_hash` are deterministic, schema-valid, S1-scoped stand-ins
 (sha256 of a stable label). Step 5 re-runs the resolution the Resolution view
 demonstrates; expect its hash header to differ from the committed fixture's.
+
+`s-requires-resolve-snapshot.json` is the one fixture that is not S1. It exists
+because the Resolution view's requirements table needs something to render and
+S1 declares no requirement: the snapshot is real `cfx resolve` output over
+`compiler/scenarios/s_requires_delivery`, a three-unit model whose services
+declare `requires: {container: line_container}` (ADR-0057 §D7). Naming the site
+alone is enough — the binding's `derive` table decides the container, which is
+why the snapshot reports `implied_choices` rather than a choice the operator
+typed. Every hash in it is authentic and self-consistent, because step 7 below
+reproduces the whole file.
 
 ## Regeneration command
 
@@ -144,6 +157,24 @@ JSON
   --select cooling_brand=aeroflux --select cooling_model=x200 \
   --format json | python3 -m json.tool --indent 2 \
   > explorer/fixtures/s1-explain-conflict.json
+
+# 7. A resolved snapshot that delivers catalogue entries
+#    -> s-requires-resolve-snapshot.json
+#    Only the site is selected: the binding's derive table decides the
+#    container, so the snapshot reports it under implied_choices and each
+#    service carries the entry inside its own requires block.
+REQ=compiler/scenarios/s_requires_delivery
+"$COMPILER" compile \
+  --source "$REQ/00_catalogue.json" \
+  --source "$REQ/10_bindings.json" \
+  --source "$REQ/20_services.json" \
+  --out /tmp/s-requires-cmp > /dev/null
+
+"$CFX" resolve --model /tmp/s-requires-cmp/cmp.manifest.json \
+  --select site=factory_a \
+  --out /tmp/s-requires-out --format json \
+  | python3 -m json.tool --indent 2 \
+  > explorer/fixtures/s-requires-resolve-snapshot.json
 ```
 
 After regenerating, re-run the schema guard:

@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 use crate::conditions;
-use crate::resolved_models::{ResolvedComponent, ResolvedConfig, ResolvedParameter};
+use crate::link_verify::ensure_override_depth;
+use crate::resolved_models::{
+    ResolvedComponent, ResolvedConfig, ResolvedParameter, ResolvedRequirement,
+};
 use crate::schema::{self, Config, Parameter};
 use anyhow::{bail, Context, Result};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScopeSelector {
@@ -101,9 +104,29 @@ impl ResolutionContext {
     }
 }
 
+/// The marker an unbound-requirement failure carries so the loader's
+/// diagnostic mapper can recognize it and re-report it as
+/// `E_RESOLVE_FACET_UNBOUND` naming the binding's declared domain
+/// (`loader_api::shared_ops::map_resolve_error_with_facets`).
+///
+/// A marker rather than a typed error because `resolve` returns `anyhow::Error`
+/// on every other failure and one error channel is easier to keep honest than
+/// two. It is `pub(crate)` so the mapper matches the same literal this module
+/// writes; a rename in one place cannot silently degrade the diagnostic in the
+/// other.
+pub(crate) const REQUIREMENT_UNBOUND_MARKER: &str = "Requirement binding '";
+
 /// Main Entry Point: Transforms Raw Config -> Resolved Config
 pub fn resolve(raw: Config, context: &ResolutionContext) -> Result<ResolvedConfig> {
     let mut resolved_components = HashMap::new();
+    // ADR-0057 §D7: every requirement whose binding the tag environment left
+    // unbound, and the `<component>.<slot>` sites that need it. Accumulated
+    // across the whole walk rather than raised at the first one, because the
+    // integrator wants to be told about all of them at once — and collected in
+    // ordered containers because `raw.components` is a `HashMap`, so the
+    // message would otherwise depend on iteration order. What the single
+    // diagnostic can carry of that is spelled out where it is raised, below.
+    let mut unbound_requirements: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
 
     for (comp_name, comp) in raw.components {
         // 1. Component Level Filtering (The 150% -> 100% check)
@@ -118,7 +141,21 @@ pub fn resolve(raw: Config, context: &ResolutionContext) -> Result<ResolvedConfi
             comp_name
         ))?;
 
-        // 2. Resolve Parameters
+        // 2. Deliver the catalogue entry each requirement resolved to
+        // (ADR-0057 §D7). Done for INCLUDED components only: a component the
+        // condition above excluded is not in the configuration, so its
+        // requirement is not one either — the same rule ADR-0054 §3 applies to
+        // its `accepts` conjunct.
+        let resolved_requires = resolve_requirements(
+            &comp_name,
+            &comp.requires,
+            &raw.bindings,
+            &raw.catalogues,
+            context,
+            &mut unbound_requirements,
+        )?;
+
+        // 3. Resolve Parameters
         let mut resolved_params = HashMap::new();
         for (param_name, param) in comp.params {
             // Perform the "Deep Flattening". The fully-qualified path is passed
@@ -141,8 +178,37 @@ pub fn resolve(raw: Config, context: &ResolutionContext) -> Result<ResolvedConfi
             comp_name,
             ResolvedComponent {
                 r#type: comp_type,
+                requires: resolved_requires,
                 params: resolved_params,
             },
+        );
+    }
+
+    // Fail closed, and fail with the whole picture. Raised after the walk so the
+    // message is complete, and before any output is returned so a resolve that
+    // cannot deliver a requirement produces no snapshot at all.
+    //
+    // The loader's failure channel carries ONE diagnostic, so one binding is
+    // reported in full — every site that needed it, and (at the mapper) its
+    // declared domain — and any others are named after it. That is enough to fix
+    // them all in one pass, which is the point; widening the channel to a
+    // diagnostic per binding would change the shared resolve-failure path for
+    // every other error too, which this does not earn.
+    let mut unbound = unbound_requirements.into_iter();
+    if let Some((binding, sites)) = unbound.next() {
+        let required_by = sites.into_iter().collect::<Vec<_>>().join(", ");
+        let others: Vec<String> = unbound.map(|(binding, _)| binding).collect();
+        let also = if others.is_empty() {
+            String::new()
+        } else {
+            format!("; also unbound: {}", others.join(", "))
+        };
+        bail!(
+            "{}{}' is unbound; required by {}{}",
+            REQUIREMENT_UNBOUND_MARKER,
+            binding,
+            required_by,
+            also
         );
     }
 
@@ -151,6 +217,77 @@ pub fn resolve(raw: Config, context: &ResolutionContext) -> Result<ResolvedConfi
         version: raw.version,
         components: resolved_components,
     })
+}
+
+/// Resolve one component's `requires` block against the tag environment
+/// (ADR-0057 §D7).
+///
+/// The binding's value is read from `context.tags` and nowhere else. That is
+/// the entire precedence rule: `bindings` are merged into the declared facets
+/// before resolve (`loader_api::shared_ops::load_resolve_model`), so by the time
+/// this runs the tag environment already carries choice > context tag > implied
+/// > declared default, resolved once, for facets and bindings alike. A second
+/// precedence ladder here is exactly the drift ADR-0047 §5 was written to
+/// prevent.
+///
+/// An unbound binding is RECORDED, not raised: the caller wants every site in
+/// one message. Every other failure is impossible on a package `link_verify`
+/// accepted (`validate_requirements` proves the binding is declared,
+/// `validate_catalogues` proves entries are complete and exact) and is raised
+/// immediately as a corrupt-package error rather than papered over — a
+/// requirement that silently delivers nothing is the late failure this whole
+/// mechanism exists to remove.
+fn resolve_requirements(
+    comp_name: &str,
+    requires: &BTreeMap<String, schema::Requirement>,
+    bindings: &HashMap<String, schema::Binding>,
+    catalogues: &HashMap<String, schema::Catalogue>,
+    context: &ResolutionContext,
+    unbound: &mut BTreeMap<String, BTreeSet<String>>,
+) -> Result<BTreeMap<String, ResolvedRequirement>> {
+    let mut resolved = BTreeMap::new();
+
+    for (slot, requirement) in requires {
+        let binding_id = requirement.binding.as_str();
+        let binding = bindings.get(binding_id).with_context(|| {
+            format!(
+                "Component '{}' requires undeclared binding '{}' at slot '{}'",
+                comp_name, binding_id, slot
+            )
+        })?;
+
+        let Some(entry_id) = context.tags.get(binding_id) else {
+            unbound
+                .entry(binding_id.to_string())
+                .or_default()
+                .insert(format!("{}.{}", comp_name, slot));
+            continue;
+        };
+
+        let catalogue = catalogues.get(&binding.catalogue).with_context(|| {
+            format!(
+                "Binding '{}' names undeclared catalogue '{}'",
+                binding_id, binding.catalogue
+            )
+        })?;
+        let fields = catalogue.entries.get(entry_id).with_context(|| {
+            format!(
+                "Binding '{}' is bound to '{}', which is not an entry of catalogue '{}'",
+                binding_id, entry_id, binding.catalogue
+            )
+        })?;
+
+        resolved.insert(
+            slot.clone(),
+            ResolvedRequirement {
+                binding: binding_id.to_string(),
+                entry: entry_id.clone(),
+                fields: fields.clone(),
+            },
+        );
+    }
+
+    Ok(resolved)
 }
 
 pub fn resolve_scoped(
@@ -227,6 +364,13 @@ pub fn resolve_scoped(
             // built to drive resolution, not an authored model. Declarations are
             // pack-global and the resolver never reads them.
             constraints: Default::default(),
+            // Carried, unlike the three above, because ADR-0057 §D7 makes the
+            // resolver a READER of these two: a scoped component's `requires`
+            // block is filled from the binding's catalogue entry, so a slice
+            // that dropped them would silently emit no requirement at every
+            // scope but `all`.
+            catalogues: raw.catalogues.clone(),
+            bindings: raw.bindings.clone(),
         };
         let resolved = resolve(scoped, context)?;
         outputs.insert(root, resolved);
@@ -282,12 +426,34 @@ fn resolve_parameter(
     }
 
     // B. Apply Overrides (Recursive Variant Logic)
-    apply_overrides_recursive(&mut param, context)?;
+    apply_overrides_recursive(&mut param, param_path, 0, context)?;
 
     // C. Validation (Ensure Mandatory Fields exist)
-    let value = match param.value {
-        Some(v) => v,
-        None => bail!("Missing 'value' for parameter"),
+    //
+    // ADR-0064 D3: a parameter that declares `facet: <f>` IS that facet's
+    // handle, so its value is the facet's effective value rather than an
+    // authored one — which `link_verify::validate_facet_bindings_scoped`
+    // already refused it from carrying. `context.tags` is the TOTAL
+    // post-default assignment (`loader_api::resolve_ops` builds it as declared
+    // defaults, overlaid by implied choices, overlaid by explicit choices), so
+    // the precedence explicit > implied > default is already applied to the map
+    // this reads and no new code here reproduces it.
+    let facet = param.facet.take();
+    let value = match &facet {
+        Some(bound_facet) => match context.tags.get(bound_facet.as_str()) {
+            Some(bound_value) => schema::Value::String(bound_value.clone()),
+            // The refusal an unvalued parameter receives below, naming the
+            // facet: an open facet with no default and no selection leaves the
+            // handle with nothing to carry, and that is the same fault.
+            None => bail!(
+                "Missing 'value' for parameter: facet '{}' has no effective value",
+                bound_facet
+            ),
+        },
+        None => match param.value.take() {
+            Some(v) => v,
+            None => bail!("Missing 'value' for parameter"),
+        },
     };
 
     let r#type = param.r#type.context("Missing 'type' for parameter")?;
@@ -324,6 +490,7 @@ fn resolve_parameter(
     Ok(ResolvedParameter {
         value,
         r#type,
+        facet,
         unit: param.unit,
         safety,
         lifecycle,
@@ -489,7 +656,20 @@ fn collect_chain_declared_metadata(
 /// 1. Evaluates conditions.
 /// 2. If true, recurses into the payload (to handle nested overrides).
 /// 3. Merges the result into the base parameter.
-fn apply_overrides_recursive(param: &mut Parameter, context: &ResolutionContext) -> Result<()> {
+///
+/// `depth` carries the same ceiling the verify-side walks over this chain
+/// enforce — one shared [`ensure_override_depth`], so the two sides cannot
+/// disagree about which models link (configflux-dw9i). It is checked here and
+/// not only at verify: `resolve_scoped` runs against a package read back from
+/// disk, so the chain reaching this function was validated by whichever
+/// compiler wrote the package, not by this process.
+fn apply_overrides_recursive(
+    param: &mut Parameter,
+    param_path: &str,
+    depth: usize,
+    context: &ResolutionContext,
+) -> Result<()> {
+    ensure_override_depth(depth, param_path)?;
     // We take the overrides out of the struct to avoid mutable borrow conflicts
     // while iterating.
     let overrides = std::mem::take(&mut param.overrides);
@@ -503,7 +683,7 @@ fn apply_overrides_recursive(param: &mut Parameter, context: &ResolutionContext)
             // 2. Recurse!
             // The payload itself might have `overrides` (nested conditions).
             // We must resolve those BEFORE merging upwards.
-            apply_overrides_recursive(&mut active_payload, context)?;
+            apply_overrides_recursive(&mut active_payload, param_path, depth + 1, context)?;
 
             // 3. Merge the resolved payload into the current param
             merge_params(param, active_payload)?;
@@ -616,6 +796,7 @@ mod tests {
             access: None,
             limits: None,
             req_id: None,
+            facet: None,
             overrides: Vec::new(),
         }
     }
@@ -638,6 +819,8 @@ mod tests {
             artifacts: HashMap::new(),
             facets: Default::default(),
             constraints: Default::default(),
+            catalogues: Default::default(),
+            bindings: Default::default(),
         }
     }
 
@@ -676,6 +859,7 @@ mod tests {
             r#type: Some("actuator".to_string()),
             condition: None,
             depends_on: Vec::new(),
+            requires: Default::default(),
             params,
         };
         let config = config_with_component("motor", comp);
@@ -714,6 +898,7 @@ mod tests {
             r#type: Some("actuator".to_string()),
             condition: None,
             depends_on: Vec::new(),
+            requires: Default::default(),
             params,
         };
         let config = config_with_component("motor", comp);
@@ -750,6 +935,7 @@ mod tests {
             r#type: Some("actuator".to_string()),
             condition: None,
             depends_on: Vec::new(),
+            requires: Default::default(),
             params,
         };
         let config = config_with_component("motor", comp);
@@ -785,6 +971,7 @@ mod tests {
             r#type: Some("actuator".to_string()),
             condition: None,
             depends_on: Vec::new(),
+            requires: Default::default(),
             params,
         };
         let config = config_with_component("motor", comp);
@@ -816,6 +1003,7 @@ mod tests {
             r#type: Some("actuator".to_string()),
             condition: None,
             depends_on: Vec::new(),
+            requires: Default::default(),
             params,
         };
 
@@ -833,6 +1021,8 @@ mod tests {
             artifacts: HashMap::new(),
             facets: Default::default(),
             constraints: Default::default(),
+            catalogues: Default::default(),
+            bindings: Default::default(),
         };
 
         let err = resolve(
@@ -894,6 +1084,7 @@ mod tests {
                 r#type: Some("actuator".to_string()),
                 condition: None,
                 depends_on: vec!["child".to_string()],
+                requires: Default::default(),
                 params: root_params,
             },
         );
@@ -903,6 +1094,7 @@ mod tests {
                 r#type: Some("sensor".to_string()),
                 condition: None,
                 depends_on: Vec::new(),
+                requires: Default::default(),
                 params: child_params,
             },
         );
@@ -912,6 +1104,7 @@ mod tests {
                 r#type: Some("sensor".to_string()),
                 condition: None,
                 depends_on: Vec::new(),
+                requires: Default::default(),
                 params: HashMap::new(),
             },
         );
@@ -924,6 +1117,8 @@ mod tests {
             artifacts: HashMap::new(),
             facets: Default::default(),
             constraints: Default::default(),
+            catalogues: Default::default(),
+            bindings: Default::default(),
         };
 
         let ctx = ResolutionContext {
@@ -946,6 +1141,7 @@ mod tests {
                 r#type: Some("platform".to_string()),
                 condition: None,
                 depends_on: Vec::new(),
+                requires: Default::default(),
                 params: HashMap::new(),
             },
         );
@@ -955,6 +1151,7 @@ mod tests {
                 r#type: Some("platform".to_string()),
                 condition: None,
                 depends_on: Vec::new(),
+                requires: Default::default(),
                 params: HashMap::new(),
             },
         );
@@ -964,6 +1161,7 @@ mod tests {
                 r#type: Some("sensor".to_string()),
                 condition: None,
                 depends_on: Vec::new(),
+                requires: Default::default(),
                 params: HashMap::new(),
             },
         );
@@ -976,6 +1174,8 @@ mod tests {
             artifacts: HashMap::new(),
             facets: Default::default(),
             constraints: Default::default(),
+            catalogues: Default::default(),
+            bindings: Default::default(),
         };
 
         let ctx = ResolutionContext {
@@ -999,6 +1199,7 @@ mod tests {
             r#type: Some("actuator".to_string()),
             condition: None,
             depends_on: Vec::new(),
+            requires: Default::default(),
             params,
         };
 
@@ -1027,6 +1228,8 @@ mod tests {
             artifacts,
             facets: Default::default(),
             constraints: Default::default(),
+            catalogues: Default::default(),
+            bindings: Default::default(),
         };
 
         let resolved = resolve(
@@ -1051,6 +1254,7 @@ mod tests {
             r#type: Some("actuator".to_string()),
             condition: None,
             depends_on: Vec::new(),
+            requires: Default::default(),
             params,
         };
 
@@ -1066,6 +1270,8 @@ mod tests {
             artifacts: HashMap::new(),
             facets: Default::default(),
             constraints: Default::default(),
+            catalogues: Default::default(),
+            bindings: Default::default(),
         };
 
         let err = resolve(
@@ -1094,6 +1300,7 @@ mod tests {
             r#type: Some("actuator".to_string()),
             condition: None,
             depends_on: Vec::new(),
+            requires: Default::default(),
             params,
         };
 
@@ -1109,6 +1316,8 @@ mod tests {
             artifacts: HashMap::new(),
             facets: Default::default(),
             constraints: Default::default(),
+            catalogues: Default::default(),
+            bindings: Default::default(),
         };
 
         let err = resolve(

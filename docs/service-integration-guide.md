@@ -50,7 +50,7 @@ deliver the bundle as one unit**. The bundle is:
 |----------|---------|
 | `resolve_result.<root>.<selection>.json` | The resolved snapshot: every parameter's final value and metadata for one scope. This is what a Pattern 1 consumer reads directly. |
 | `ccm/` (a directory) | The solver model: `ccm.manifest.json`, `ccm.symbols.json`, and one or more `partition-*/ccm.bdd.bin`. Required by Pattern 2's validated session. |
-| Hash lineage | The `model_hash` and `resolve_hash` carried inside the snapshot. They identify exactly which compiled model and which resolution this bundle represents. |
+| Hash lineage | The `model_hash`, `resolve_hash` and `resolved_output_hash` carried inside the snapshot. The first two identify exactly which compiled model and which resolution this bundle represents; `resolved_output_hash` is the **"did the delivered bytes change"** identity — it covers the resolved payload alone, so an unrelated edit elsewhere in the model rotates `resolve_hash` while leaving it untouched. |
 
 This layout — the per-scope snapshot at the bundle root plus a sibling `ccm/`
 directory, with the hash lineage carried inside the snapshot — is **the
@@ -143,7 +143,7 @@ target is error-prone and leaves nothing under version control. The
 production target" means the same resolution every time.
 
 An environment manifest is a small JSON file **you own and version-control** in
-your own repository. The convention fixes the field names; the shape is:
+your own repository. `cfx` fixes the field names; the shape is:
 
 ```json
 {
@@ -152,42 +152,74 @@ your own repository. The convention fixes the field names; the shape is:
     "local": {
       "scope": "component:runtime_tuner",
       "context_tags": { "region": "eu", "site": "lab" },
-      "choices": { "device_class": "gateway", "update_channel": "canary" }
+      "choices": { "device_class": "gateway" }
     },
     "production": {
       "scope": "component:runtime_tuner",
       "context_tags": { "site": "prod" },
-      "choices": { "device_class": "gateway", "update_channel": "canary", "region": "eu" }
+      "choices": { "device_class": "gateway", "region": "eu" }
     }
   }
 }
 ```
 
 Each environment names a target: the `scope` it resolves, the `context_tags`
-that seed the resolution, and the `choices` (one per selectable facet) that
-drive it. A worked example manifest ships at
+that seed the resolution, and the `choices` that drive it.
+
+**A `choices` map carries the decisions that deployment owns — not one entry per
+selectable facet.** Anything the model already decides, it decides for you. So
+if a rule in your model fixes `update_channel` from `device_class`, neither
+environment above needs to state it: `cfx resolve` binds it and reports it as an
+`implied:` line, and a facet nothing implies falls back to its declared default.
+So write down what is genuinely free at that site and leave the entailed values
+out — the manifest stays short, and a rule change updates every target at once
+instead of drifting against a dozen hand-copied choice maps. Run `cfx options`
+against your own model to see which facets are still open once your free
+decisions are stated. A worked example manifest ships at
 [`examples/environments.example.json`](../examples/environments.example.json).
 
-> **This is a documented convention, not a product input format.** The
-> ConfigFlux binaries do **not** read the manifest file. There is no new CLI
-> verb and no new input parser. The manifest exists only to give targets names
-> under version control; each named entry is exactly the three inputs
-> `cfx resolve` already takes (scope + context tags + choices).
+`cfx resolve` reads this file directly. `schema_version` must be `1`, an
+environment name must match `[A-Za-z0-9._-]+` (it becomes a directory name), and
+any key `cfx` does not recognise is rejected rather than ignored — a typo in a
+manifest would otherwise resolve a target you did not describe. An optional
+`class` field is accepted and ignored by `cfx`; it is read by
+[`examples/deploy_guard.sh`](../examples/deploy_guard.sh).
 
-**Produce one target with `cfx resolve`.** `cfx resolve` is the one-shot
-resolver: it opens the compiled model, applies a selection, resolves, and writes
-the snapshot in a single command — no request envelopes to thread by hand. A
-target is described by a small **selection file** (its scope, context tags, and
-choices):
+**Produce one named target with `cfx resolve --manifest`.** Name the environment
+and `cfx` resolves exactly that target:
+
+```bash
+cfx resolve \
+  --model <cmp.manifest.json> \
+  --manifest environments.json \
+  --environment production \
+  --out ./targets/production
+```
+
+The snapshot is written as `<out>/resolve_result.<root>.<selection>.json`; the
+C++ early-binding files go under `<out>/generated/`. Copy the model's `ccm/`
+directory beside it and the output directory is a complete delivery bundle.
+`<root>` is the scope root and `<selection>` is the environment's choice values
+in sorted-facet order, falling back to the environment name when it has no
+choices. Resolution is deterministic: resolving the same target twice yields a
+byte-identical snapshot and an identical `resolve_hash`. `cfx` exits `0` on
+success, `2` on a usage/IO error (including a malformed manifest), and `3` on an
+unsatisfiable selection (run `cfx explain` to see why).
+
+**Or describe one target inline with a selection file.** The same three values
+can be handed over directly, without a manifest — useful for a one-off target
+that is not worth naming. `--selection-file` and `--manifest` are mutually
+exclusive, and each must name a regular file of at most 8 MiB — the same bound
+the interpreter and the runtime apply to a request payload:
 
 ```bash
 cat > production.selection.json <<'JSON'
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "model_hash": "",
   "scope": "component:runtime_tuner",
   "context_tags": { "site": "prod" },
-  "choices": { "device_class": "gateway", "update_channel": "canary", "region": "eu" },
+  "choices": { "device_class": "gateway", "region": "eu" },
   "selection_state_hash": ""
 }
 JSON
@@ -200,18 +232,17 @@ cfx resolve \
 
 `cfx` re-derives `model_hash` and `selection_state_hash` itself, so those two
 fields are left empty in the file. Choices can also be given as repeatable
-`--select facet=option` flags instead of (or on top of) the file. Resolution is
-deterministic: resolving the same target twice yields a byte-identical snapshot
-and an identical `resolve_hash`. `cfx` exits `0` on success, `2` on a usage/IO
-error, and `3` on an unsatisfiable selection (run `cfx explain` to see why).
+`--select facet=option` flags instead of (or on top of) either input.
+Binding the same facet twice at one level — two `--select` flags, or a
+duplicate key inside the file — is a usage error; only a flag overriding the
+file is an override.
 
-**Reference resolver (the envelope appendix).** When you prefer to drive
-resolution from a manifest of named environments — or you are a machine
+**Reference resolver (the envelope appendix).** When you are a machine
 integrator wiring the raw request/response **envelope** protocol (the interpreter
 `open → init-selection-state → select → resolve` chain, the agent/Depth-2 seam
 per ADR-0042) — the reference resolver
-[`examples/resolve_environment.sh`](../examples/resolve_environment.sh) reads a
-manifest and unfolds one named environment into that envelope chain:
+[`examples/resolve_environment.sh`](../examples/resolve_environment.sh) reads the
+same manifest and unfolds one named environment into that envelope chain:
 
 ```bash
 examples/resolve_environment.sh \
@@ -225,45 +256,249 @@ It locates the interpreter via `CONFIGFLUX_INTERPRETER` (falling back to the
 local build), reads `scope`, `context_tags`, and `choices` for the named
 environment, drives the envelope chain, and writes one
 `resolve_result.<root>.<selection>.json` snapshot that is **bit-for-bit
-identical** to the `cfx resolve` snapshot for the same target. The script exits
-`0` on success, `1` if a resolution is rejected or the manifest is malformed,
-and `2` on a usage error.
+identical** to the `cfx resolve` snapshot for the same target — a property the
+test suite asserts on every change, so the two paths cannot drift. The script
+exits `0` on success, `1` if a resolution is rejected or the manifest is
+malformed, and `2` on a usage error.
 
 #### Resolving a matrix of targets in CI
 
 A release pipeline usually resolves **many** targets from one model — several
 environments, and within each, one or more service scopes. This is a
 **matrix**: N environments × M scopes, where every cell is an independent,
-deterministic resolution producing one snapshot. Because the cells are
-independent, the matrix is simply a **loop** of `cfx resolve` calls — one per
-(environment, scope) cell — with no batch verb and no shared cross-cell state.
-[`examples/05-compose-fleet`](../examples/05-compose-fleet) shows exactly this
-loop end to end.
-
-The reference resolver also runs the matrix directly through the envelope chain
-(the appendix path), which is handy when you already drive it from a manifest:
+deterministic resolution producing one snapshot. `cfx resolve --all` runs the
+whole matrix in one command:
 
 ```bash
 # Resolve every environment in the manifest, each across two service scopes.
 # Produces one snapshot per (environment, scope) cell under ./targets/.
-examples/resolve_environment.sh \
-  --cmp <cmp.manifest.json> \
-  --manifest environments.example.json \
-  --matrix \
+cfx resolve \
+  --model <cmp.manifest.json> \
+  --manifest environments.json \
+  --all \
   --scopes "component:runtime_tuner,component:update_agent" \
   --out ./targets
 ```
 
 Each cell is written under `./targets/<environment>/<scope-root>/` as its own
-`resolve_result.<root>.<selection>.json`, so the cells never collide. With
-`--scopes` omitted, each environment is resolved at its own declared `scope`.
+`resolve_result.<root>.<selection>.json` plus its `generated/` files, so the
+cells never collide. With `--scopes` omitted, each environment is resolved at
+its own declared `scope`; with `--scopes` given, that list **replaces** every
+environment's own scope, so one manifest sweeps several services without being
+edited. Cells are processed in sorted `(environment, scope)` order regardless of
+the order you list `--scopes` in, so the output is a function of the manifest
+and not of how the command was typed.
+
+`cfx` prints a `cell: <environment> <scope>` header before each cell's hash
+lineage, and its `wrote:` paths are relative to `--out`. With `--format json` it
+emits JSON Lines instead: one resolved snapshot per cell, in the same order, and
+nothing else on stdout. It exits `0` when every cell resolved, `3` if any cell
+was unsatisfiable — every cell is still attempted, the rejected ones write
+nothing and are named on stderr, and the cells that resolved keep their files —
+and `2` for a usage or IO problem, which stops the run.
+
 Because every cell is deterministic, the whole matrix is reproducible: a CI
 stage can re-run it and compare against committed snapshots, and a per-target
 delivery bundle (snapshot + `ccm/`) is assembled from each cell and verified
 with [`examples/verify_bundle.sh`](../examples/verify_bundle.sh) before it is
-shipped. This is the CI-suitable pattern for building every target's
-configuration in one pass — a documented loop over the existing pipeline, not a
-new product feature.
+shipped. [`examples/05-compose-fleet`](../examples/05-compose-fleet) shows the
+whole pass end to end. The reference resolver runs the same matrix through the
+envelope chain with `--matrix --scopes ...` and writes the same cell layout,
+for integrators on the appendix path.
+
+### Reviewing a change before it ships
+
+The matrix above answers "what do my targets receive". The question a reviewer
+actually has is narrower: **which of them does this change touch?** Hash
+comparison alone cannot answer it. `resolve_hash` identifies a whole resolution
+— the model, the selection, and the output together — so editing anything,
+anywhere in the model, rotates it for *every* target, including targets whose
+delivered bytes are byte-identical before and after. That is correct for a
+lineage identity and useless for a review.
+
+`cfx diff` answers the narrower question directly. It takes two compiled models
+and one manifest, resolves every target against both sides with the identical
+scope, context tags and choices, and compares the delivered payloads:
+
+```bash
+cfx diff \
+  --base  main/cmp.manifest.json \
+  --head  pr/cmp.manifest.json \
+  --manifest environments.json
+```
+
+```
+unchanged  dev  component:webapp
+changed  prod  component:webapp
+  ~ component.webapp.param.request_timeout_ms: 5000 -> 4000
+unchanged  staging  component:webapp
+summary: unchanged=2 changed=1 now_unsatisfiable=0 now_satisfiable=0 unsatisfiable_both=0
+```
+
+Every target gets exactly one status:
+
+| Status | Meaning |
+|---|---|
+| `unchanged` | Both sides resolved and deliver the identical payload. |
+| `changed` | Both sides resolved and the payload differs; each difference is listed below the target. |
+| `now_unsatisfiable` | The base side resolved and the head side is rejected — the change broke this target. |
+| `now_satisfiable` | The base side was rejected and the head side resolves — the change fixed this target. |
+| `unsatisfiable_both` | Rejected on both sides; this target was already broken. |
+
+Change lines read `~` for a modified entry, `+` for one only the head has, and
+`-` for one only the base has. A parameter's **value** difference is listed
+first and separately from its metadata (`type`, `unit`, `safety`, `lifecycle`,
+`access`, `req_id`, `doc`, `limits`), because "the service now receives a
+different number" and "we changed the documentation string" are different news.
+The four rejected statuses print the diagnostic that rejected each side, so a
+broken target names the rule it broke without a second command.
+
+`--environment <name>` is repeatable and narrows the run to the targets you
+name; omit it and every environment in the manifest is compared. `--scopes`
+works exactly as it does on `cfx resolve --all`: the list replaces each
+environment's own scope, so one manifest sweeps several services. There is no
+`--out` — `cfx diff` writes nothing at all — and no `--select`, because a diff
+compares the targets you actually ship rather than an ad-hoc selection.
+
+**Exit codes** are the point of the verb: `0` when no target changed, `1` when
+at least one did (the `diff(1)` / `git diff --exit-code` convention), and `2`
+for a usage or IO problem. Unsatisfiability is a *status* here, never the
+command's verdict, so `cfx diff` never exits `3`. That makes the bare command a
+pull-request check:
+
+```bash
+cfx diff --base main/cmp.manifest.json --head pr/cmp.manifest.json \
+  --manifest environments.json && echo "no deployment changed"
+```
+
+The check fails exactly when the change would alter what a running service
+receives — and stays quiet for the much more common edit that rotates the model
+identity without moving a single delivered byte. `--format json` emits the same
+report as one machine-readable envelope (`schema_version`, the two model hashes,
+one object per target with its hashes, changes and rejections, and the summary
+counts) for a bot that wants to comment the change list onto the pull request.
+
+That covers half of a review. `cfx diff` compares two packages, so it presumes
+both exist and that you know what went into them. When the model is built unit
+by unit, the other half is knowing that the right units went in — which is the
+next section, and the two meet in [the worktree flow](#the-worktree-flow) at the
+end of it.
+
+### Pinning the units you link
+
+When a model is built unit by unit, the reviewer's question widens once more.
+`cfx diff` answers "which of my targets does this change touch". It cannot
+answer "is this the set of units we reviewed at all" — that question is about
+the inputs to the compile, not its outputs, and by the time a package exists
+the answer has already been decided.
+
+A **lockfile** decides it. It records, per unit, the `object_hash` the
+integration expects:
+
+```json
+{
+  "schema_version": 1,
+  "objects": {
+    "site_catalogue": { "object_hash": "9f2c...", "source": "" },
+    "vision_service": { "object_hash": "41ab...", "source": "" }
+  }
+}
+```
+
+Write it from a link you have reviewed, and check it on every link after that:
+
+```bash
+# Once, from the integration unit, after review.
+configflux-compiler link --object out/site_catalogue.cfo \
+  --object out/vision_service.cfo --out out/cmp --write-lock configflux.lock
+
+# On every build after that.
+configflux-compiler link --object out/site_catalogue.cfo \
+  --object out/vision_service.cfo --out out/cmp --lock configflux.lock
+```
+
+The check has two halves, and both run before the linker asks the objects
+anything else:
+
+| Fault | Code | Meaning |
+|---|---|---|
+| A linked object's hash is not the pinned one, or the unit is not pinned at all | `E_LINK_LOCK_MISMATCH` | The build is not the one that was reviewed. The message names the unit, the pinned hash and the linked hash. |
+| A pinned unit was not linked | `E_LINK_LOCK_UNLINKED` | The reviewed set is not the set being built. `--lock-allow-extra` waives this for a deliberate subset link and never waives the row above. |
+| The file is not a lockfile | `E_LINK_LOCK_INVALID` | Unreadable, wrong `schema_version`, an unknown key, or a key that is not a unit name. |
+
+**The workflow the format exists for** is the worktree edit. Someone changes
+one unit, rebuilds only that object, and links:
+
+```
+E_LINK_LOCK_MISMATCH: The lockfile 'configflux.lock' pins unit 'vision_service'
+at object_hash 41ab..., but the object linked here is 7c05...
+hint: Link the object the lock pins, or renew the pin with
+`link --write-lock --force-lock` once the change has been reviewed
+```
+
+The refusal is the review gate: the pin is renewed deliberately, from the
+integration unit, once someone has looked at the change. `--force-lock` is that
+act, and without it an existing lock that differs is left exactly as it was.
+Because the link itself succeeded, a refused `--write-lock` still leaves the
+package under `--out` on disk; it is the pin that was not renewed, not the
+build that failed.
+
+**Checked, never fetched.** The compiler reads pins and compares them. It never
+downloads an object, and `source` is a free-text note about where a unit came
+from that no code path reads — `--lock-source <unit>=<text>` records it for
+your benefit alone. Bringing the objects to the machine stays your checkout's,
+your submodule's, your artifact store's or your CI's job. That boundary is
+deliberate: a pin format that fetches is a package manager, and adopting one
+would put a supply chain inside your configuration compiler.
+
+#### The worktree flow
+
+Put the two halves together and a change to one unit reviews itself. Someone
+works in a worktree — or a branch, or a fork — of a single service, and rebuilds
+only that unit:
+
+```bash
+# 1. Rebuild just the unit that changed. Every other object is reused as it is.
+configflux-compiler compile-object --source vision/10_vision.json \
+  --interface out/site_catalogue.cfo --out out/vision_service.cfo
+
+# 2. Link against the pins the integration last reviewed.
+configflux-compiler link --object out/site_catalogue.cfo \
+  --object out/vision_service.cfo --out out/pr --lock configflux.lock  # exits 2
+```
+
+Step 2 is refused, and that is the design:
+
+```
+E_LINK_LOCK_MISMATCH: The lockfile 'configflux.lock' pins unit 'vision_service'
+at object_hash 41ab..., but the object linked here is 7c05...
+```
+
+The pin says the reviewed set no longer describes this build. To find out what
+the change actually does to the services you ship, link it without the lock and
+compare the two packages:
+
+```bash
+configflux-compiler link --object out/site_catalogue.cfo \
+  --object out/vision_service.cfo --out out/pr
+cfx diff --base out/main/cmp.manifest.json --head out/pr/cmp.manifest.json \
+  --manifest environments.json
+```
+
+`cfx diff` exits `0` when the edit rotated the model identity without moving a
+delivered byte, and `1` with the per-target change list when it did not. Then,
+and only then, the pin is renewed deliberately from the integration unit:
+
+```bash
+configflux-compiler link --object out/site_catalogue.cfo \
+  --object out/vision_service.cfo --out out/cmp \
+  --write-lock configflux.lock --force-lock
+```
+
+Three questions, three answers, in the order a reviewer asks them. *Is this the
+set we agreed on?* — the lock. *What does it change for my deployments?* — `cfx
+diff`. *Are we agreeing to the new set?* — `--force-lock`, which is an act
+someone performs rather than a state a build drifts into.
 
 ## Pattern 1 — Read-only startup config
 
@@ -282,6 +517,7 @@ The snapshot has these top-level keys:
 | `scope` | What this snapshot covers (`component:<name>` or `all`). |
 | `model_hash` | Identity of the compiled model (invariant). |
 | `resolve_hash` | Identity of this resolution (model + selection + output). |
+| `resolved_output_hash` | Identity of the delivered payload alone (scope + output). Unchanged by a model edit that does not change these bytes — compare this one to answer "did my configuration actually change". |
 | `resolved_output` | The resolved parameter tree (see below). |
 | `selection_state_hash`, `choices`, `resolved_artifacts`, `resolved_component_dependencies` | Selection and dependency provenance. |
 | `error_count`, `warning_count`, `diagnostics` | Resolution diagnostics. |
@@ -295,6 +531,8 @@ resolved_output
     └── components
         └── <component>
             ├── type
+            ├── requires          (only when the component declares one)
+            │   └── <slot> → { binding, entry, fields: { <field> → value } }
             └── params
                 └── <param> → { value, type, unit, safety, lifecycle, access, req_id, doc, limits }
 ```
@@ -331,6 +569,45 @@ A real excerpt:
 Each parameter leaf carries its own `lifecycle`. A read-only consumer reads
 values directly and ignores `lifecycle` if it only reads at startup.
 
+### Requirements: the shared things your service was given
+
+When a component declares a requirement, the snapshot delivers the catalogue
+entry it resolved to **inside that component**, under `requires`. Your service
+reads its own block; it never has to know which unit owns the shared table or
+what that table is called.
+
+```json
+{
+  "vision_service": {
+    "package": "merged_root",
+    "version": "0.0.0",
+    "components": {
+      "vision_service": {
+        "type": "service",
+        "requires": {
+          "container": {
+            "binding": "line_container",
+            "entry": "c1",
+            "fields": { "height_mm": 1000, "length_mm": 1200, "width_mm": 800 }
+          }
+        },
+        "params": { "...": "..." }
+      }
+    }
+  }
+}
+```
+
+`binding` is the shared choice the requirement named, `entry` is the id it took
+in this deployment, and `fields` holds that entry's values — complete and
+exact, because every catalogue entry supplies every declared field. The key is
+**absent** for a component that declares no requirement, so check for it rather
+than assuming an empty object.
+
+Requirement values are decided at resolve time and never change while the
+service runs. They are read-only in Pattern 2 as well: a write to
+`component.<c>.requires.*` is refused with `E_RUNTIME_UNKNOWN_PATH`.
+
 ### Verify the lineage and treat the file as immutable
 
 A Pattern 1 consumer should:
@@ -340,6 +617,39 @@ A Pattern 1 consumer should:
    configuration; if they change, the configuration changed.
 2. Treat the file as **immutable**. Do not write back to it. Runtime mutation
    is Pattern 2's job.
+
+### A worked snapshot, end to end
+
+The `examples/04-fleet-edge-node` pack in this repository resolves a
+`component:runtime_tuner` scope against three facets, which is the shape most
+Pattern 1 services see. **The `console` block below is a verified transcript** —
+it is replayed automatically against the real binaries, so the snapshot filename
+and the `resolve_hash` it shows can never drift from what the tools actually
+print, while the language snippets in the rest of this section are illustrative
+and carry placeholders in place of pinned values.
+
+```console
+$ configflux-compiler compile --source examples/04-fleet-edge-node/00_definitions.json --source examples/04-fleet-edge-node/10_components.json --out build > /dev/null
+$ printf '{"schema_version":5,"model_hash":"","scope":"component:runtime_tuner","context_tags":{},"choices":{},"selection_state_hash":""}\n' > build/selection.json
+$ cfx resolve --model build/cmp.manifest.json --selection-file build/selection.json --select device_class=gateway --select update_channel=canary --select region=eu --out snapshot
+model_hash: 23f7f16f3f4ca9c84fa570018a903cbc13cbd7ba2809d637d8c4c9526985898f
+selection_state_hash: 694822ed60571630e833a38b5fee1a866cbe3d0f3edca6ea9b956f01445cb3d8
+resolve_hash: 7b55778331a73660589b0efe439c07019740f806ce6ccb90fdc628f3cf5fad64
+resolved_output_hash: 579bc1e1fcf909a595971913b206c5f7af09c5c5d58f90750506201ce9fcd8ca
+wrote: generated/config.hpp
+wrote: generated/config_artifact_manifest.json
+wrote: generated/config_build_flags.cmake
+wrote: resolve_result.runtime_tuner.gateway-eu-canary.json
+$ python3 -c 'import json; s = json.load(open("snapshot/resolve_result.runtime_tuner.gateway-eu-canary.json")); print(s["resolve_hash"]); print("log level:", s["resolved_output"]["runtime_tuner"]["components"]["runtime_tuner"]["params"]["log_level"]["value"])'
+7b55778331a73660589b0efe439c07019740f806ce6ccb90fdc628f3cf5fad64
+log level: info
+```
+
+The filename carries **every** choice the resolve selected, in sorted-facet
+order — `gateway-eu-canary` is `device_class=gateway`, `region=eu` and
+`update_channel=canary` joined with `-` — so do not assume it is named after a
+single facet. Either pin the whole name, or glob `resolve_result.*.json` in the
+bundle and read `scope` and `choices` out of the file you find.
 
 ### Python
 
@@ -353,17 +663,32 @@ def load_config(path: str) -> dict:
         raise RuntimeError(f"resolve status is {snapshot['status']}")
     return snapshot
 
-def get_value(snapshot: dict, component: str, param: str):
+def _component(snapshot: dict, component: str) -> dict:
     # scope is "component:<root>" or "all"; the root key of resolved_output
     scope = snapshot["scope"]
     root = scope.split(":", 1)[1] if ":" in scope else scope
-    tree = snapshot["resolved_output"][root]
-    return tree["components"][component]["params"][param]["value"]
+    return snapshot["resolved_output"][root]["components"][component]
 
-snapshot = load_config("resolve_result.runtime_tuner.canary.json")
+def get_value(snapshot: dict, component: str, param: str):
+    return _component(snapshot, component)["params"][param]["value"]
 
-# Pin the lineage you were deployed with.
-EXPECTED_RESOLVE_HASH = "d3d9ad268b4f3184c10a02f4125a6c94dc5043957b291626a9af1c99665c05db"
+def get_required(snapshot: dict, component: str, slot: str, field: str):
+    """One field of the catalogue entry this component's requirement was given.
+
+    The service reads its OWN block: no catalogue id, no other component's
+    parameter path. `requires` is absent when the component declares no
+    requirement, which is a model error rather than a missing default.
+    """
+    requires = _component(snapshot, component).get("requires")
+    if requires is None or slot not in requires:
+        raise RuntimeError(f"{component} was given no requirement for slot {slot!r}")
+    return requires[slot]["fields"][field]
+
+snapshot = load_config("resolve_result.runtime_tuner.gateway-eu-canary.json")
+
+# Pin the lineage you were deployed with: substitute the `resolve_hash` of the
+# snapshot this build was released against, kept as a build-time constant.
+EXPECTED_RESOLVE_HASH = "<resolve_hash of your deployed snapshot>"
 assert snapshot["resolve_hash"] == EXPECTED_RESOLVE_HASH, "unexpected configuration"
 
 log_level = get_value(snapshot, "runtime_tuner", "log_level")
@@ -377,36 +702,52 @@ using System;
 using System.IO;
 using System.Text.Json;
 
-string path = "resolve_result.runtime_tuner.canary.json";
+string path = "resolve_result.runtime_tuner.gateway-eu-canary.json";
 using JsonDocument doc = JsonDocument.Parse(File.ReadAllText(path));
 JsonElement root = doc.RootElement;
 
 if (root.GetProperty("status").GetString() != "ok")
     throw new InvalidOperationException("resolve status is not ok");
 
-// Pin the lineage you were deployed with.
-const string ExpectedResolveHash =
-    "d3d9ad268b4f3184c10a02f4125a6c94dc5043957b291626a9af1c99665c05db";
+// Pin the lineage you were deployed with: substitute the `resolve_hash` of the
+// snapshot this build was released against, kept as a build-time constant.
+const string ExpectedResolveHash = "<resolve_hash of your deployed snapshot>";
 if (root.GetProperty("resolve_hash").GetString() != ExpectedResolveHash)
     throw new InvalidOperationException("unexpected configuration");
 
 string scope = root.GetProperty("scope").GetString()!;
 string scopeRoot = scope.Contains(':') ? scope.Split(':', 2)[1] : scope;
 
-JsonElement logLevel = root
+JsonElement component = root
     .GetProperty("resolved_output")
     .GetProperty(scopeRoot)
     .GetProperty("components")
-    .GetProperty("runtime_tuner")
+    .GetProperty("runtime_tuner");
+
+JsonElement logLevel = component
     .GetProperty("params")
     .GetProperty("log_level")
     .GetProperty("value");
 
 Console.WriteLine($"log level: {logLevel.GetString()}");  // "info"
+
+// The catalogue entry this component's requirement was given. `requires` is
+// absent when the component declares no requirement, so probe rather than
+// assume an empty object.
+if (component.TryGetProperty("requires", out JsonElement requires)
+    && requires.TryGetProperty("container", out JsonElement container))
+{
+    string entry = container.GetProperty("entry").GetString()!;
+    int width = container.GetProperty("fields").GetProperty("width_mm").GetInt32();
+    Console.WriteLine($"container {entry} is {width} mm wide");
+}
 ```
 
 A Go, Java, or Node service does the same: parse the JSON, check `status`,
-verify `resolve_hash`, and read `resolved_output[<root>].components.<c>.params.<p>.value`.
+verify `resolve_hash`, and read
+`resolved_output[<root>].components.<c>.params.<p>.value` for a parameter and
+`resolved_output[<root>].components.<c>.requires.<slot>.fields.<field>` for a
+value its requirement delivered.
 
 ## Pattern 2 — Validated session via the runtime CLI
 
@@ -424,7 +765,7 @@ runtime-lifecycle parameters** with full domain validation, it drives the
   are otherwise occupied.
 - **Request size** is bounded to **8 MiB**. A larger request is a transport
   failure.
-- Every request and response carries `schema_version`, set to `4`.
+- Every request and response carries `schema_version`, set to `5`.
 
 **Exit codes** (the same for every command):
 
@@ -465,7 +806,7 @@ The open request projects the resolved snapshot and adds the `ccm_ref`:
 
 ```json
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "model_hash": "<from snapshot>",
   "resolve_hash": "<from snapshot>",
   "ccm_ref": "<path to the bundle's ccm/ directory>",
@@ -474,7 +815,10 @@ The open request projects the resolved snapshot and adds the `ccm_ref`:
   "resolved_component_dependencies": {},
   "resolved_artifacts": {},
   "context_tags": {},
-  "choices": {}
+  "choices": {},
+  "defaulted_choices": {},
+  "implied_choices": {},
+  "closed_facet_domains": {}
 }
 ```
 
@@ -482,11 +826,11 @@ A successful open returns (abbreviated):
 
 ```json
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "status": "ok",
   "scope": "component:runtime_tuner",
-  "model_hash": "efab1360380efc62...",
-  "resolve_hash": "d3d9ad268b4f3184...",
+  "model_hash": "<from snapshot>",
+  "resolve_hash": "<from snapshot>",
   "runtime_snapshot": { "ccm_ref": "<path>/ccm", "...": "..." },
   "error_count": 0,
   "warning_count": 0,
@@ -538,7 +882,7 @@ def call(command: str, request: dict) -> dict:
 
 # 1. Open the session from the bundle.
 open_request = {
-    "schema_version": 4,
+    "schema_version": 5,
     "model_hash": snapshot["model_hash"],
     "resolve_hash": snapshot["resolve_hash"],
     "ccm_ref": "/opt/configflux/bundle/ccm",
@@ -548,6 +892,9 @@ open_request = {
     "resolved_artifacts": snapshot.get("resolved_artifacts", {}),
     "context_tags": snapshot.get("context_tags", {}),
     "choices": snapshot.get("choices", {}),
+    "defaulted_choices": snapshot.get("defaulted_choices", {}),
+    "implied_choices": snapshot.get("implied_choices", {}),
+    "closed_facet_domains": snapshot.get("closed_facet_domains", {}),
 }
 opened = call("runtime-open", open_request)
 if opened["status"] != "ok":
@@ -557,13 +904,13 @@ session = opened["runtime_snapshot"]  # thread this into every later call
 
 # 2. Read parameter paths.
 listed = call("list-parameters", {
-    "schema_version": 4, "runtime_snapshot": session, "scope_root": "runtime_tuner",
+    "schema_version": 5, "runtime_snapshot": session, "scope_root": "runtime_tuner",
 })
 print("parameters:", listed["parameter_paths"])
 
 # 3. Mutate a runtime-lifecycle parameter -> pending dirty change.
 result = call("set-parameter", {
-    "schema_version": 4, "runtime_snapshot": session,
+    "schema_version": 5, "runtime_snapshot": session,
     "path": "component.runtime_tuner.param.log_level", "value": "debug",
 })
 if result["status"] != "ok":
@@ -573,11 +920,19 @@ session = result["runtime_snapshot"]  # carries the pending change
 
 # 4. Commit within the auto-reset window, or the change is reverted.
 committed = call("commit-configuration", {
-    "schema_version": 4, "runtime_snapshot": session,
+    "schema_version": 5, "runtime_snapshot": session,
     "actor": "inventory-service", "reason": "persist log level",
 })
 print("commit_id:", committed["commit_id"])
 ```
+
+The last three keys of `open_request` are not optional in practice:
+`defaulted_choices` and `implied_choices` fold into the `resolve_hash`
+pre-image that `runtime-open` recomputes, so a projection that drops them
+fails the open with `E_RUNTIME_HASH_MISMATCH`, and `closed_facet_domains` is
+the only channel by which a facet's closed-ness reaches the runtime, so
+dropping it makes a write refused over a closed facet report the model as
+over-constrained instead of naming the constraint it broke.
 
 ### C#
 
@@ -624,7 +979,7 @@ string session = opened.GetProperty("runtime_snapshot").GetRawText();  // thread
 // 2. Mutate a runtime-lifecycle parameter -> pending dirty change.
 string setReq = $$"""
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "runtime_snapshot": {{session}},
   "path": "component.runtime_tuner.param.log_level",
   "value": "debug"
@@ -637,7 +992,7 @@ session = setResult.GetProperty("runtime_snapshot").GetRawText();
 
 // 3. Commit within the auto-reset window.
 string commitReq = $$"""
-{ "schema_version": 4, "runtime_snapshot": {{session}},
+{ "schema_version": 5, "runtime_snapshot": {{session}},
   "actor": "inventory-service", "reason": "persist log level" }
 """;
 JsonElement committed = Call("commit-configuration", commitReq);
@@ -648,7 +1003,8 @@ Both snippets transpose directly to Go (`os/exec`), Java
 (`ProcessBuilder`), or Node (`child_process.spawn`): spawn the executable with
 one subcommand argument, write one JSON object to stdin, read one JSON object
 from stdout, branch on the exit code, and thread `runtime_snapshot` from each
-response into the next request.
+response into the next request; the C# `openRequestJson`, left opaque above,
+must carry the same key set as the Python `open_request`.
 
 ## Lifecycle semantics for consumers
 
@@ -742,7 +1098,7 @@ def env_lines(snapshot: dict) -> list[str]:
             lines.append(f"{key}={leaf['value']}")
     return sorted(lines)
 
-with open("resolve_result.runtime_tuner.canary.json", encoding="utf-8") as f:
+with open("resolve_result.runtime_tuner.gateway-eu-canary.json", encoding="utf-8") as f:
     snapshot = json.load(f)
 
 with open(".env", "w", encoding="utf-8") as out:
@@ -753,13 +1109,13 @@ with open(".env", "w", encoding="utf-8") as out:
 The same walk is a one-liner with `jq` (handy in a shell pipeline):
 
 ```bash
-root=$(jq -r '.scope | sub("^component:";"")' resolve_result.runtime_tuner.canary.json)
+root=$(jq -r '.scope | sub("^component:";"")' resolve_result.runtime_tuner.gateway-eu-canary.json)
 jq -r --arg root "$root" '
   .resolved_output[$root].components
   | to_entries[] as $c
   | $c.value.params | to_entries[]
   | "\($c.key)_\(.key | ascii_upcase)=\(.value.value)"
-' resolve_result.runtime_tuner.canary.json | sort > .env
+' resolve_result.runtime_tuner.gateway-eu-canary.json | sort > .env
 ```
 
 To produce a `docker-compose` override instead, the same loop writes the
@@ -781,6 +1137,18 @@ artifact is a stub without a symbol table. **Ship the bundle whole** — the
 snapshot JSON *and* the `ccm/` directory — and point `ccm_ref` at that
 directory. There is no degraded open path.
 
+### "runtime-open requires the .ccm solver model the snapshot was compiled against; the .ccm named by ccm_ref is bound to a different model than the snapshot's model_hash"
+
+Diagnostic code `E_RUNTIME_OPEN_SOLVER_MODEL_UNAVAILABLE`, exit code `2`. The
+`ccm/` directory loaded, but it came from a different compile than the snapshot
+you are opening — most often a `ccm_ref` left pointing at a previous bundle, or
+a snapshot and a `ccm/` directory copied from two different builds. Every write
+decision on the session you opened is made against this solver model, so
+accepting the mismatch at open would let that session decide against one model
+while reporting the other. The binding is checked when the session is opened,
+not on each later request. **Ship and open the bundle whole**: take the snapshot
+JSON and the `ccm/` directory from the same build.
+
 ### "Parameter '<path>' is not writable at runtime (lifecycle=...)"
 
 Diagnostic code `E_RUNTIME_LIFECYCLE_IMMUTABLE`, exit code `2`. You called
@@ -801,7 +1169,7 @@ session snapshot, not a duplicated or accidentally nested payload.
 
 Diagnostic code `E_RUNTIME_CLI_REQUEST_INVALID`, exit code `1`. The bytes on
 stdin (or in `--request-file`) were not a valid request envelope. Verify you
-serialized a single JSON object, that `schema_version` is `4`, and that field
+serialized a single JSON object, that `schema_version` is `5`, and that field
 names match the command (for example the list/metadata commands
 take `scope_root`, not `scope`).
 

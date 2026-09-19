@@ -3,7 +3,7 @@
 A fleet edge-node model that demonstrates the **full ConfigFlux pipeline**
 end to end: compile → interpret → resolve → runtime handoff.
 
-Unlike examples 01–03, which stop after the compiler, this example also
+Unlike examples 01–02, which stop after the compiler, this example also
 exercises the `configflux-interpreter` and `configflux-runtime` binaries
 and shows how a resolved configuration is handed off from the interpreter
 to the runtime.
@@ -67,7 +67,7 @@ runtime `runtime-open` request is a direct projection of the interpreter
 `resolve` response:
 
 ```jq
-{schema_version: 4,
+{schema_version: 5,
  model_hash: .model_hash,
  resolve_hash: .resolve_hash,
  scope: .scope,
@@ -75,11 +75,34 @@ runtime `runtime-open` request is a direct projection of the interpreter
  resolved_component_dependencies: (.resolved_component_dependencies // {}),
  resolved_artifacts: (.resolved_artifacts // {}),
  context_tags: (.context_tags // {}),
- choices: (.choices // {})}
+ choices: (.choices // {}),
+ defaulted_choices: (.defaulted_choices // {}),
+ implied_choices: (.implied_choices // {}),
+ closed_facet_domains: (.closed_facet_domains // {})}
 ```
 
 All other `RuntimeOpenRequest` fields default to empty / policy-default
-values, so a minimal projection is sufficient for a fresh snapshot.
+values, so a minimal projection is sufficient for a fresh snapshot. Three
+keys in the block above are not optional in practice:
+
+- `defaulted_choices` folds into the `resolve_hash` pre-image, and
+  `runtime-open` recomputes that hash. All three of this example's facets
+  are closed with declared defaults, so a projection that drops the key
+  fails the open with `E_RUNTIME_HASH_MISMATCH`.
+- `implied_choices` folds into the same pre-image. It records the facets
+  the model's constraints already decided, so a model that leaves nothing
+  to infer emits no key and the projection is unchanged — but a projection
+  that drops it on a model that does infer fails the open the same way.
+- `closed_facet_domains` carries the model's closed facet declarations. A
+  device holds a compiled model and a resolve result, never the model
+  sources, so this is the only channel by which the runtime learns which
+  facets are exhaustive. Drop it and a write rejected by a policy over a
+  two-valued closed facet reports the model as over-constrained instead of
+  naming the constraint it broke. The open still succeeds — a missing
+  diagnostic input is not a failure — but the message quality degrades.
+  A table naming a facet or value the compiled model does not carry is a
+  different case and fails the open with
+  `E_RUNTIME_OPEN_FACET_DOMAIN_UNKNOWN`.
 
 **Region-based conditional component**: `regional_compliance` declares
 `condition = "region == 'eu'"`. The compiler includes it in the model

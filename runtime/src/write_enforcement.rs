@@ -33,10 +33,13 @@
 // violation discards that result entirely, so the caller's snapshot is
 // unchanged and one discarded write is the whole cost of the rejection path.
 
-use crate::solver_validation::{facet_present, parse_param_key, session_assignment};
+use crate::solver_validation::{
+    bound_facet, facet_present, session_assignment, DivergentBinding,
+};
 use compiler::loader_api::{
-    UnsatCore, CONSTRAINT_ENTITY_PATH_PREFIX, E_SELECTION_CONFLICT, E_SELECTION_ENGINE_DIVERGENCE,
-    E_SELECTION_INVALID_OPTION, E_SELECTION_UNKNOWN_FACET, E_SELECTION_UNSATISFIABLE,
+    ClosedFacetDomains, UnsatCore, CONSTRAINT_ENTITY_PATH_PREFIX, E_SELECTION_CONFLICT,
+    E_SELECTION_ENGINE_DIVERGENCE, E_SELECTION_INVALID_OPTION, E_SELECTION_UNKNOWN_FACET,
+    E_SELECTION_UNSATISFIABLE,
 };
 use compiler::product_api::{
     Diagnostic, DiagnosticSeverity, DiagnosticsReport, OperationStatus, PRODUCT_SCHEMA_VERSION,
@@ -81,10 +84,12 @@ pub(crate) fn enforce_write_constraints(
 ) -> Option<ConstraintRejection> {
     // Candidate facets of this operation's own writes, path-sorted so the
     // replay order — and therefore which write a rejection is attributed to —
-    // is deterministic (D3).
-    let mut written: Vec<(&str, &str)> = written_paths
+    // is deterministic (D3). A written path whose parameter declares no facet
+    // binding is not a facet write at all (ADR-0064 D5.1): it drops out here
+    // and keeps its type/limit/lifecycle path unchanged.
+    let mut written: Vec<(&str, String)> = written_paths
         .iter()
-        .filter_map(|path| parse_param_key(path).map(|facet| (path.as_str(), facet)))
+        .filter_map(|path| bound_facet(snapshot, path).map(|facet| (path.as_str(), facet)))
         .collect();
     written.sort_by(|left, right| left.0.cmp(right.0));
 
@@ -94,31 +99,38 @@ pub(crate) fn enforce_write_constraints(
     // every `commit_configuration`, and a batch of pure scalars — has no
     // solver-owned write to fail closed ON, so an unusable model leaves it to
     // the compiler's own validation exactly as before.
-    let fail_closed = written.first().map(|(_, facet)| *facet);
+    let fail_closed = written.first().map(|(_, facet)| facet.clone());
     let ccm = match Session::<CuddBackend>::load_ccm(Path::new(snapshot.ccm_ref.trim())) {
         Ok(ccm) => ccm,
-        Err(_) => return fail_closed.map(solver_fault_rejection),
+        Err(_) => return fail_closed.map(|facet| solver_fault_rejection(&facet)),
     };
     let mut session = match Session::<CuddBackend>::new(ccm) {
         Ok(session) => session,
-        Err(_) => return fail_closed.map(solver_fault_rejection),
+        Err(_) => return fail_closed.map(|facet| solver_fault_rejection(&facet)),
     };
 
     // Division of labor (ADR-0030 D5, restated by D3): an operation that writes
-    // paths but names no facet in this model is a free-form scalar write the
+    // paths but binds no facet of this model is a free-form scalar write the
     // solver does not govern — skip entirely and keep the existing
     // type/limit/lifecycle path. Nothing here widens the set of writes the
     // solver governs.
     let operation_facets: BTreeSet<String> = written
         .iter()
         .filter(|(_, facet)| facet_present(&session, facet))
-        .map(|(_, facet)| (*facet).to_string())
+        .map(|(_, facet)| facet.clone())
         .collect();
     if !written_paths.is_empty() && operation_facets.is_empty() {
         return None;
     }
 
-    let assignment = session_assignment(&session, snapshot);
+    // ADR-0064 D5.2: two parameters declaring one facet cannot both be current,
+    // so a divergence here is a fault in the snapshot rather than a policy
+    // question — fail CLOSED. The retired D2 rule dropped the facet instead and
+    // let the write through unchecked.
+    let assignment = match session_assignment(&session, snapshot) {
+        Ok(assignment) => assignment,
+        Err(divergence) => return Some(divergent_binding_rejection(&divergence)),
+    };
     if assignment.is_empty() {
         return None;
     }
@@ -143,26 +155,40 @@ pub(crate) fn enforce_write_constraints(
             // session that never absorbed the conflicting fact — and could
             // accept it. The rejection is not attributable to the caller.
             Err(solver::Error::Conflict { facet, value }) => {
-                return Some(pre_existing_conflict(&session, &facet, &value, written_paths));
+                return Some(pre_existing_conflict(
+                    &session,
+                    &facet,
+                    &value,
+                    written_paths,
+                    &snapshot.closed_facet_domains,
+                ));
             }
             Err(_) => return Some(solver_fault_rejection(facet)),
         }
     }
 
     for (path, facet) in &written {
-        if !operation_facets.contains(*facet) {
+        if !operation_facets.contains(facet) {
             continue;
         }
-        let Some(option) = assignment.get(*facet) else {
-            // Omitted from the assignment because two paths disagree on it
-            // (D2). An omitted facet is free, so there is nothing to apply and
-            // nothing that can reject.
+        // The assignment carries every facet this operation wrote: the write is
+        // already in the dirty overlay (tier 1) and a bound parameter is always
+        // `string` (ADR-0064 D2.2), which the compiler operation checked before
+        // this ran. The guard covers only that unreachable residue; there is no
+        // longer an "omitted because two paths disagree" case to skip.
+        let Some(option) = assignment.get(facet.as_str()) else {
             continue;
         };
         match session.apply(facet, option) {
             Ok(()) => {}
             Err(solver::Error::Conflict { facet, value }) => {
-                return Some(write_conflict(&session, &facet, &value, path));
+                return Some(write_conflict(
+                    &session,
+                    &facet,
+                    &value,
+                    path,
+                    &snapshot.closed_facet_domains,
+                ));
             }
             Err(solver::Error::UnknownOption { facet, value }) => {
                 return Some(typed_rejection(
@@ -209,8 +235,9 @@ fn write_conflict(
     facet: &str,
     option: &str,
     write_path: &str,
+    domains: &ClosedFacetDomains,
 ) -> ConstraintRejection {
-    let core = explain_core(session, facet, option);
+    let core = explain_core(session, facet, option, domains);
     let named = core.as_ref().and_then(named_constraint);
     let message = match &named {
         Some((id, summary)) => format!(
@@ -250,8 +277,9 @@ fn pre_existing_conflict(
     facet: &str,
     option: &str,
     written_paths: &[String],
+    domains: &ClosedFacetDomains,
 ) -> ConstraintRejection {
-    let core = explain_core(session, facet, option);
+    let core = explain_core(session, facet, option, domains);
     let named = core.as_ref().and_then(named_constraint);
     let subject = match written_paths.first() {
         Some(path) => format!("The write to '{path}'"),
@@ -282,6 +310,32 @@ fn pre_existing_conflict(
         },
         core_facets: core.as_ref().map(core_facets).unwrap_or_default(),
         core,
+    }
+}
+
+/// The ADR-0064 D5.2 fail-closed rejection: two parameters declaring one facet
+/// were observed holding different values. D2.4 refuses that at compile time, so
+/// a snapshot that passed the open-time `resolve_hash` check cannot carry it;
+/// observing it anyway means the snapshot and the model disagree, which is an
+/// engine divergence (ADR-0030 D4), not a policy violation. This is the exact
+/// point where the retired skip rule dropped the facet and let the write
+/// through.
+fn divergent_binding_rejection(divergence: &DivergentBinding) -> ConstraintRejection {
+    ConstraintRejection {
+        diagnostic: Diagnostic {
+            code: E_SELECTION_ENGINE_DIVERGENCE.to_string(),
+            severity: DiagnosticSeverity::Error,
+            message: divergence.message(),
+            source_id: None,
+            entity_path: Some(format!("facet:{}", divergence.facet)),
+            hint: Some(
+                "Re-resolve and re-open against the compiled model: one parameter \
+                 declares each facet, so two bound values cannot both be current"
+                    .to_string(),
+            ),
+        },
+        core: None,
+        core_facets: BTreeSet::new(),
     }
 }
 
@@ -316,13 +370,23 @@ fn typed_rejection(
 /// and `cfx` take, so the write and explain surfaces name one constraint with one
 /// wording. A solver that cannot produce a core yields `None`: the rejection
 /// still stands, it simply carries no structured explanation.
-fn explain_core(session: &Session<CuddBackend>, facet: &str, option: &str) -> Option<UnsatCore> {
+fn explain_core(
+    session: &Session<CuddBackend>,
+    facet: &str,
+    option: &str,
+    domains: &ClosedFacetDomains,
+) -> Option<UnsatCore> {
     let roster = session.ccm().constraint_roster();
     match session.explain_rejection(facet, option) {
         Ok(solver::RejectionExplanation {
             would_reject: true,
             core: Some(core),
-        }) => Some(session_compose::labeled_core_to_unsat_core(core, &roster)),
+        // The closed-facet domains the snapshot carries — same source as
+        // `explain_rejection`: the resolver computed them and the open payload
+        // forwarded them (ADR-0060 D3/D4). Empty when the opener supplied none,
+        // which is byte-for-byte the asserted-only attribution the write surface
+        // had before (D7).
+        }) => Some(session_compose::labeled_core_to_unsat_core(core, &roster, domains)),
         _ => None,
     }
 }
@@ -438,7 +502,7 @@ pub(crate) fn set_parameters_atomically_with_solver_validation(
     let Some(rejection) = enforce_write_constraints(written, &paths) else {
         return result;
     };
-    rejected_set_parameters_atomically(&identity, &paths, rejection)
+    rejected_set_parameters_atomically(&identity, written, &paths, rejection)
 }
 
 /// `commit_configuration` with the same check (D6). Promoting a dirty entry to
@@ -520,6 +584,7 @@ fn rejected_set_parameter(
 
 fn rejected_set_parameters_atomically(
     identity: &SnapshotIdentity,
+    snapshot: &RuntimeSnapshot,
     paths: &[String],
     rejection: ConstraintRejection,
 ) -> SetParametersAtomicallyResult {
@@ -532,8 +597,8 @@ fn rejected_set_parameters_atomically(
     let mut participating: Vec<String> = paths
         .iter()
         .filter(|path| {
-            parse_param_key(path)
-                .is_some_and(|facet| rejection.core_facets.contains(facet))
+            bound_facet(snapshot, path)
+                .is_some_and(|facet| rejection.core_facets.contains(&facet))
         })
         .cloned()
         .collect();

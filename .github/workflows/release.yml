@@ -1,29 +1,46 @@
 name: Release
 
 # Triggered on push of a version tag (v0.3.0, v0.3.1, ...). This workflow
-# is intentionally separated from ci.yml: its permissions scope (`contents:
-# write`, `id-token: write`) is declared only where needed, and a
-# release-pipeline regression cannot block non-release PRs.
+# is intentionally separated from ci.yml: its elevated scopes (`contents:
+# write`, `id-token: write`, `packages: write`) are granted per JOB rather than
+# workflow-wide, and a release-pipeline regression cannot block non-release PRs.
 #
 # Outputs (per ADR-0009): for each Linux platform (x86_64, aarch64), a
 # gzipped tarball containing `compiler`, `interpreter`, `runtime`, `cfx`,
 # `LICENSE`, and `NOTICE`, plus per-artifact SHA-256 and cosign
 # signature/certificate files, plus a combined `SHA256SUMS` manifest
 # signed with cosign keyless.
+#
+# Plus, per ADR-0033 §4/§5 (configflux-t99b), the official toolchain container
+# image `ghcr.io/configflux/toolchain:vX.Y.Z` — built from the x86_64 payload
+# above, carrying the repo-pinned cue, and cosign-keyless signed by digest.
 on:
   push:
     tags:
       - "v*"
 
+# Least privilege. The workflow-level default grants nothing beyond reading the
+# checkout; every job below declares the scopes it actually needs, so no job
+# inherits another's authority. This matters most for `build`: it runs
+# `pip install ziglang`, `cargo install cargo-zigbuild` and `cargo zigbuild`,
+# executing every build.rs in the dependency graph with network access. Given
+# workflow-wide `packages: write` it would hold both GHCR push and (via its own
+# `id-token: write`) keyless signing — one compromised build dependency could
+# then publish an image AND sign it with an identity satisfying the verify
+# recipe in docs/toolchain-image.md, which is the guarantee ADR-0033 §5 exists
+# to make. tools/publish_overlay_parity_test.sh Case F pins the per-job shape.
 permissions:
-  contents: write   # required to attach assets to the GitHub Release
-  id-token: write   # required for cosign keyless OIDC signing
+  contents: read
 
 jobs:
   build:
     name: Build ${{ matrix.platform }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+
+    permissions:
+      contents: read    # checkout only — this job publishes nothing
+      id-token: write   # cosign keyless signs each platform tarball
 
     strategy:
       fail-fast: false
@@ -48,6 +65,23 @@ jobs:
           # ${GITHUB_REF_NAME} is the tag (e.g. "v0.3.0"); strip the leading "v"
           ref="${GITHUB_REF_NAME}"
           version="${ref#v}"
+          # A git ref name is a far looser alphabet than a version string: git
+          # rejects control characters, space, `~ ^ : ? * [ \`, the `..` and
+          # `@{` sequences and a trailing `.lock`, but it permits
+          # `$ " ' ` ; | & ( ) < > { }` — every one of them a shell
+          # metacharacter. GitHub substitutes an expression into a run: body
+          # TEXTUALLY, before bash parses it, so an unvalidated tag-derived
+          # version is a command-injection sink into jobs that hold
+          # `id-token: write` and `packages: write`. Reject anything that is not
+          # a bare X.Y.Z here and every downstream consumer is safe by
+          # construction rather than by per-sink diligence. The shape matches
+          # tools/generate_release_notes.sh and the ADR-0002 §3 CHANGELOG
+          # heading; a release tag is always vX.Y.Z (configflux-rhja).
+          if ! [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            printf 'refusing to release: tag %s does not name a vX.Y.Z release\n' \
+              "${ref}" >&2
+            exit 1
+          fi
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "tag=${ref}" >> "$GITHUB_OUTPUT"
 
@@ -86,9 +120,16 @@ jobs:
 
       - name: Stage tarball contents
         id: stage
+        env:
+          # Second layer behind the vX.Y.Z guard above (configflux-rhja): every
+          # tag-derived value reaches a run: body through env:, so bash sees a
+          # variable's CONTENTS and never a fragment of source text. matrix.*
+          # stays interpolated — those literals are written in this file and no
+          # pushed ref can influence them.
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
-          version="${{ steps.version.outputs.version }}"
+          version="${VERSION}"
           platform="${{ matrix.platform }}"
           stage_dir="configflux-v${version}-${platform}"
           mkdir -p "dist/${stage_dir}"
@@ -105,9 +146,11 @@ jobs:
 
       - name: Create tarball and SHA-256 checksum
         id: pack
+        env:
+          STAGE_DIR: ${{ steps.stage.outputs.stage_dir }}
         run: |
           set -euo pipefail
-          stage_dir="${{ steps.stage.outputs.stage_dir }}"
+          stage_dir="${STAGE_DIR}"
           tarball="${stage_dir}.tar.gz"
           (
             cd dist
@@ -129,9 +172,10 @@ jobs:
       - name: Sign tarball with cosign keyless
         env:
           COSIGN_EXPERIMENTAL: "1"
+          TARBALL: ${{ steps.pack.outputs.tarball }}
         run: |
           set -euo pipefail
-          tarball="${{ steps.pack.outputs.tarball }}"
+          tarball="${TARBALL}"
           cosign sign-blob --yes \
             --output-signature "${tarball}.sig" \
             --output-certificate "${tarball}.crt" \
@@ -154,6 +198,10 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 15
+
+    permissions:
+      contents: write   # gh release create/edit/upload attaches the assets
+      id-token: write   # cosign keyless signs the combined SHA256SUMS
 
     steps:
       - name: Checkout
@@ -191,9 +239,11 @@ jobs:
 
       - name: Generate release notes
         id: notes
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
         run: |
           set -euo pipefail
-          version="${{ needs.build.outputs.version }}"
+          version="${VERSION}"
           notes_file="$(mktemp)"
           if [ -x tools/generate_release_notes.sh ]; then
             tools/generate_release_notes.sh "${version}" > "${notes_file}" || \
@@ -206,10 +256,11 @@ jobs:
       - name: Create or update GitHub Release and attach assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NOTES_FILE: ${{ steps.notes.outputs.notes_file }}
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
-          notes_file="${{ steps.notes.outputs.notes_file }}"
+          notes_file="${NOTES_FILE}"
           # Asset list shared by the create and update paths. Builds are
           # deterministic (see the "Create tarball" step: sorted tar, owner 0,
           # pinned mtime), so re-uploading the same tag's assets is
@@ -243,3 +294,158 @@ jobs:
               --verify-tag \
               "${assets[@]}"
           fi
+
+  # Publish the official toolchain container image (ADR-0033 §4/§5).
+  #
+  # This job REUSES the x86_64 payload the build job already produced — one
+  # cross-compile feeds both the tarball and the image, so the two channels
+  # ship identical bytes and no second cargo pass happens here. It runs
+  # alongside the GitHub Release job; both are independent consumers of the
+  # build artifacts.
+  #
+  # docker/toolchain.Dockerfile and tools/lib/cue_pin.sh reach the public repo
+  # through publish.sh's overlay injection (ADR-0028 D1), the same mechanism
+  # that delivers this workflow.
+  image:
+    name: Publish toolchain image
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    permissions:
+      contents: read    # checkout: the Dockerfile and the bzl-pinned cue coords
+      packages: write   # docker push to GHCR; cosign writes the signature there
+      id-token: write   # cosign keyless OIDC signing (ADR-0033 §5)
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Download the x86_64 build artifact
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          name: release-x86_64-linux
+          path: dist
+
+      - name: Assemble the image build context
+        id: ctx
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          version="${VERSION}"
+          stage_dir="configflux-v${version}-x86_64-linux"
+          # The already-built static-musl payload, unpacked from the tarball
+          # this workflow just published. The image only COPYs these binaries.
+          tar -xzf "dist/${stage_dir}.tar.gz" -C dist
+          ctx="$(mktemp -d)"
+          # Per ADR-0033 §1 the image carries the four release CLIs plus the
+          # pinned cue and the bundled licence files — nothing else.
+          install -m 0755 "dist/${stage_dir}/compiler"    "${ctx}/compiler"
+          install -m 0755 "dist/${stage_dir}/interpreter" "${ctx}/interpreter"
+          install -m 0755 "dist/${stage_dir}/runtime"     "${ctx}/runtime"
+          install -m 0755 "dist/${stage_dir}/cfx"         "${ctx}/cfx"
+          install -m 0644 "dist/${stage_dir}/LICENSE"     "${ctx}/LICENSE"
+          if [ -f "dist/${stage_dir}/NOTICE" ]; then
+            install -m 0644 "dist/${stage_dir}/NOTICE" "${ctx}/NOTICE"
+          else
+            : > "${ctx}/NOTICE"
+          fi
+          echo "ctx=${ctx}" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch and verify the repo-pinned cue evaluator
+        env:
+          CTX: ${{ steps.ctx.outputs.ctx }}
+        run: |
+          set -euo pipefail
+          # ADR-0033 §1: the image must bundle the SAME cue the rest of the
+          # toolchain is pinned to. A container carrying a different evaluator
+          # would produce a different model_hash than the host path and break
+          # the reproducibility promise the image exists to keep. The pin is
+          # read from tools/cue_toolchain.bzl — the one source of truth — and
+          # the download is sha256-verified before it is baked in.
+          # shellcheck source=tools/lib/cue_pin.sh
+          . tools/lib/cue_pin.sh
+          bzl="tools/cue_toolchain.bzl"
+          cue_version="$(cue_pin_version "${bzl}")"
+          cue_sha="$(cue_pin_sha256 "${bzl}" linux_amd64)"
+          cue_url="$(cue_pin_url "${bzl}" linux_amd64)"
+          curl -fsSL "${cue_url}" -o cue.tar.gz
+          echo "${cue_sha}  cue.tar.gz" | sha256sum -c -
+          tar -xzf cue.tar.gz cue
+          install -m 0755 cue "${CTX}/cue"
+          echo "CUE_VERSION=${cue_version}" >> "$GITHUB_ENV"
+
+      - name: Log in to GHCR
+        env:
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s' "${GHCR_TOKEN}" \
+            | docker login ghcr.io -u "${GHCR_USER}" --password-stdin
+
+      - name: Build and push the toolchain image
+        id: image
+        env:
+          CTX: ${{ steps.ctx.outputs.ctx }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          version="${VERSION}"
+          # ADR-0033 §3: the tag tracks the public release tag. There is
+          # deliberately NO `latest` — a floating tag would let a deploy-time
+          # run silently pick up a different toolchain, and therefore a
+          # different model_hash, from one day to the next.
+          image="ghcr.io/configflux/toolchain:v${version}"
+          sde="${SOURCE_DATE_EPOCH:-$(git log -1 --format=%ct HEAD)}"
+          build_args=(
+            build
+            --file docker/toolchain.Dockerfile
+            --tag "${image}"
+            --build-arg "CONFIGFLUX_VERSION=${version}"
+            --build-arg "CUE_VERSION=${CUE_VERSION}"
+            --build-arg "SOURCE_DATE_EPOCH=${sde}"
+            --label "io.configflux.source_date_epoch=${sde}"
+          )
+          # ADR-0033 §1/§6: a single-arch image with no provenance surface
+          # beyond what the binaries carry (SBOM and attestation are deferred
+          # in lockstep with them). buildx would otherwise attach a default
+          # SLSA provenance attestation and turn the result into a manifest
+          # list. Guarded so a classic non-buildx `docker build` still works.
+          if docker buildx version >/dev/null 2>&1; then
+            build_args+=(--provenance=false --sbom=false)
+          fi
+          SOURCE_DATE_EPOCH="${sde}" docker "${build_args[@]}" "${CTX}"
+          docker push "${image}"
+          digest="$(docker image inspect \
+            --format '{{index .RepoDigests 0}}' "${image}" \
+            | sed -n 's/.*@sha256://p')"
+          if ! printf '%s' "${digest}" | grep -Eq '^[0-9a-f]{64}$'; then
+            echo "could not resolve the pushed digest for ${image}" >&2
+            exit 1
+          fi
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          {
+            printf '### Toolchain image\n\n'
+            printf '- `%s`\n' "${image}"
+            printf '- `ghcr.io/configflux/toolchain@sha256:%s`\n' "${digest}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@d7d6bc7722e3daa8354c50bcb52f4837da5e9b6a # v3.8.1
+        with:
+          cosign-release: v2.4.1
+
+      - name: Sign the image digest with cosign keyless
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+          DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          # ADR-0033 §5: parity with the binary release — the same Fulcio/Rekor
+          # keyless mechanism, signed via this workflow's OIDC token, with no
+          # maintainer-held key. The DIGEST is signed rather than the moving
+          # version tag, so a consumer who pins by digest verifies exactly the
+          # bytes they run. The verify recipe is in docs/toolchain-image.md.
+          cosign sign --yes "ghcr.io/configflux/toolchain@sha256:${DIGEST}"

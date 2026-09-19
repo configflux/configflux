@@ -6,11 +6,13 @@
 //! The rule itself (a constraint may name only DECLARED facets, ADR-0054 §5.2)
 //! is enforced in `link_verify::validate_constraints` and its unit tests. What
 //! this suite pins is the part the unit layer structurally cannot see: the
-//! diagnostic CODE a caller receives. `product_api::map_graph_error` classifies
-//! link/verify failures by substring, so the message text and the code are
-//! coupled through prose — a reword that keeps every unit test green silently
-//! demotes the violation to `E_COMPILE_INPUT_INVALID`, which is exactly how
-//! this defect arose. These tests fail loudly in that case.
+//! diagnostic CODE and remedy a caller receives. The unit tests see the message
+//! only, so a change that leaves the message intact and the code wrong passes
+//! every one of them — which is exactly how this defect arose. These tests fail
+//! loudly in that case. (When they were written the code was recovered FROM the
+//! message, so a reword alone could demote the violation; configflux-py7w moved
+//! the code onto the refusal, and what is left to guard is the rule reporting
+//! the code and remedy it is specified to carry.)
 //!
 //! Black-box and end-to-end: everything runs through `compile_model`, the same
 //! entry point `compiler compile` calls. The CLI adds nothing between that call
@@ -21,7 +23,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use compiler::product_api::{
-    compile_model, CompileModelRequest, Diagnostic, OperationStatus, SourceManifestEntry,
+    compile_model, verify_model, CompileModelRequest, Diagnostic, OperationStatus,
+    SourceManifestEntry, VerifyModelRequest, VerifyReport, E_COMPILE_INPUT_INVALID,
     E_FACET_VALUE_UNDECLARED, PRODUCT_SCHEMA_VERSION,
 };
 
@@ -236,6 +239,235 @@ fn declaring_the_facet_makes_the_same_model_compile() {
         result.compiled_model_package_ref.is_some(),
         "a successful compile must emit a package"
     );
+
+    fs::remove_dir_all(&output_dir).ok();
+}
+
+// ----------------------------------------------------------------------------
+// configflux-secb.2 / ADR-0057 §D5: facet-to-facet comparison operands.
+//
+// Both sides of `a == b` must be DECLARED, by the same ADR-0054 §5.2 rule that
+// governs a predicate tag. The two sides carry different messages on purpose,
+// and different codes — which is exactly what this suite exists to pin. The
+// left side is an ordinary tag position and carries `E_FACET_VALUE_UNDECLARED`
+// with the declare-the-facet remedy. The right side is new: an author who writes
+// `region == prod` most likely meant the literal and forgot the quotes, so the
+// message says so and the rule carries no code of its own, landing in the
+// generic input bucket rather than borrowing a facet-value code that would be
+// false.
+// ----------------------------------------------------------------------------
+
+/// An unquoted right-hand side naming nothing declared. `line_container` is
+/// declared; `sorter_container` is not.
+const UNDECLARED_COMPARAND_CHUNK: &str = r#"{
+  "package": "p",
+  "version": "1.0",
+  "facets": {"line_container": {"values": ["c1", "c2"], "default": "c1"}},
+  "constraints": {"groups_equal": {"condition": "line_container == sorter_container"}},
+  "components": {
+    "agent": {"type": "service", "params": {}}
+  }
+}"#;
+
+/// The mirror case: the LEFT side is undeclared. Same rule, existing message.
+const UNDECLARED_COMPARISON_LEFT_CHUNK: &str = r#"{
+  "package": "p",
+  "version": "1.0",
+  "facets": {"sorter_container": {"values": ["c1", "c2"], "default": "c1"}},
+  "constraints": {"groups_equal": {"condition": "line_container == sorter_container"}},
+  "components": {
+    "agent": {"type": "service", "params": {}}
+  }
+}"#;
+
+/// Both declared: the ordinary case must keep compiling. Guards against a fix
+/// that over-corrects into rejecting every comparison.
+const DECLARED_COMPARISON_CHUNK: &str = r#"{
+  "package": "p",
+  "version": "1.0",
+  "facets": {
+    "line_container": {"values": ["c1", "c2"], "default": "c1"},
+    "sorter_container": {"values": ["c1", "c2"], "default": "c1"}
+  },
+  "constraints": {"groups_equal": {"condition": "line_container == sorter_container"}},
+  "components": {
+    "agent": {"type": "service", "params": {}}
+  }
+}"#;
+
+#[test]
+fn an_undeclared_comparison_right_hand_side_is_coded_compile_input_invalid() {
+    let output_dir = tempdir_for("undeclared-comparand");
+
+    let result = compile_chunk(UNDECLARED_COMPARAND_CHUNK, &output_dir);
+    let diagnostic = sole_error_diagnostic(&result, E_COMPILE_INPUT_INVALID);
+    let msg = &diagnostic.message;
+    assert!(
+        msg.contains("constraint 'groups_equal'"),
+        "message must name the constraint: {msg}"
+    );
+    assert!(
+        msg.contains("right-hand side 'sorter_container' is not a declared facet or binding"),
+        "message must name the offending identifier: {msg}"
+    );
+    assert!(
+        msg.contains("quote it to compare against a literal"),
+        "message must offer the quoting remedy: {msg}"
+    );
+    assert_nothing_emitted(&result, &output_dir);
+
+    fs::remove_dir_all(&output_dir).ok();
+}
+
+#[test]
+fn an_undeclared_comparison_left_hand_side_keeps_the_facet_value_undeclared_code() {
+    let output_dir = tempdir_for("undeclared-comparison-left");
+
+    let result = compile_chunk(UNDECLARED_COMPARISON_LEFT_CHUNK, &output_dir);
+    let diagnostic = sole_error_diagnostic(&result, E_FACET_VALUE_UNDECLARED);
+    assert_names_constraint_facet_and_remedy(&diagnostic, "groups_equal", "line_container");
+    assert_nothing_emitted(&result, &output_dir);
+
+    fs::remove_dir_all(&output_dir).ok();
+}
+
+#[test]
+fn a_comparison_between_two_declared_facets_compiles() {
+    let output_dir = tempdir_for("declared-comparison");
+
+    let result = compile_chunk(DECLARED_COMPARISON_CHUNK, &output_dir);
+    assert_eq!(
+        result.status,
+        OperationStatus::Ok,
+        "a comparison between two declared facets must compile: {:?}",
+        result.verify_report
+    );
+    assert!(
+        result.compiled_model_package_ref.is_some(),
+        "a successful compile must emit a package"
+    );
+
+    fs::remove_dir_all(&output_dir).ok();
+}
+
+// ----------------------------------------------------------------------------
+// configflux-xcrb: a facet `default` outside its own declared `values`.
+//
+// The third rule to reach a caller as `E_FACET_VALUE_UNDECLARED`, and the one
+// that was landing in the generic bucket. The code's registry line already
+// promised "a value that is not in a closed facet's exhaustively declared
+// domain" — and a default IS such a value, read off the facet rather than off a
+// condition — while the refusal carried no code at all, so the caller was told
+// `E_COMPILE_INPUT_INVALID`.
+//
+// Driven through BOTH product entry points on purpose. `validate_facets` sits
+// on the shared link/verify path, so `compiler verify` and `compiler compile`
+// must report the identical code, remedy and text; a fix that reached only the
+// compile mapper would leave `verify` promising something else for one model.
+// ----------------------------------------------------------------------------
+
+/// `mars` is a legal symbol and a legal value token — it is simply not one of
+/// the two values `region` declares. Nothing else in the model is wrong, so the
+/// facet-default rule is the sole refusal.
+const FACET_DEFAULT_CHUNK: &str = r#"{
+  "package": "p",
+  "version": "1.0",
+  "facets": {"region": {"values": ["eu", "us"], "default": "mars"}},
+  "components": {
+    "agent": {"type": "service", "params": {}}
+  }
+}"#;
+
+/// The DEFAULT remedy of `E_FACET_VALUE_UNDECLARED` (`product_api::hint_for`),
+/// which is the one this rule is specified to carry: a default outside the
+/// domain is fixed exactly the way any other undeclared value is. Written out
+/// as a literal rather than borrowed from the compiler, so this agrees with the
+/// shipped text rather than with any rewording of itself.
+const FACET_VALUE_UNDECLARED_HINT: &str = "Add the value to the facet's `values`, mark the facet \
+                                           `open: true`, or fix the condition to use a declared \
+                                           value";
+
+/// Drive the real product verify path against one inline chunk. The compile
+/// twin above writes a package; this one never touches the disk, which is part
+/// of why both are driven.
+fn verify_chunk(chunk: &str) -> VerifyReport {
+    verify_model(VerifyModelRequest {
+        schema_version: PRODUCT_SCHEMA_VERSION,
+        source_manifest: vec![SourceManifestEntry {
+            source_id: "00_definitions.json".to_string(),
+            inline_content: chunk.to_string(),
+        }],
+    })
+}
+
+/// Assert the verify failed with exactly one diagnostic and hand it back.
+///
+/// Mirrors `sole_error_diagnostic` above over the verify report, including the
+/// per-check code list: they are two separate fields of the JSON the CLI
+/// prints, and a consumer may branch on either one.
+fn sole_verify_diagnostic(report: &VerifyReport, expected_code: &str) -> Diagnostic {
+    assert_eq!(
+        report.status,
+        OperationStatus::Error,
+        "verify must fail: {report:?}"
+    );
+    let diagnostics = &report.diagnostics.diagnostics;
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "expected exactly one diagnostic, got {diagnostics:?}"
+    );
+    assert_eq!(
+        diagnostics[0].code, expected_code,
+        "diagnostic code, full report: {report:?}"
+    );
+    assert_eq!(
+        report.checks[0].diagnostic_codes,
+        vec![expected_code.to_string()],
+        "the per-check code list must agree with the diagnostic"
+    );
+    diagnostics[0].clone()
+}
+
+/// The message has to name the facet, the rejected default and the domain it is
+/// missing from; the remedy has to be the code's own. A code is only actionable
+/// alongside text that says which declaration to go and fix.
+fn assert_names_facet_default_and_domain(diagnostic: &Diagnostic, case: &str) {
+    let msg = &diagnostic.message;
+    assert!(
+        msg.contains("Facet 'region'"),
+        "{case}: message must name the facet: {msg}"
+    );
+    assert!(
+        msg.contains("default 'mars'"),
+        "{case}: message must name the rejected default: {msg}"
+    );
+    assert!(
+        msg.contains("eu, us"),
+        "{case}: message must name the declared domain: {msg}"
+    );
+    assert_eq!(
+        diagnostic.hint.as_deref(),
+        Some(FACET_VALUE_UNDECLARED_HINT),
+        "{case}: the rule carries its code's default remedy"
+    );
+}
+
+#[test]
+fn a_facet_default_outside_its_declared_values_is_coded_facet_value_undeclared() {
+    let report = verify_chunk(FACET_DEFAULT_CHUNK);
+    let verified = sole_verify_diagnostic(&report, E_FACET_VALUE_UNDECLARED);
+    assert_names_facet_default_and_domain(&verified, "verify");
+
+    let output_dir = tempdir_for("facet-default");
+    let result = compile_chunk(FACET_DEFAULT_CHUNK, &output_dir);
+    let compiled = sole_error_diagnostic(&result, E_FACET_VALUE_UNDECLARED);
+    assert_names_facet_default_and_domain(&compiled, "compile");
+    assert_eq!(
+        compiled.message, verified.message,
+        "verify and compile must report the same refusal, not two spellings of it"
+    );
+    assert_nothing_emitted(&result, &output_dir);
 
     fs::remove_dir_all(&output_dir).ok();
 }

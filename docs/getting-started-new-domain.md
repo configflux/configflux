@@ -371,6 +371,31 @@ chunks describe the components those choices select among.
 3. **Keep the value set small and meaningful.** Each value should correspond to
    a real product option, not a synthetic combination.
 
+### Requiring two facets to agree
+
+Rule 2 above says that choices which always change together are one facet. Some
+choices only have to agree *within a deployment*, though, and merging them would
+throw away the ability to differ elsewhere. Say a line and a sorter usually draw
+from the same container class, but a maintenance site runs them apart. Keep them
+as two facets and write the agreement as a constraint whose right-hand side is
+the other facet's name, unquoted:
+
+```cue
+constraints: {
+    groups_equal: {
+        condition: "sorter_container == line_container"
+        doc:       "The sorter and the line draw from the same container."
+    }
+}
+```
+
+Both facets stay independently bindable and keep their own domains; only the
+constraint ties them together. `!=` requires the opposite. The quotes are what
+distinguish the two readings — `container == 'c1'` still compares against the
+literal value `c1`, while `container == other_container` compares against
+another facet — so an unquoted name that is not a declared facet is a compile
+error rather than a silently mistyped literal.
+
 ### Examples of facet design
 
 | Domain | Facets | Values |
@@ -408,6 +433,15 @@ keeps today's inferred behavior — unless you want to write a policy constraint
 over it, which requires a declaration (see "Declaring a policy constraint"
 below). Every value your conditions reference must be in a closed facet's
 `values`, and `default` must be one of them — the compiler re-checks both.
+
+A facet **key** must be a snake_case identifier — a lowercase letter, then
+lowercase letters, digits and single underscores, with at most one trailing
+underscore — and so must a binding id, a catalogue id and a catalogue entry id;
+a facet **value** must be a non-empty token of letters, digits, `_`, `.` and `-`
+(so `eu-west-1` and `1.5` are fine, but a space, a quote or a non-ASCII
+character is not). The compiler writes every one of these into a condition
+clause of its own, so it refuses anything else when it reads the model rather
+than emitting one that would misread it.
 
 ### The default context
 
@@ -474,6 +508,270 @@ is not a policy violation and `cfx explain` will not pretend otherwise: it
 reports the model as over-constrained instead of naming the nearest constraint.
 Choosing two values for one facet is the everyday case — a facet holds exactly
 one value, which is the model's own structure rather than something you wrote.
+
+## 4b) Catalogues and Bindings: Shared Things, Chosen Once
+
+Section 3 covered definitions, which describe a parameter's *shape* and
+deliberately carry no value. Sometimes what you need to share is not a shape but
+a **thing**: the physical containers your plant runs on the line, the firmware
+modes your device supports, the motor variants a machine can be built from. Each
+of those is a small table of named entries with real values, and several
+services need to agree on which entry they are using.
+
+### Declaring a catalogue
+
+A **catalogue** is a typed table. You declare its columns once and every entry
+supplies all of them:
+
+```cue
+catalogues: {
+    containers: {
+        doc: "The physical containers this plant runs on the line."
+        fields: {
+            height_mm: {type: "integer", unit: "mm", doc: "Internal height"}
+            width_mm: {type: "integer", unit: "mm", doc: "Internal width"}
+        }
+        entries: {
+            c1: {height_mm: 1000, width_mm: 800}
+            c2: {height_mm: 900, width_mm: 600}
+            c3: {height_mm: 400, width_mm: 400}
+        }
+    }
+}
+```
+
+A field's `type` is one of `integer`, `float`, `boolean`, `string`. The compiler
+checks every entry against those declarations: an entry that omits a field,
+carries a field the catalogue never declared, or gives a field a value of the
+wrong type is `E_CATALOGUE_INVALID`, naming the catalogue, the entry, and the
+field. An integer is accepted where a `float` is declared — `1000` and `1000.0`
+are the same number — and nothing else is promoted, so a typo cannot slip
+through as data.
+
+**Any unit may declare a catalogue** (see section 8 for what a unit is), and
+exactly one chunk declares each — a second declaration is
+`E_INGEST_DUPLICATE_CATALOGUE`. A shared unit declares the plant's containers; a
+service unit declares the modes its own firmware supports and offers them to the
+integrator; the integration unit may declare its own. The level is simply which
+unit's chunk carries the declaration.
+
+### Binding an entry
+
+A catalogue on its own is a table nobody has chosen from. A **binding** is one
+shared choice of an entry:
+
+```cue
+bindings: {
+    line_container: {
+        catalogue: "containers"
+        default:   "c2"
+        doc:       "The one container every service on this line draws from."
+    }
+}
+```
+
+**A binding is a facet.** That sentence is the whole design, and it is literal:
+a binding is a declared *closed* facet whose options are its catalogue's entry
+ids. It shares the facet id space, so naming a binding after a facet is
+`E_INGEST_DUPLICATE_FACET`. Everything you already know about facets applies
+unchanged — bind it in an environment's `choices` or `context_tags`, write
+constraints over it, and see it in the listing:
+
+The pack behind this listing is `compiler/scenarios/s_catalogue_binding`,
+compiled into `build-cat/`.
+
+All three listings in this section come from small packs that ship in the
+repository. Run these three commands from the repository root to produce the
+model packages they read:
+
+```bash
+configflux-compiler compile \
+  --source compiler/scenarios/s_catalogue_binding/00_definitions.json \
+  --source compiler/scenarios/s_catalogue_binding/10_components.json \
+  --out build-cat
+
+configflux-compiler compile \
+  --source compiler/scenarios/s_catalogue_binding_accepts/00_definitions.json \
+  --source compiler/scenarios/s_catalogue_binding_accepts/10_components.json \
+  --out build-cat-accepts
+
+configflux-compiler compile \
+  --source compiler/scenarios/s_requires_accepts/00_catalogue.json \
+  --source compiler/scenarios/s_requires_accepts/10_bindings.json \
+  --source compiler/scenarios/s_requires_accepts/20_components.json \
+  --out build-cat-derive
+```
+
+```console
+$ cfx options --model build-cat/cmp.manifest.json
+facet line_container [closed, default: c2]
+  c1
+  c2
+  c3
+```
+
+Entries are offered in id-ascending order. That is the catalogue's declaration
+order as the wire format carries it: the exported JSON does not preserve the
+order you typed, so ids are what the ordering is derived from.
+
+Two components that read the same binding receive the same entry by
+construction. That is how you say "these must match" — you do not write a rule,
+you name one binding instead of two.
+
+### Deriving the entry from another facet
+
+Sometimes the choice is not free: at factory A it is always container 1. Write
+that as a `derive` table instead of a default:
+
+```cue
+facets: {
+    site: {values: ["factory_a", "factory_b"], default: "factory_a"}
+}
+
+bindings: {
+    line_container: {
+        catalogue: "containers"
+        derive: {site: {factory_a: "c1", factory_b: "c2"}}
+    }
+}
+```
+
+The source may be any declared facet or binding, and there is exactly one of
+them. The table may be **partial**: a source value it does not cover implies
+nothing, so you can pin the two sites that matter and leave the rest open.
+`default` and `derive` are mutually exclusive — a derive table already fixes the
+entry — and declaring both is `E_BINDING_INVALID`, as is naming a catalogue that
+does not exist, defaulting to an entry it does not contain, deriving from
+something undeclared, or using a key or entry outside the relevant domain. Each
+message names the binding and the half that did not resolve.
+
+### Declaring what a component needs
+
+A binding says which entry the line uses. It does not say who reads it. A
+component declares that with `requires`, naming a **slot** — the role the entry
+plays inside that component:
+
+```cue
+components: {
+    vision_service: {
+        type: "service"
+        requires: {container: "line_container"}
+    }
+}
+```
+
+A requirement is the only way a component receives a catalogue entry, so a
+service that forgets to declare its need has nothing to read and the compiler
+says so rather than letting the failure move to startup. Naming a binding no
+chunk declares is `E_REQUIRES_INVALID`, and the message names the component and
+the slot, not just the missing binding.
+
+A requirement is **not** a `depends_on` edge. `depends_on` says "this component
+needs that component to exist"; `requires` says "this component needs a choice
+someone made". Requirements do not join the dependency closure and do not affect
+build order.
+
+### Narrowing a binding to the entries you support
+
+Not every service works with every entry. Say so with `accepts`:
+
+```cue
+components: {
+    vision_service: {
+        type: "service"
+        requires: {container: {binding: "line_container", accepts: ["c1", "c2"]}}
+    }
+}
+```
+
+Now `c3` is not offered at all:
+
+This narrowed model is `compiler/scenarios/s_catalogue_binding_accepts`,
+compiled into `build-cat-accepts/`.
+
+```console
+$ cfx options --model build-cat-accepts/cmp.manifest.json
+facet line_container [closed, default: c2]
+  c1
+  c2
+```
+
+And a forced choice is refused by the requirement's own name:
+
+```console
+$ cfx explain --model build-cat-accepts/cmp.manifest.json --select line_container=c3
+cannot select line_container.c3:
+  blocked by requirement vision_service.container: accepts c1, c2
+(one minimal explanation; other minimal cores may exist)
+```
+
+Leaving `accepts` out means every entry is acceptable. That is not the same as
+writing an empty list, which is refused: a component that accepts nothing can
+never be satisfied. Every accepted entry must be an entry of the binding's
+catalogue, with no repeats.
+
+When several components require the same binding, the integrator is offered
+exactly the **intersection** of their lists. That is the point — it is how the
+model knows which containers the whole line can actually run. If the
+intersection is empty the model can never resolve, so the compiler refuses it up
+front with `E_BINDING_NO_ACCEPTABLE_ENTRY`, naming the binding and every list so
+you can see which one to widen.
+
+A component with a `condition` narrows nothing while it is excluded. Its
+`accepts` list applies only where the component is included, exactly as its
+parameters do.
+
+### Where a derived entry is explained
+
+The same naming applies to a `derive` table. Selecting a site that fixes the
+container and then asking for a different one is refused by the rule that fixed
+it:
+
+The derived model is `compiler/scenarios/s_requires_accepts`, compiled into
+`build-cat-derive/`.
+
+```console
+$ cfx explain --model build-cat-derive/cmp.manifest.json --select site=factory_a --select line_container=c2
+cannot select site.factory_a:
+  blocked by your earlier choice: line_container.c2
+  blocked by binding line_container, derived from site: site == 'factory_a' -> 'c1'
+(one minimal explanation; other minimal cores may exist)
+```
+
+You never wrote that rule as a constraint — you wrote a derive table — and the
+tool still names it in the vocabulary you used.
+
+### What the service actually reads
+
+The requirement is not only a check. Resolve delivers the entry the binding took
+**inside the requiring component**, so the service reads its own configuration:
+
+```json
+"components": {
+  "vision_service": {
+    "requires": {
+      "container": {
+        "binding": "line_container",
+        "entry": "c1",
+        "fields": {"height_mm": 1000, "length_mm": 1200, "width_mm": 800}
+      }
+    },
+    "params": {"...": "..."}
+  }
+}
+```
+
+`vision_service` reads `requires.container.fields.width_mm`. It never names the
+catalogue, never names the unit that owns it, and does not change when the plant
+reorganises. Scoping the resolve to that one service changes nothing: a
+requirement is not a dependency edge, so the catalogue is not in the service's
+closure, and the entry still arrives.
+
+Two consequences worth knowing. A component that declares no requirement
+carries no `requires` key at all, so read it as absent rather than empty. And at
+the runtime these values are read-only, at
+`component.<service>.requires.<slot>.<field>` — they were decided when the
+deployment was resolved, so a write to one is refused.
 
 ## 5) Artifact References
 
@@ -675,7 +973,7 @@ is a hard "field not allowed" error at export time.
 | **Artifacts** | Name the deliverable | `hydra_x200_single_driver`, `office_standard_controller` |
 | **Facets** | Name the axis of variation | `cooling_brand`, `region`, `safety_mode` |
 
-## 8) Pack Layout
+## 8) Units and pack layout
 
 ### The chunk: package and `#Config`
 
@@ -703,6 +1001,36 @@ To validate the chunk against the schema, you export it with both the chunk and
 `compiler/cue/schema.cue` in scope (see section 9). The schema file supplies
 `#Config`, `#snakeId`, and the rest of the constraints.
 
+### The unit: the chunks that share one `package`
+
+A **unit** is the set of chunks that declare the same `package` value. That is
+the whole definition — the field every chunk already carries is the unit's name,
+and nothing else marks the boundary.
+
+Where a unit *lives* is a question about ownership rather than about the tool. A
+folder inside a monorepo is a unit; so is a whole repository. A service is
+usually one unit, a shared catalogue is one unit, and the integration that binds
+everything together is one unit. `examples/06-catalogue-polyrepo` has four, one
+per repository: `site_catalogue`, `vision_service`, `compute_service` and
+`sorter_service`.
+
+Inside a unit, the layout is the pack layout below: **one definitions chunk and
+any number of components chunks**, all sharing the `package` value and exported
+together, so CUE resolves their `inherits` pointers against that one definitions
+chunk. A unit that inherits from *another* unit needs no definitions chunk of
+its own — each of the three service units in example 06 is a single components
+chunk that inherits from the catalogue unit.
+
+An **interface unit** is not a separate kind of thing. It is a unit that
+declares definitions, facets, catalogues, bindings and constraints and few or no
+components — the header file of a model. Service units are compiled *against* it
+and inherit from its definitions; the catalogue repository in example 06 is one.
+
+The unit matters because it is the granularity at which a model can be built:
+one unit compiles into one object, and the objects are linked. Step 2b below is
+that build, and the one-shot `compile` at Step 2 is its shortcut for a checkout
+that holds every unit at once.
+
 ### A pack: definitions plus components
 
 A **pack** is the set of chunks in one `cue/` directory. The canonical layout
@@ -726,6 +1054,48 @@ chunk. The `examples/01-hello-led` pack does exactly this in one
 two-file layout once a model grows past a handful of entities. Section 9 gives
 a separate export recipe for the single-file case, since its resolved output is
 one combined `config.json` rather than a per-file pair.
+
+### Packs with more than two chunks, and chunks in several repositories
+
+Nothing about a pack is limited to two files. A pack has **one** definitions
+chunk and **any number** of components chunks, and those chunks do not have to
+sit in one directory -- or in one repository. A shared catalogue can be owned by
+one team in one repository while each service that uses it lives in its own,
+and the compiler takes each repository's exported chunk as a `--source`.
+
+The rules that actually apply:
+
+- **One definitions chunk per pack.** It holds the inheritance roots; every
+  components chunk resolves its `inherits` pointers against it, wherever that
+  chunk lives.
+- **Any number of components chunks.** Order does not matter.
+- **Ids are unique across ALL chunks.** Two chunks declaring the same component,
+  definition, facet, or constraint id is a hard error, not a merge.
+- **Every `depends_on` target must be in the compile set.** A chunk whose
+  dependency was not handed to the same `compile` invocation fails with
+  `E_UNKNOWN_COMPONENT_DEP`. This is deliberate: the tool will not certify a
+  fragment whose dependency it has never seen.
+- **Every `requires` binding must be in the compile set too.** A component that
+  requires a binding no chunk in the invocation declares fails with
+  `E_REQUIRES_INVALID`, naming the component, the slot and the binding. Same
+  rule, applied to the shared choice rather than to a sibling component.
+- **`package` names the unit; `version` is a label.** The merged root is
+  synthetic, so chunks may carry different `package` values and a compile
+  accepts them: it groups the chunks by that value into units and links them.
+  Nothing cross-checks a `version` against anything.
+- **The compile set is the unit of verification.** A dependency-closed subset is
+  a perfectly good model -- a different one, with its own `model_hash`, because
+  it contains different components.
+- **A worktree or another checkout path does not change `model_hash`.** Identity
+  is content-canonical, so the same chunks compiled from a git worktree, a CI
+  checkout, or a vendored copy produce the same hash and remain comparable
+  across machines.
+
+`examples/06-catalogue-polyrepo` is a worked instance: a catalogue repository
+that declares the shared definition, the site facet, the container catalogue and
+the binding that derives one from the other, plus two service repositories that
+inherit from it and declare what they `require`. Section 9 exports an N-chunk
+pack like it with a single command.
 
 ### Directory structure
 
@@ -762,100 +1132,43 @@ against the pack's definitions chunk.
 
 `#ResolvePack` (defined in `compiler/cue/schema.cue`) takes the pack's
 definitions map and components map, gap-fills each component parameter against
-the definitions, and exposes a resolved `definitions` and `components`. The
-recipe below wraps your own pack into `#ResolvePack` and emits the resolved,
-per-file JSON. It runs entirely against your own directory -- nothing here is
-tied to this repository's layout.
+the definitions, and exposes a resolved `definitions` and `components`. You do
+not have to wire that up by hand: `examples/export_pack.sh` is a reference
+exporter that does it for a pack of any size, and it runs entirely against your
+own directory -- nothing in it is tied to this repository's layout.
+
+What the script does, so the mechanism stays visible: it exports every chunk
+*raw* (`cue export -e chunk`), wraps each raw chunk into its own field of a
+generated driver, and resolves each components chunk with its own
+`#ResolvePack` against the **one** definitions map the pack declares. It then
+emits one JSON per input chunk, named after that chunk -- so attribution stays
+per-file and no definition leaks into a components chunk. The wrap-then-resolve
+detour is needed because every chunk file binds a top-level `chunk`; exporting
+each one raw first is what lets them occupy distinct fields in a single
+resolving evaluation.
 
 > The in-repo helper `compiler/cue/export_fixtures.sh` is **not** the command to
 > export your own pack. It is a drift guard/regenerator for the example and
 > scenario fixtures that ship *inside this repository*: its pack roots are
 > hard-coded to `compiler/scenarios` and `examples`, so it never discovers a
 > `my_domain/` you create elsewhere. Use it only to check or regenerate the
-> in-repo fixtures (see the end of this section). For your own pack, use the
-> self-contained recipe here.
+> in-repo fixtures (see the end of this section). For your own pack, use
+> `examples/export_pack.sh`.
 
 #### Two-file pack: export `00_definitions.json` and `10_components.json`
 
-The export has two steps, mirroring exactly what the in-repo helper does
-internally: first emit each chunk *raw*, then resolve both raw chunks together
-through `#ResolvePack` and emit the per-file slices. Two steps are needed
-because both chunk files bind a top-level `chunk`; exporting each one raw first
-lets the driver place them under distinct fields in a single resolving
-evaluation.
-
-Step 1a -- emit each chunk raw (these are the un-gap-filled chunks; you do
-**not** feed these to the compiler):
-
 ```bash
-"$CUE" export -e chunk my_domain/cue/00_definitions.cue compiler/cue/schema.cue \
-  --out json > my_domain/defs_raw.json
-"$CUE" export -e chunk my_domain/cue/10_components.cue compiler/cue/schema.cue \
-  --out json > my_domain/comps_raw.json
-```
-
-Step 1b -- author a small driver in your pack directory that wraps the two raw
-chunks and applies `#ResolvePack`. The field names below
-(`defsIn`, `compsIn`, `definitionsOut`, `componentsOut`) match the in-repo
-helper's driver, and the slices keep attribution per-file: `00_definitions.json`
-carries only the definitions, `10_components.json` carries only the resolved
-components (and any artifacts authored in that chunk). Save this as
-`my_domain/_export.cue`:
-
-```cue
-package configflux
-
-// defsIn/compsIn are supplied on the export command line as data files
-// wrapping the raw chunks emitted in step 1a.
-defsIn: {...}
-compsIn: {...}
-
-_resolved: #ResolvePack & {
-    _definitions: defsIn.definitions
-    _components:  compsIn.components
-}
-
-// Definitions-file slice: the inheritance roots, passed through unchanged.
-definitionsOut: {
-    package: defsIn.package
-    version: defsIn.version
-    if defsIn.definitions != _|_ {definitions: defsIn.definitions}
-    if defsIn.components != _|_ {components: defsIn.components}
-    if defsIn.artifacts != _|_ {artifacts: defsIn.artifacts}
-}
-
-// Components-file slice: resolved components (inheritance gap-filled) plus this
-// chunk's own artifacts. No definitions leak in -- attribution stays per-file.
-componentsOut: {
-    package: compsIn.package
-    version: compsIn.version
-    if compsIn.artifacts != _|_ {artifacts: compsIn.artifacts}
-    if compsIn.components != _|_ {components: _resolved.components}
-}
-```
-
-Step 1c -- wrap the raw chunks as data files and emit the two resolved slices.
-The two small wrapper files inject the raw JSON under the `defsIn` / `compsIn`
-fields the driver expects:
-
-```bash
-{ echo 'package configflux'; printf 'defsIn: '; cat my_domain/defs_raw.json; } \
-  > my_domain/_defs_wrap.cue
-{ echo 'package configflux'; printf 'compsIn: '; cat my_domain/comps_raw.json; } \
-  > my_domain/_comps_wrap.cue
-
-"$CUE" export my_domain/_export.cue my_domain/_defs_wrap.cue \
-  my_domain/_comps_wrap.cue compiler/cue/schema.cue \
-  -e definitionsOut --out json > my_domain/00_definitions.json
-"$CUE" export my_domain/_export.cue my_domain/_defs_wrap.cue \
-  my_domain/_comps_wrap.cue compiler/cue/schema.cue \
-  -e componentsOut --out json > my_domain/10_components.json
+examples/export_pack.sh \
+  --schema compiler/cue/schema.cue \
+  --definitions my_domain/cue/00_definitions.cue \
+  --components  my_domain/cue/10_components.cue \
+  --out my_domain
 ```
 
 `my_domain/00_definitions.json` and `my_domain/10_components.json` are now the
-inheritance-resolved JSON the compiler ingests. (The `defs_raw.json`,
-`comps_raw.json`, and `_*_wrap.cue` files are scratch; you can delete them or
-keep them out of your committed tree.)
+inheritance-resolved JSON the compiler ingests. Outputs are named after their
+input chunk, so `00_definitions.cue` becomes `00_definitions.json`, and no
+scratch files are left behind.
 
 A resolved component parameter carries the inherited fields inline. For example,
 the `protocol` parameter in `examples/02-sensor-gateway` -- authored with just
@@ -873,48 +1186,56 @@ the `protocol` parameter in `examples/02-sensor-gateway` -- authored with just
 The `type`, `lifecycle`, `access`, and `doc` were filled in from the `protocol`
 definition; the `value` and `overrides` came from the component parameter.
 
+#### Packs with more chunks, including chunks in several repositories
+
+`--components` is repeatable, and the paths are ordinary paths -- they can point
+anywhere, including into another repository's checkout. Every components chunk
+is resolved against the same definitions chunk, so a parameter in one repository
+can inherit a definition declared in another:
+
+```bash
+examples/export_pack.sh \
+  --schema compiler/cue/schema.cue \
+  --definitions repos/catalogue/cue/00_catalogue.cue \
+  --components  repos/vision/cue/10_vision.cue \
+  --components  repos/compute/cue/10_compute.cue \
+  --out <dir>
+```
+
+Each chunk's JSON lands in `<dir>` named after its input, and you commit it next
+to the chunk it came from. Two chunks may not share a basename -- their outputs
+would collide, so the script refuses rather than emitting fewer files than the
+pack has chunks. `examples/06-catalogue-polyrepo` is exactly this shape; see
+section 8 for the rules that govern a pack spread across repositories.
+
 #### Single-file pack: export one `config.json`
 
 If you authored a single-file pack (one chunk holding both definitions and
-components, like `examples/01-hello-led/cue/config.cue`), the resolved output is
-one combined `config.json`. The driver uses the helper's single-file field name,
-`configOut`. Save this as `my_domain/_export.cue`:
-
-```cue
-package configflux
-
-// srcIn is supplied on the export command line as a data file wrapping the raw
-// single-file chunk.
-srcIn: {...}
-
-_resolved: #ResolvePack & {
-    _definitions: srcIn.definitions
-    _components:  srcIn.components
-}
-
-configOut: {
-    package: srcIn.package
-    version: srcIn.version
-    if srcIn.definitions != _|_ {definitions: srcIn.definitions}
-    if srcIn.artifacts != _|_ {artifacts: srcIn.artifacts}
-    if srcIn.components != _|_ {components: _resolved.components}
-}
-```
-
-Then emit the raw chunk, wrap it, and export the resolved config:
+components, like `examples/01-hello-led/cue/config.cue`), pass it as `--single`:
 
 ```bash
-"$CUE" export -e chunk my_domain/cue/config.cue compiler/cue/schema.cue \
-  --out json > my_domain/src_raw.json
-{ echo 'package configflux'; printf 'srcIn: '; cat my_domain/src_raw.json; } \
-  > my_domain/_src_wrap.cue
-
-"$CUE" export my_domain/_export.cue my_domain/_src_wrap.cue \
-  compiler/cue/schema.cue \
-  -e configOut --out json > my_domain/config.json
+examples/export_pack.sh \
+  --schema compiler/cue/schema.cue \
+  --single my_domain/cue/config.cue \
+  --out my_domain
 ```
 
 `my_domain/config.json` is the resolved JSON the compiler ingests.
+
+#### Which `cue` the script uses
+
+Inside this repository the script resolves the hermetic, version-pinned `cue`
+for you. Outside it, set `$CUE` to the evaluator you trust:
+
+```bash
+CUE=/path/to/cue examples/export_pack.sh --schema ... --out ...
+```
+
+There is deliberately no `$PATH` fallback: an unpinned evaluator can change the
+compiled `model_hash`, so an unresolvable `cue` is an error rather than a
+warning. The script exits `0` on success, `1` when `cue` rejects a chunk (its
+own stderr is forwarded unchanged), and `2` on a usage error.
+
 
 #### Checking the in-repo fixtures (not your own pack)
 
@@ -947,7 +1268,7 @@ configflux-compiler compile \
 `compile` prints a JSON result to stdout. A successful run looks like:
 
 ```json
-{ "schema_version": 4, "status": "ok",
+{ "schema_version": 5, "status": "ok",
   "model_hash": "89d1692f...6352f3",
   "compiled_model_package_ref": "out/cmp/cmp.manifest.json",
   "stats": { "source_count": 2, "chunk_count": 2, "definition_count": 3, "component_count": 3, "artifact_count": 0 } }
@@ -962,6 +1283,162 @@ The `--out` directory then contains the Compiled Model Package:
 
 The compiler exits `0` on success, `1` on a user or input error, and `2` on a
 compilation error.
+
+### Step 2b: Compiling one unit
+
+Step 2 needs every chunk of the model on one command line, so it needs one
+checkout that holds every unit at once. That is the common case and it is why
+`compile` exists — but it is a *shortcut*, not the shape of the build. The
+general form is the next two steps: **compile each unit into an object, then
+link the objects.** `compile` is that same linker, fed by objects it builds in
+memory and never writes, which is why the two produce identical bytes.
+
+Read 2b and 2c as one story. Nothing in 2b is finished until 2c runs: a unit
+compiled alone records what it could not resolve rather than rejecting it, and
+the link is where those obligations are settled.
+
+`compile-object` compiles one unit -- the chunks sharing one `package` value, as
+section 8 defines it -- into a content-addressed object:
+
+```bash
+configflux-compiler compile-object \
+  --source repos/catalogue/00_catalogue.json \
+  --out out/site_catalogue.cfo
+```
+
+```text
+object: out/site_catalogue.cfo  unit: site_catalogue  object_hash: 24d934a...  chunks: 1  exports: definitions=1 components=0 artifacts=0 facets=1 bindings=2 catalogues=1 constraints=0  imports: components=0 definitions=0 facets=0 bindings=0 catalogues=0
+```
+
+Add `--format json` to print the object header instead of the summary line.
+
+A unit that references another unit's declarations is compiled **against** that
+unit's object, with `--interface`. Only the interface's `object.json` is read:
+
+```bash
+configflux-compiler compile-object \
+  --source repos/vision/10_vision.json \
+  --interface out/site_catalogue.cfo \
+  --out out/vision_service.cfo
+```
+
+The object directory holds the header, the unit's chunk files exactly as a CMP
+would store them, and a provenance sidecar. There is no constraint model and no
+package index in an object -- those come from linking.
+
+Two rules are worth knowing before you use this:
+
+- **One object is one unit.** If the `--source` chunks do not all declare the
+  same `package`, the compile is refused with `E_OBJECT_UNIT_MISMATCH`, naming
+  both values and both files.
+- **Unresolved references are recorded, not rejected.** A `depends_on` or
+  `inherits` target, a required binding, or a facet that neither this unit nor
+  its interfaces declare is written into the header's `imports` and checked when
+  the objects are linked. The `--interface` list changes what can be *checked*
+  here, never what is *recorded*: compiling `vision_service` with and without the
+  catalogue interface produces the same `imports`.
+
+`compile-object` exits `0` on success, `1` on a user or input error (an
+unreadable `--source` or `--interface`), and `2` on a compilation error.
+
+### Step 2c: Linking units
+
+`link` turns a set of objects into a Compiled Model Package -- the same package
+`compile` writes. Pass one `--object` per unit and an `--out` directory:
+
+```bash
+configflux-compiler link \
+  --object out/site_catalogue.cfo \
+  --object out/vision_service.cfo \
+  --out out/cmp
+```
+
+```text
+model_hash: 1d9803bc...  objects: 2  partitions: 1
+```
+
+Add `--format json` to print the full compile result instead of the summary
+line. `link` takes the same `--cluster-size`, `--max-rss-mb`, `--max-threads`,
+`--progress` and `--stamp-time` flags as `compile`, and they mean the same
+thing: the constraint model is built by the link, so the flags that shape it —
+and the one that reports on it — belong here.
+
+Argument order does not matter. Objects are linked by unit name, so the same
+objects in any order produce the same bytes.
+
+**What `link` checks first, from the headers alone.** Reading an object's
+header costs one small file, so every cross-unit question is answered before a
+single chunk file is opened:
+
+- Two objects claiming the same unit -- `E_LINK_DUPLICATE_UNIT`.
+- Two objects exporting the same id -- `E_LINK_DUPLICATE_ID`, naming both units.
+- An import no linked object declares -- `E_LINK_UNRESOLVED_IMPORT`, naming the
+  unit and the id: `unit 'sorter_service' requires binding 'sorter_container';
+  no linked object declares it`.
+- A unit compiled against a different version of an interface than the one being
+  linked -- `E_LINK_INTERFACE_MISMATCH`, naming the hash it was compiled against
+  and the hash linked. Recompile the dependent unit, or link the object it was
+  compiled against.
+
+Then the chunk files are checked against the header that names them and against
+themselves -- a chunk file is named by its content, so a body that no longer
+hashes to its own name is refused even when the header still agrees with it --
+and the header is checked back against those chunk files, rebuilt from them, so
+an object whose header says something its own chunks do not say is refused even
+though the header itself is consistent. The chunks are then copied
+(`E_LINK_OBJECT_CORRUPT` otherwise). Nothing is written under `--out` unless
+every check passes.
+
+The `E_LINK_*` codes are what the same faults are called when the linker may
+hold only *some* of the objects. A one-shot `compile` holds the whole model, so
+it still reports `E_UNKNOWN_COMPONENT_DEP` and `E_REQUIRES_INVALID` for the two
+cases named in section 8. Neither form accepts a model the other rejects.
+
+**The package is the same package.** For the same model, `compile` and
+`compile-object` per unit followed by `link` produce byte-identical output --
+the chunk files, the index, the manifest and the constraint model. That is what
+makes the split worth using: an unchanged unit's object is reused as it is, only
+the unit you edited recompiles, and the link runs over headers rather than over
+every parameter in the model.
+
+So choosing between the two forms is a question about your build, never about
+your model. Take Step 2's shortcut while one checkout holds everything. Reach
+for 2b and 2c when it does not -- separate repositories, a job that rebuilds one
+unit, an agent working in a worktree of a single service -- and when you want a
+mistake between units named at link time instead of found later.
+`examples/06-catalogue-polyrepo` runs both forms over one model and asserts,
+file by file, that the packages are identical.
+
+**Pinning what you link.** Once several units are in play, the question a
+release asks is not "does this link" but "is this the set we reviewed". A
+lockfile answers it. `--write-lock` records, per unit, the object hash the link
+used; `--lock` refuses a later link whose objects do not match those pins:
+
+```bash
+# Record what this link used.
+configflux-compiler link \
+  --object out/site_catalogue.cfo \
+  --object out/vision_service.cfo \
+  --out out/cmp --write-lock configflux.lock
+
+# Later, or on another machine: build exactly that, or fail.
+configflux-compiler link \
+  --object out/site_catalogue.cfo \
+  --object out/vision_service.cfo \
+  --out out/cmp --lock configflux.lock
+```
+
+A pin that does not match the object being linked is `E_LINK_LOCK_MISMATCH`,
+naming the unit and both hashes; a pinned unit that was not linked is
+`E_LINK_LOCK_UNLINKED`, waived by `--lock-allow-extra` when the subset is
+deliberate. The compiler **checks** pins and never fetches anything -- getting
+the objects to the machine is your checkout's or your CI's job, and the
+`source` field is a note for humans that nothing reads. The full format is in
+[the interface contracts](interface-contracts.md), and the workflow it exists
+for is in [the service integration guide](service-integration-guide.md).
+
+`link` exits `0` on success, `1` on a user or input error, and `2` on a link
+error.
 
 ### Step 3: Verify and inspect (optional)
 
@@ -1156,19 +1633,46 @@ the relative path of every exported file, then writes the snapshot under
 
 ```console
 $ cfx resolve --model build/cmp.manifest.json --select bus_type=ethernet --select environment=high_speed --out snapshot
-model_hash: 89d1692f3553ff31d638f1567bf23abb737b2f5b0b76f6c609b97853b16352f3
-selection_state_hash: a92a02293c2c11d9e1716283f66455573e0199aa6907b52928f73d7d502fba14
-resolve_hash: 47cac6b16c06c022eb9197039e16e14798975120919f2380ab855f642e8cb36d
+model_hash: 797d2d277eaf4893f430a11b457e0ebccb977f25827304e27fc5f4c08e80f083
+selection_state_hash: 4a42c59c9a305b8cabd5169f1659b55291fc8f5aa35f323df268495ae60177fa
+resolve_hash: eab7a9058c7ee71ed3599dad6aa612ea40e11806884cf2c0aa23a9a7d7cdb3e2
+resolved_output_hash: 322004d7540db072501aeeb6e9582ebef2bf2d3f59e4ebadbf60fe3e6b6732a7
 wrote: generated/config.hpp
 wrote: generated/config_artifact_manifest.json
 wrote: generated/config_build_flags.cmake
+wrote: resolve_result.all.ethernet-high_speed.json
 ```
 
-Three hashes, each derived from the one above it: `model_hash` fingerprints the
-150% model, `selection_state_hash` fingerprints the choices, and `resolve_hash`
-fingerprints this exact resolved configuration. Run the same command again and
-all three are identical and the exported bytes are unchanged — that
-reproducibility is the contract.
+Four hashes. The first three are each derived from the one above it:
+`model_hash` fingerprints the 150% model, `selection_state_hash` fingerprints
+the choices, and `resolve_hash` fingerprints this exact resolved configuration.
+`resolved_output_hash` stands apart — it fingerprints the delivered payload
+alone, so it changes only when the bytes a consumer receives change. Run the
+same command again and all four are identical and the exported bytes are
+unchanged — that reproducibility is the contract.
+
+**Bind the free decisions; the solver infers the rest.** You do not have to
+select everything the model declares. When the constraints admit exactly one
+value for a facet you left unstated, `cfx resolve` binds it for you and prints
+it as an `implied:` line before any `defaulted:` lines, recording it under
+`implied_choices` in the resolved output. If a rule says the `factory_b` site is
+equipped for the `c2` container, then `--select site=factory_b` alone resolves
+with the container implied — the declared default never applies, because the
+constraints had already decided. Inference only fills a gap you left: an
+explicit choice and a context tag both still win over an implied value, and
+nothing is implied when more than one value remains admissible. So state the
+decisions your deployment actually owns and leave the entailed ones to the
+model; `cfx options` will show you which is which as you go.
+
+**Named environments.** Typing `--select` flags is fine while you are exploring,
+but a deployment target deserves a name you can version-control. Put your
+targets in an **environment manifest** — a small JSON file mapping each name to
+its scope, context tags, and choices — and `cfx resolve --manifest
+environments.json --environment production` resolves that named target, or
+`--all` resolves every target the file names in one pass. The manifest is a
+`cfx` input, not a convention you have to unfold yourself. See
+[Naming targets](service-integration-guide.md#naming-targets-the-environment-manifest-convention)
+in the service integration guide for the schema and the matrix form.
 
 ### Step 3: Read the resolved snapshot
 
@@ -1199,16 +1703,17 @@ add_compile_definitions(
 
 And `config_artifact_manifest.json` records the resolved artifact ids together
 with the hash lineage, so a deployed configuration can always be traced back to
-the model it came from:
+the model it came from. It is written without a trailing newline, so the `echo`
+below is only there to put your shell prompt back on a line of its own:
 
 ```console
-$ cat snapshot/generated/config_artifact_manifest.json
+$ cat snapshot/generated/config_artifact_manifest.json; echo
 {
   "artifacts": [],
-  "model_hash": "89d1692f3553ff31d638f1567bf23abb737b2f5b0b76f6c609b97853b16352f3",
+  "model_hash": "797d2d277eaf4893f430a11b457e0ebccb977f25827304e27fc5f4c08e80f083",
   "profile": "cpp_early_binding_v1",
-  "resolve_hash": "47cac6b16c06c022eb9197039e16e14798975120919f2380ab855f642e8cb36d",
-  "schema_version": 4
+  "resolve_hash": "eab7a9058c7ee71ed3599dad6aa612ea40e11806884cf2c0aa23a9a7d7cdb3e2",
+  "schema_version": 5
 }
 ```
 
@@ -1222,7 +1727,7 @@ resolves. Asking `cfx explain` about a workable selection says so and exits
 with code 3 — there is nothing to explain:
 
 ```console
-$ cfx explain --model build/cmp.manifest.json --select bus_type=ethernet --select environment=high_speed
+$ cfx explain --model build/cmp.manifest.json --select bus_type=ethernet --select environment=high_speed # exit 3
 selection is satisfiable; nothing to explain
 ```
 

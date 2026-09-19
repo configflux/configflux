@@ -133,8 +133,55 @@ fn malformed_condition_surfaces_parse_error() {
             || format!("{err}").to_lowercase().contains("literal"),
         "unexpected error: {err}"
     );
-    let err2 = rewrite_condition_identifiers("a == b", &id_tag, &id_lit).unwrap_err();
+    // `a == b` is no longer malformed — an unquoted right-hand side is a
+    // facet-to-facet comparison (configflux-secb.2 / ADR-0057 §D5). A
+    // right-hand side that is neither a literal nor an identifier still is.
+    let err2 = rewrite_condition_identifiers("a == 3", &id_tag, &id_lit).unwrap_err();
     assert!(!format!("{err2}").is_empty());
+}
+
+#[test]
+fn facet_comparison_round_trips_with_an_unquoted_right_hand_side() {
+    // The serializer must NOT quote the right-hand side: quoting it would turn
+    // a comparison between two facets into a comparison against the literal
+    // `b`, silently changing what the scrubbed model means
+    // (configflux-secb.2 / ADR-0057 §D5).
+    for src in [
+        "a == b",
+        "a != b",
+        "!(a == b) || c == 'x'",
+        "any_of(a == b, c != d)",
+    ] {
+        let out = rewrite_condition_identifiers(src, &id_tag, &id_lit).unwrap();
+        assert_eq!(ast(src), ast(&out), "round-trip lost for {src:?} -> {out:?}");
+    }
+}
+
+#[test]
+fn facet_comparison_pseudonymizes_both_operands() {
+    // Both sides are facet identifiers. Leaving the right-hand one alone would
+    // publish a real facet name out of a scrubbed model (ADR-0034 D3).
+    let ids = condition_identifiers("sorter_container == line_container").unwrap();
+    assert_eq!(
+        ids.tags,
+        ["line_container", "sorter_container"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    );
+    assert!(
+        ids.options.is_empty(),
+        "a facet comparison names no option literal, got {:?}",
+        ids.options
+    );
+
+    let renamed = rewrite_condition_identifiers(
+        "sorter_container == line_container",
+        &|tag| format!("tag_{tag}"),
+        &id_lit,
+    )
+    .unwrap();
+    assert_eq!(renamed, "tag_sorter_container == tag_line_container");
 }
 
 #[test]

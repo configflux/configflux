@@ -33,13 +33,19 @@
 // The mapping this wrapper applies — identical to the one `solver_validation.rs`
 // already uses for `set-parameter` — is:
 //
-//     {parameter}  ──►  {facet}   :  param_key  (the last path segment of
-//                                    `component.<id>.param.<param_key>`)
+//     {parameter}  ──►  {facet}   :  the facet the parameter DECLARES it is the
+//                                    handle for (ADR-0064 D1), read from the
+//                                    resolved parameter via `bound_facet`
 //     {value}      ──►  {option}  :  the request's string `value`
 //
-// A non-string `value` names no `{facet}.{value}` symbol, and a path that is not
-// `component.<id>.param.<key>` is a free-form scalar the solver does not govern.
-// Both are permanent division-of-labor cases (ADR-0030 D5): there is no modeled
+// It used to be the path's last segment. A parameter that merely shares a
+// facet's name is not that facet's handle (ADR-0064), so the explanation now
+// names the facet the model declared rather than one the path happened to spell.
+//
+// A non-string `value` names no `{facet}.{value}` symbol, a path that is not
+// `component.<id>.param.<key>` is a free-form scalar the solver does not govern,
+// and a parameter that declares no binding names no modeled facet at all. All
+// three are permanent division-of-labor cases (ADR-0030 D5): there is no modeled
 // option to explain, so the wrapper returns the unknown-facet rejection with no
 // core. The compiler-side result echoes the {parameter, value} identity
 // (`path`/`value`) so the response is self-describing in the caller's vocabulary
@@ -80,11 +86,11 @@ use compiler::runtime_api::{
     RuntimeExplainRejectionRequest, RuntimeExplainRejectionResult, RuntimeSnapshot,
 };
 use compiler::schema::Value;
-// The ONE `component.<id>.param.<key>` parser and the ONE symbol-table facet
+// The ONE path-to-declared-facet lookup and the ONE symbol-table facet
 // predicate. Both were duplicated verbatim here until configflux-jraj lifted
 // them, so the `explain-rejection` and write surfaces cannot drift on what a
 // facet write is.
-use crate::solver_validation::{facet_present, parse_param_key};
+use crate::solver_validation::{bound_facet, facet_present};
 use solver::{CuddBackend, RejectionExplanation, Session};
 use std::path::Path;
 
@@ -93,7 +99,7 @@ use std::path::Path;
 /// The single CLI handler for the runtime `explain-rejection` command. Builds an
 /// ephemeral `Session<CuddBackend>` from the snapshot's `ccm_ref`, replays the
 /// committed `choices`, and asks the solver to explain the candidate
-/// `(param_key, value)` selection. See the module header for the full outcome
+/// `(declared facet, value)` selection. See the module header for the full outcome
 /// map and the {parameter, value} <-> {facet, option} mapping.
 pub(crate) fn explain_rejection_via_solver(
     request: RuntimeExplainRejectionRequest,
@@ -114,16 +120,19 @@ pub(crate) fn explain_rejection_via_solver(
         }
     };
 
-    // {parameter} -> {facet}: the candidate facet is the `param_key` of a
-    // `component.<id>.param.<param_key>` path. Any other shape is a free-form
-    // scalar the solver does not govern (ADR-0030 D5).
-    let Some(param_key) = parse_param_key(&request.path) else {
+    // {parameter} -> {facet}: the candidate facet is the one the parameter
+    // DECLARES it is the handle for (ADR-0064 D5.4). A path that is not
+    // `component.<id>.param.<key>`, one no resolved parameter answers to, and
+    // one whose parameter declares no binding all name no modeled facet — each
+    // is a free-form scalar the solver does not govern (ADR-0030 D5).
+    let Some(declared_facet) = bound_facet(snapshot, &request.path) else {
         return unknown_facet(
             &request,
-            "the path is not a 'component.<id>.param.<key>' parameter, so it \
-             names no modeled facet to explain",
+            "the parameter declares no facet binding, so it names no modeled \
+             facet to explain",
         );
     };
+    let candidate_facet = declared_facet.as_str();
 
     // Re-derive the session from the snapshot (ADR-0017 §3). After a valid
     // runtime-open the `.ccm` is known usable (ADR-0030 D2); a load/construct
@@ -131,17 +140,17 @@ pub(crate) fn explain_rejection_via_solver(
     // CLOSED (ADR-0031 D4), not a "no model" degrade.
     let ccm = match Session::<CuddBackend>::load_ccm(Path::new(snapshot.ccm_ref.trim())) {
         Ok(ccm) => ccm,
-        Err(_) => return engine_divergence(&request, param_key, value_str),
+        Err(_) => return engine_divergence(&request, candidate_facet, value_str),
     };
     let mut session = match Session::<CuddBackend>::new(ccm) {
         Ok(session) => session,
-        Err(_) => return engine_divergence(&request, param_key, value_str),
+        Err(_) => return engine_divergence(&request, candidate_facet, value_str),
     };
 
-    // If `param_key` is not a facet in the symbol table, the write is a
+    // If the DECLARED facet is absent from the symbol table, the write is a
     // free-form scalar — an unconstrained facet the solver does not own
     // (ADR-0030 D5). No modeled option to explain → unknown facet, no core.
-    if !facet_present(&session, param_key) {
+    if !facet_present(&session, candidate_facet) {
         return unknown_facet(
             &request,
             "the parameter is not a solver-modeled facet, so there is no \
@@ -162,8 +171,18 @@ pub(crate) fn explain_rejection_via_solver(
     // pin on it). Re-deriving an already-accepted state must never spuriously
     // fault, so a replay error is ignored here — the explain call below is the
     // authority on the candidate decision.
-    for (facet, option) in crate::solver_validation::session_assignment(&session, snapshot) {
-        if facet == param_key {
+    // ADR-0064 D5.2: two parameters declaring one facet cannot both be current,
+    // so a divergence is a fault in the snapshot, not a question about the
+    // candidate — fail CLOSED rather than explain against a state the model
+    // cannot produce.
+    let assignment = match crate::solver_validation::session_assignment(&session, snapshot) {
+        Ok(assignment) => assignment,
+        Err(divergence) => {
+            return divergent_binding(&request, &divergence);
+        }
+    };
+    for (facet, option) in assignment {
+        if facet == candidate_facet {
             continue;
         }
         let _ = session.apply(&facet, &option);
@@ -179,7 +198,7 @@ pub(crate) fn explain_rejection_via_solver(
     // Ask the solver to explain the candidate. The solver decides; this wrapper
     // only composes the envelope (ADR-0017 amendment: solver DECIDES, the
     // compose layer COMPOSES).
-    match session.explain_rejection(param_key, value_str) {
+    match session.explain_rejection(candidate_facet, value_str) {
         // Genuine constraint conflict with a labeled MUS → success, carry the
         // converted core (ADR-0031 D2/D3). The conversion is the shared one
         // `cfx`/interpreter get, so both surfaces report one core, one wording.
@@ -188,9 +207,22 @@ pub(crate) fn explain_rejection_via_solver(
             core: Some(core),
         }) => explain_conflict(
             &request,
-            param_key,
+            candidate_facet,
             value_str,
-            session_compose::labeled_core_to_unsat_core(core, &roster),
+            // The model's CLOSED facet declarations, carried on the open
+            // contract (ADR-0060 D3/D4). The runtime still holds no
+            // `ModelHandle` and still cannot open model sources — the resolver
+            // computed this table and the open payload forwarded it, which is
+            // what lets a core mentioning a closed facet ONLY negatively be
+            // completed by entailment and name the constraint it breaks
+            // (configflux-pt6v, configflux-tkwt). Empty when the opener supplied
+            // none: byte-for-byte the asserted-only attribution this surface had
+            // before (D7).
+            session_compose::labeled_core_to_unsat_core(
+                core,
+                &roster,
+                &snapshot.closed_facet_domains,
+            ),
         ),
         // `would_reject` without a core would be a solver contract violation
         // (a genuine reject must carry its MUS, ADR-0031 D3). Treat the missing
@@ -198,23 +230,25 @@ pub(crate) fn explain_rejection_via_solver(
         Ok(RejectionExplanation {
             would_reject: true,
             core: None,
-        }) => engine_divergence(&request, param_key, value_str),
+        }) => engine_divergence(&request, candidate_facet, value_str),
         // Genuinely valid option: nothing to explain (ADR-0030 D5) → success,
         // no core.
         Ok(RejectionExplanation {
             would_reject: false,
             ..
-        }) => explain_not_rejected(&request, param_key, value_str),
+        }) => explain_not_rejected(&request, candidate_facet, value_str),
         // Division-of-labor unknown cases (ADR-0030 D5): the same typed errors
         // `apply` raises. Exit 2, no core (acceptance criterion #2).
         Err(solver::Error::UnknownFacet(_)) => unknown_facet(
             &request,
             "the facet is not present in the compiled model",
         ),
-        Err(solver::Error::UnknownOption { .. }) => invalid_option(&request, param_key, value_str),
+        Err(solver::Error::UnknownOption { .. }) => {
+            invalid_option(&request, candidate_facet, value_str)
+        }
         // MUS fault, unmappable variable, or Backend/Invariant/Ccm fault →
         // FAIL CLOSED (ADR-0031 D4). Never a partial core.
-        Err(_) => engine_divergence(&request, param_key, value_str),
+        Err(_) => engine_divergence(&request, candidate_facet, value_str),
     }
 }
 
@@ -332,6 +366,30 @@ fn engine_divergence(
     error_result(request, rejection)
 }
 
+/// The ADR-0064 D5.2 FAIL-CLOSED envelope: two parameters declaring one facet
+/// were observed holding different values. D2.4 refuses that at compile time, so
+/// a snapshot that passed the open-time `resolve_hash` check cannot carry it;
+/// observing it anyway means the snapshot and the model disagree, which is an
+/// engine divergence (ADR-0031 D4) and not an explanation. The retired
+/// skip-on-disagreement rule silently dropped the facet here instead.
+fn divergent_binding(
+    request: &RuntimeExplainRejectionRequest,
+    divergence: &crate::solver_validation::DivergentBinding,
+) -> RuntimeExplainRejectionResult {
+    let rejection = RejectionReason {
+        code: E_SELECTION_ENGINE_DIVERGENCE.to_string(),
+        message: divergence.message(),
+        blocking_choices: std::collections::BTreeMap::new(),
+        hint: Some(
+            "Re-resolve and re-open against the compiled model: one parameter \
+             declares each facet, so two bound values cannot both be current"
+                .to_string(),
+        ),
+        unsat_core: None,
+    };
+    error_result(request, rejection)
+}
+
 /// The `blocking_choices` map (facet -> option) derived from the prior-selection
 /// entries of a core. Populated from `kind == Selection` constraints so the
 /// existing `RejectionReason.blocking_choices` field stays meaningful for the
@@ -429,7 +487,8 @@ mod tests {
 
     use super::*;
     use compiler::loader_api::{
-        ConflictingConstraint, ConstraintFacet, MODEL_OVER_CONSTRAINED_SUMMARY,
+        ClosedFacetDomains, ConflictingConstraint, ConstraintFacet,
+        MODEL_OVER_CONSTRAINED_SUMMARY,
     };
     use session_compose::labeled_core_to_unsat_core;
     use solver::{CoreConstraintKind, LabeledAtom, LabeledConstraint, LabeledCore};
@@ -482,7 +541,7 @@ mod tests {
             minimal: true,
         };
 
-        let converted = labeled_core_to_unsat_core(core, &[]);
+        let converted = labeled_core_to_unsat_core(core, &[], &ClosedFacetDomains::default());
 
         assert_eq!(converted.rejected.facet, "database");
         assert_eq!(converted.rejected.option, "postgres");
@@ -530,7 +589,7 @@ mod tests {
             }],
             minimal: true,
         };
-        let converted = labeled_core_to_unsat_core(core, &[]);
+        let converted = labeled_core_to_unsat_core(core, &[], &ClosedFacetDomains::default());
         let is_label = |s: &str| !s.is_empty() && !s.chars().all(|c| c.is_ascii_digit());
         assert!(is_label(&converted.rejected.facet) && is_label(&converted.rejected.option));
         for constraint in &converted.conflicting_constraints {

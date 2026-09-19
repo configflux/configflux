@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-use crate::compiler_core::SourceChunk;
+use crate::interface_summary::Exports;
 use crate::ir;
-use anyhow::{bail, Result};
-use std::collections::{BTreeMap, HashMap};
+use anyhow::Result;
+use std::collections::BTreeMap;
 
 // NOTE: the standalone public `parse_config` (a thin `toml::from_str` wrapper)
 // was retired in L1 phase 8 (ADR 0021) when CUE became the canonical authoring
@@ -32,80 +32,67 @@ use std::collections::{BTreeMap, HashMap};
 // resolve. The retained mutation fixtures are inherits-free, so this guard does
 // not narrow the retention surface. (ADR-0027 Decision 9 erratum is finalized
 // in configflux-07ot.)
-pub(crate) fn build_ir_index(chunks: &[SourceChunk]) -> Result<ir::IrIndex> {
+/// One chunk's contribution to the package index: its content address, the
+/// `source_id` the index keeps as provenance (ADR-0056 §5), and the ids it
+/// declares.
+///
+/// The ids arrive as an [`Exports`] rather than as a parsed chunk because the
+/// two producers hold different things — `compile` has the authored `Config`
+/// and its summary, `link` has an emitted `IrChunk` read back off an object —
+/// and the index needs only the id sets both can supply.
+pub(crate) struct IndexInput<'a> {
+    pub(crate) chunk_hash: &'a str,
+    pub(crate) source_id: &'a str,
+    pub(crate) exports: &'a Exports,
+}
+
+/// Build the emitted index from what each chunk declares.
+///
+/// The one index builder, reached by both forms of a compile through
+/// [`crate::link_emit::write_package`], so a package written from `--source`
+/// chunks and one written from `--object` directories carry the same index by
+/// construction (ADR-0058 §D8).
+///
+/// The one-entity-one-chunk invariant this function used to enforce inline —
+/// four hand-rolled roster checks, one per namespace — is
+/// `link_verify::validate_link_summary` over the merged interface summaries
+/// (ADR-0057 §D9), which every caller runs before reaching here. Re-running it
+/// would report a fault a second time under a worse message.
+pub(crate) fn build_index(inputs: &[IndexInput<'_>]) -> Result<ir::IrIndex> {
     let mut chunk_refs = Vec::new();
     let mut component_index = BTreeMap::new();
     let mut definition_index = BTreeMap::new();
     let mut artifact_index = BTreeMap::new();
     let mut facet_index = BTreeMap::new();
-    let mut component_sources: HashMap<String, String> = HashMap::new();
-    let mut definition_sources: HashMap<String, String> = HashMap::new();
-    let mut artifact_sources: HashMap<String, String> = HashMap::new();
-    let mut facet_sources: HashMap<String, String> = HashMap::new();
+    let mut catalogue_index = BTreeMap::new();
+    let mut binding_index = BTreeMap::new();
 
-    for chunk in chunks {
+    for chunk in inputs {
         chunk_refs.push(ir::IrChunkRef {
-            chunk_hash: chunk.chunk_hash.clone(),
-            source_id: chunk.source_id.clone(),
+            chunk_hash: chunk.chunk_hash.to_string(),
+            source_id: chunk.source_id.to_string(),
         });
 
-        for component_id in chunk.config.components.keys() {
-            if let Some(existing) =
-                component_sources.insert(component_id.clone(), chunk.source_id.clone())
-            {
-                bail!(
-                    "Component '{}' appears in multiple chunks: '{}' and '{}'",
-                    component_id,
-                    existing,
-                    chunk.source_id
-                );
-            }
-            component_index.insert(component_id.clone(), chunk.chunk_hash.clone());
+        for component_id in &chunk.exports.components {
+            component_index.insert(component_id.clone(), chunk.chunk_hash.to_string());
         }
-
-        for definition_id in chunk.config.definitions.keys() {
-            if let Some(existing) =
-                definition_sources.insert(definition_id.clone(), chunk.source_id.clone())
-            {
-                bail!(
-                    "Definition '{}' appears in multiple chunks: '{}' and '{}'",
-                    definition_id,
-                    existing,
-                    chunk.source_id
-                );
-            }
-            definition_index.insert(definition_id.clone(), chunk.chunk_hash.clone());
+        for definition_id in &chunk.exports.definitions {
+            definition_index.insert(definition_id.clone(), chunk.chunk_hash.to_string());
         }
-
-        for artifact_id in chunk.config.artifacts.keys() {
-            if let Some(existing) =
-                artifact_sources.insert(artifact_id.clone(), chunk.source_id.clone())
-            {
-                bail!(
-                    "Artifact '{}' appears in multiple chunks: '{}' and '{}'",
-                    artifact_id,
-                    existing,
-                    chunk.source_id
-                );
-            }
-            artifact_index.insert(artifact_id.clone(), chunk.chunk_hash.clone());
+        for artifact_id in &chunk.exports.artifacts {
+            artifact_index.insert(artifact_id.clone(), chunk.chunk_hash.to_string());
         }
-
-        // Facets are a pack-global namespace declared by at most one chunk
-        // (ADR-0047 §2). The cross-chunk uniqueness invariant is enforced at
-        // ingest merge (E_INGEST_DUPLICATE_FACET); this loop is the structural
-        // one-facet-one-chunk guarantee that feeds `facet_index` into the
-        // `model_hash` preimage, symmetric with the other entity indices.
-        for facet_id in chunk.config.facets.keys() {
-            if let Some(existing) = facet_sources.insert(facet_id.clone(), chunk.source_id.clone()) {
-                bail!(
-                    "Facet '{}' is declared in more than one chunk: '{}' and '{}'",
-                    facet_id,
-                    existing,
-                    chunk.source_id
-                );
-            }
-            facet_index.insert(facet_id.clone(), chunk.chunk_hash.clone());
+        // Facets, catalogues and bindings are pack-global namespaces declared by
+        // at most one chunk (ADR-0047 §2, ADR-0057 §D2/§D3). Each index feeds
+        // the `model_hash` preimage, symmetric with the three above.
+        for facet_id in &chunk.exports.facets {
+            facet_index.insert(facet_id.clone(), chunk.chunk_hash.to_string());
+        }
+        for catalogue_id in &chunk.exports.catalogues {
+            catalogue_index.insert(catalogue_id.clone(), chunk.chunk_hash.to_string());
+        }
+        for binding_id in &chunk.exports.bindings {
+            binding_index.insert(binding_id.clone(), chunk.chunk_hash.to_string());
         }
     }
 
@@ -131,5 +118,7 @@ pub(crate) fn build_ir_index(chunks: &[SourceChunk]) -> Result<ir::IrIndex> {
         definition_index,
         artifact_index,
         facet_index,
+        catalogue_index,
+        binding_index,
     )
 }

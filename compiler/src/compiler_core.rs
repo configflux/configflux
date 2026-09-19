@@ -1,22 +1,21 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-use crate::ccm_emitter::{
-    count_model_variables, emit_ccm_dir, emit_ccm_dir_with_budget, emit_ccm_dir_with_progress,
-    ConditionModel, EmitBudgetOutcome,
+use crate::ccm_emitter::ConditionModel;
+// configflux-py7w: an ingest duplicate reports its code on the refusal itself,
+// not through the wording of its message.
+use crate::coded_error::{coded_bail, coded_bail_hint};
+use crate::product_api::{
+    E_INGEST_DUPLICATE_CATALOGUE, E_INGEST_DUPLICATE_FACET, HINT_DUPLICATE_BINDING_ID,
 };
-// configflux-9pjy.3 / ADR-0039 §7: the compile-time progress tracker the
-// emit chain reports against. `None`/absent keeps the byte-identical
-// default path (ADR-0005 Amendment 2).
-use crate::progress::ProgressTracker;
-use crate::resource_budget::{derive_knobs, ResourceBudget};
 use crate::conditions::{for_each_predicate_symbol, parse_condition_expr, ConditionExpr};
-use crate::ingest_merge::build_ir_index;
+use crate::interface_summary::{self, InterfaceSummary};
 use crate::ir;
 use crate::link_verify::{
-    validate_component_dependencies, validate_constraints, validate_definition_inheritance,
-    validate_facets,
+    validate_catalogues, validate_component_dependencies, validate_constraints,
+    validate_definition_inheritance, validate_facet_bindings_scoped, validate_facets,
+    validate_link_summary, validate_parameter_values, Scope,
 };
-use crate::schema::{self, Component, Config, Parameter};
+use crate::schema::{self, Component, Config, Facet, Parameter};
 use anyhow::{bail, Context, Result};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
@@ -110,6 +109,8 @@ impl Compiler {
                 artifacts: Default::default(),
                 facets: Default::default(),
                 constraints: Default::default(),
+                catalogues: Default::default(),
+                bindings: Default::default(),
             },
             chunks: Vec::new(),
         }
@@ -175,6 +176,13 @@ impl Compiler {
         // Authored-ID snake_case enforcement moved to the CUE authoring layer
         // (`compiler/cue/schema.cue` `#snakeId`, ADR-0027 Decision 4); the
         // Rust `validate_snake_case_ids` ingest check was deleted in B-5.
+        //
+        // ADR-0063 narrows that for FOUR classes — facet keys, binding ids,
+        // catalogue ids, catalogue entry ids — which `link_verify` now
+        // re-validates because the compiler interpolates them into synthesized
+        // condition clauses and `compile --source` never evaluates CUE. The
+        // rule lives at link-verify rather than here so `verify` and `compile`
+        // give the same answer; every other authored key stays CUE-only.
         self.merge_partial(partial.clone())?;
 
         let chunk_hash = ir::chunk_hash_from_config(&partial)?;
@@ -197,9 +205,10 @@ impl Compiler {
         // rules, which name the offending entity. The only input that reaches
         // here is an entity-free chunk, which merge ignores.
         //
-        // The message must not read "declared in more than one chunk" —
-        // `product_api::map_compile_input_error` routes that phrasing to
-        // E_INGEST_DUPLICATE_FACET.
+        // Carries no diagnostic code of its own, so it reports the generic
+        // ingest code. Since configflux-py7w the wording is free: the duplicate
+        // codes below are named on their own refusals, so a phrase appearing
+        // here can no longer claim one of them.
         if let Some(existing) = self
             .chunks
             .iter()
@@ -265,23 +274,84 @@ impl Compiler {
         // link time in `validate_facets`, over the fully merged model.
         for (key, facet) in partial.facets {
             if self.repository.facets.contains_key(&key) {
-                bail!("Facet '{}' is declared in more than one chunk", key);
+                coded_bail!(
+                    E_INGEST_DUPLICATE_FACET,
+                    "Facet '{}' is declared in more than one chunk",
+                    key
+                );
+            }
+            // ADR-0057 §D3: bindings share the facet id space, so a facet named
+            // like a binding declared by an earlier chunk is the same collision.
+            if self.repository.bindings.contains_key(&key) {
+                coded_bail!(
+                    E_INGEST_DUPLICATE_FACET,
+                    "Facet '{}' is declared in more than one chunk: '{}' is already \
+                     declared as a binding, and a binding shares the facet id space",
+                    key,
+                    key
+                );
             }
             self.repository.facets.insert(key, facet);
         }
 
         // Merge Constraints (ADR-0054 §1). Pack-global and verbatim, like
         // facets: no inheritance, no gap-fill, no merge. A repeated id is a
-        // duplicate, phrased exactly like the definition/component/artifact
-        // duplicates above so it lands in the same generic ingest diagnostic —
-        // deliberately NOT the facet phrasing ("declared in more than one
-        // chunk"), which `product_api::map_compile_input_error` routes to
-        // E_INGEST_DUPLICATE_FACET. ADR-0054 adds no diagnostic code.
+        // duplicate, phrased like the definition/component/artifact duplicates
+        // above and carrying no code of its own, so it lands in the same generic
+        // ingest diagnostic. ADR-0054 adds no diagnostic code.
         for (key, constraint) in partial.constraints {
             if self.repository.constraints.contains_key(&key) {
                 bail!("Duplicate constraint ID found: '{}'", key);
             }
             self.repository.constraints.insert(key, constraint);
+        }
+
+        // Merge Catalogues (ADR-0057 §D2). Pack-global and verbatim like
+        // facets, with a dedicated code: a duplicated TABLE is a different
+        // authoring mistake from a duplicated domain, and the fix ("keep the
+        // table in one chunk and let the others bind to it") is different too.
+        for (key, catalogue) in partial.catalogues {
+            if self.repository.catalogues.contains_key(&key) {
+                coded_bail!(
+                    E_INGEST_DUPLICATE_CATALOGUE,
+                    "Catalogue '{}' is declared in more than one chunk",
+                    key
+                );
+            }
+            self.repository.catalogues.insert(key, catalogue);
+        }
+
+        // Merge Bindings (ADR-0057 §D3). A binding IS a facet, so the two share
+        // ONE id space and the collision is checked in BOTH directions: this
+        // loop runs after the facet loop above, so `repository.facets` already
+        // holds this chunk's own facets and an intra-chunk collision is caught
+        // here, while a facet colliding with an EARLIER chunk's binding is
+        // caught by the facet loop's own binding check.
+        //
+        // Both refusals carry E_INGEST_DUPLICATE_FACET — the shared id space
+        // means one code — with the duplicate-BINDING remedy rather than that
+        // code's default, and the message says "binding" so the author knows
+        // which declaration to rename.
+        for (key, binding) in partial.bindings {
+            if self.repository.bindings.contains_key(&key) {
+                coded_bail_hint!(
+                    E_INGEST_DUPLICATE_FACET,
+                    HINT_DUPLICATE_BINDING_ID,
+                    "Binding '{}' is declared in more than one chunk",
+                    key
+                );
+            }
+            if self.repository.facets.contains_key(&key) {
+                coded_bail_hint!(
+                    E_INGEST_DUPLICATE_FACET,
+                    HINT_DUPLICATE_BINDING_ID,
+                    "Binding '{}' is declared in more than one chunk: a binding shares \
+                     the facet id space, and '{}' is also declared as a facet",
+                    key,
+                    key
+                );
+            }
+            self.repository.bindings.insert(key, binding);
         }
         Ok(())
     }
@@ -290,313 +360,289 @@ impl Compiler {
         &self.repository
     }
 
-    pub fn link_and_verify(&self) -> Result<()> {
-        validate_definition_inheritance(&self.repository.definitions)?;
-        validate_component_dependencies(&self.repository.components)?;
-        validate_facets(
-            &self.repository.facets,
-            &self.repository.components,
-            &self.repository.definitions,
-        )?;
-        validate_constraints(&self.repository.constraints, &self.repository.facets)
+    /// The ingested chunks, in `--source` order.
+    ///
+    /// ADR-0058's object compile needs what `emit_ir` reads internally — each
+    /// chunk's `package`, its content hash, and the config the IR chunk is
+    /// written from — and re-parsing the sources to get them would put a second
+    /// parse of every input on the path, with a second chance to disagree about
+    /// what a chunk says. Crate-internal: `SourceChunk` is not a public shape.
+    pub(crate) fn source_chunks(&self) -> &[SourceChunk] {
+        &self.chunks
     }
 
+    pub fn link_and_verify(&self) -> Result<()> {
+        self.link_and_verify_with(&self.interface_summaries())
+    }
+
+    /// One [`InterfaceSummary`] per chunk (ADR-0057 §D9). Built once per
+    /// compile and shared by `link_and_verify`, the emit, and the object
+    /// grouping, because building one walks every authored condition.
+    pub(crate) fn interface_summaries(&self) -> Vec<InterfaceSummary> {
+        self.chunks
+            .iter()
+            .map(|chunk| interface_summary::summarize(&chunk.config, &chunk.source_id))
+            .collect()
+    }
+
+    fn link_and_verify_with(&self, summaries: &[InterfaceSummary]) -> Result<()> {
+        verify_complete_model(&self.repository, summaries)
+    }
+
+    /// Verify this model and write its Compiled Model Package.
+    ///
+    /// The write goes through [`crate::link_emit::write_package`] — the linker's own
+    /// emit (ADR-0058 §D8). There is one writer, so a package produced from
+    /// `--source` chunks and one produced from objects are the same file set by
+    /// construction rather than by two code paths agreeing.
     pub fn emit_ir(&self, output_dir: impl AsRef<Path>) -> Result<ir::IrIndex> {
-        self.link_and_verify()?;
-
-        let output_dir = output_dir.as_ref();
-        std::fs::create_dir_all(output_dir).with_context(|| {
-            format!("Failed to create IR output dir '{}'", output_dir.display())
-        })?;
-
-        for chunk in &self.chunks {
-            let ir_chunk =
-                ir::IrChunk::from_config(&chunk.source_id, &chunk.chunk_hash, &chunk.config);
-            let filename = format!("chunk-{}.cfir", chunk.chunk_hash);
-            let path = output_dir.join(filename);
-            let file = std::fs::File::create(&path)
-                .with_context(|| format!("Failed to create IR chunk '{}'", path.display()))?;
-            let mut writer = std::io::BufWriter::new(file);
-            serde_json::to_writer(&mut writer, &ir_chunk)
-                .with_context(|| format!("Failed to write IR chunk '{}'", path.display()))?;
-        }
-
-        let index = build_ir_index(&self.chunks)?;
-        let index_path = output_dir.join("index.cfir.json");
-        let file = std::fs::File::create(&index_path)
-            .with_context(|| format!("Failed to create IR index '{}'", index_path.display()))?;
-        let mut writer = std::io::BufWriter::new(file);
-        serde_json::to_writer_pretty(&mut writer, &index)
-            .with_context(|| format!("Failed to write IR index '{}'", index_path.display()))?;
-
-        ir::verify_index_integrity(&index, output_dir)?;
-        let manifest = ir::CmpManifest::from_index(&index);
-        let manifest_path = output_dir.join(ir::CMP_DEFAULT_MANIFEST_FILENAME);
-        ir::write_cmp_manifest(&manifest_path, &manifest)?;
-
+        let summaries = self.interface_summaries();
+        self.link_and_verify_with(&summaries)?;
+        let chunks = crate::link_emit::link_chunks_of(self, &summaries)?;
+        let index = crate::link_emit::build_package_index(&chunks)?;
+        crate::link_emit::write_package(output_dir.as_ref(), &chunks, &index)?;
         Ok(index)
     }
+}
 
-    /// Emit the v2 multi-part `.ccm` artifact directory as a sibling of the
-    /// CMP package, under `<cmp_output_dir>/ccm` (configflux-9hi2).
-    ///
-    /// This is purely additive: it does not read, rewrite, or perturb any CMP
-    /// file, so the CMP package layout and its `model_hash` are byte-stable.
-    /// The artifact is bound to `model_hash` via `ConditionModel::
-    /// bound_model_hash`, which the solver later byte-compares against the CMP
-    /// `model_hash` on load (ADR-0005 §9). The `model_hash` passed here MUST be
-    /// the CMP package's `model_hash` (i.e. `IrIndex::config_hash`, which
-    /// `open_model` asserts equals `CmpManifest::model_hash`).
-    ///
-    /// `cluster_size` threads ADR-0012 §2 scope partitioning. `None` collapses
-    /// to a single partition (`usize::MAX`), preserving the FAMA/SPLOT-shape
-    /// single-partition v2 layout. Clauses are the model's component/override
-    /// `condition`s, harvested from the in-memory chunks (the same condition
-    /// strings the legacy `register_condition` selection path consumes).
-    ///
-    /// `budget` (configflux-9pjy.2 / ADR-0039) is the soft resource budget.
-    /// When `None`, this is byte-for-byte identical to the pre-budget path:
-    /// no memo cap is applied and `cluster_size` flows through unchanged.
-    /// When `Some`, `derive_knobs` maps it to an apply-memo cap (a
-    /// byte-neutral cache lever) and, if the projected unique table would
-    /// exceed the budget, a derived `cluster_size`. Per ADR-0012
-    /// Amendment 1 the explicit `cluster_size` argument **always wins**:
-    /// `effective = cluster_size.or(derived.cluster_size)`.
-    ///
-    /// `progress` (configflux-9pjy.3 / ADR-0039 §7) is an optional
-    /// compile-time progress tracker. When `Some`, it reports the
-    /// VarOrder → BddApplyLoop band to its sink as the .ccm is emitted;
-    /// the caller emits the terminal Serialize completion via
-    /// [`ProgressTracker::finish`]. Progress is a SEPARATE stream — it
-    /// never enters the artifact bytes (ADR-0005 Amendment 2), so a
-    /// `progress` of `None` (or a `NullSink`-backed tracker) is
-    /// byte-for-byte identical to today.
-    pub(crate) fn emit_ccm_sibling_with_progress(
-        &self,
-        cmp_output_dir: impl AsRef<Path>,
-        model_hash: &str,
-        cluster_size: Option<usize>,
-        budget: Option<&ResourceBudget>,
-        progress: Option<&mut ProgressTracker>,
-    ) -> Result<(std::path::PathBuf, EmitBudgetOutcome)> {
-        let ccm_dir = cmp_output_dir.as_ref().join("ccm");
-        let declared_facets = self.declared_facets();
-        let model = ConditionModel {
-            bound_model_hash: model_hash.to_string(),
-            clauses: self.collect_ccm_clauses(&declared_facets),
-            constraints: self.collect_ccm_constraints(),
-            cardinality: synthesize_facet_cardinality(&declared_facets),
+/// Every check that needs the WHOLE model, in the order the compile path has
+/// always run them (ADR-0057 §D9, ADR-0058 §D4).
+///
+/// A free function over a `Config` rather than a method, because `link`
+/// assembles its model from the linked objects' chunk files and holds no
+/// [`Compiler`]. Both callers reach the same rules through this one function,
+/// which is what makes "the linker cannot write a package `compile` would have
+/// rejected" true by construction rather than by two lists agreeing.
+///
+/// The order is not cosmetic. Catalogue SHAPE comes before any rule that reads
+/// a catalogue's entry roster, and the summary checks come before the facet and
+/// constraint checks that treat a binding as one of the declared facets.
+pub(crate) fn verify_complete_model(
+    repository: &Config,
+    summaries: &[InterfaceSummary],
+) -> Result<()> {
+    validate_definition_inheritance(&repository.definitions)?;
+    validate_component_dependencies(&repository.components)?;
+    // Catalogue SHAPE first: a binding's checks read a catalogue's entry
+    // roster, and a roster is only meaningful once the table itself is known to
+    // be well formed.
+    validate_catalogues(&repository.catalogues)?;
+    // configflux-2yiq: the parameter-side twin of the catalogue rule above. Both
+    // halves reject the same thing — an authored float the canonical JSON every
+    // hash preimage is built from cannot represent — so they sit together.
+    validate_parameter_values(&repository.definitions, &repository.components)?;
+    validate_link_summary(summaries)?;
+    // ADR-0057 §D3: from here down a binding is simply one of the declared
+    // facets. Passing the effective map — rather than teaching each validator
+    // about bindings — is what makes "nothing downstream special-cases a
+    // binding" hold: a condition naming an entry outside a binding's domain is
+    // E_FACET_VALUE_UNDECLARED for free, and a constraint may name a binding
+    // without `validate_constraints` changing at all.
+    let facets = effective_facets(repository);
+    validate_facets(&facets, &repository.components, &repository.definitions)?;
+    // ADR-0064 D2: a declared parameter-to-facet binding is checked against the
+    // same effective map, in the slot right after the facets it names are known
+    // to be well formed. `Scope::Complete` is what makes the whole-model
+    // one-handle-per-facet rule (D2.4) run here rather than being deferred.
+    validate_facet_bindings_scoped(&repository.components, &facets, Scope::Complete)?;
+    validate_constraints(&repository.constraints, &facets)
+}
+
+/// The authored facets plus the closed facet every binding IS (ADR-0057 §D3).
+/// The two namespaces share one id space, so the union is a plain insert with
+/// no collision to resolve — ingest already rejected one.
+fn effective_facets(repository: &Config) -> HashMap<String, Facet> {
+    let mut facets = repository.facets.clone();
+    facets.extend(interface_summary::binding_facets(
+        &repository.catalogues,
+        &repository.bindings,
+    ));
+    facets
+}
+
+/// The DECLARED facets of a linked model, from its merged summary alone
+/// (ADR-0058 §D4 stage 2).
+///
+/// The header-driven twin of what the compile path used to read off its chunks.
+/// Every declared facet, plus the closed facet each binding IS — projected here
+/// from the binding's catalogue roster rather than through
+/// [`interface_summary::binding_facets`], because a linker holds the roster and
+/// not the `Catalogue` it came from.
+///
+/// `doc` is dropped and `default` is carried only for bindings: the three
+/// consumers ([`ccm_clauses`], [`synthesize_facet_cardinality`],
+/// [`collect_facet_domains`]) read `values` and `open` and nothing else, so
+/// anything more would be a field no reader can observe.
+pub(crate) fn declared_facets_from_summary(
+    merged: &interface_summary::MergedSummary,
+) -> BTreeMap<String, schema::Facet> {
+    let mut declared: BTreeMap<String, schema::Facet> = BTreeMap::new();
+    for (name, values) in &merged.facet_domains {
+        declared.insert(
+            name.clone(),
+            schema::Facet {
+                values: values.clone(),
+                default: None,
+                open: merged.open_facets.contains(name),
+                doc: None,
+            },
+        );
+    }
+    // Bindings last, mirroring the `extend` the chunk-walking version ended
+    // with: a binding and a facet cannot share an id (ingest rejects it), so
+    // this overwrites nothing in practice and the order is a statement about
+    // which namespace is authoritative, not a tiebreak that fires.
+    for (id, link) in &merged.binding_links {
+        let Some(entries) = merged.catalogue_entries.get(&link.catalogue) else {
+            continue;
         };
+        declared.insert(
+            id.clone(),
+            schema::Facet {
+                values: entries.clone(),
+                default: link.default.clone(),
+                open: false,
+                doc: None,
+            },
+        );
+    }
+    declared
+}
 
-        // Derive internal knobs from the soft budget. With no budget,
-        // `memo_cap` stays `None` (byte-identical default apply memos) and
-        // no `cluster_size` is derived, so the explicit value flows
-        // through unchanged.
-        let (effective_cluster_size, memo_cap) = match budget {
-            Some(budget) => {
-                let hint = count_model_variables(&model);
-                let derived = derive_knobs(budget, Some(hint));
-                // ADR-0012 Amendment 1: explicit cluster_size always wins.
-                let effective = cluster_size.or(derived.cluster_size);
-                (effective, Some(derived.memo_cap))
-            }
-            None => (cluster_size, None),
+/// The `.ccm` clause channel: the symbol universe, and nothing asserted.
+///
+/// Pass 1 — the walk that gathers the raw selector strings in a stable,
+/// content-derived order — now lives in [`interface_summary::summarize`] and
+/// reaches here through the object headers, in the canonical order ADR-0058 §A2
+/// fixes: objects by unit name ascending, chunks by `chunk_hash` ascending,
+/// then definitions by id, components by id, override order. The caller owns
+/// that order; this function never re-sorts.
+///
+/// **No selector is asserted** (ADR-0054 §5.1). Every one of them — a
+/// component's activation `condition` and a parameter override's branch
+/// `condition` alike — is an *inclusion selector*, so it contributes its
+/// `(facet, value)` symbols and nothing else, via the same ADR-0047 tautology
+/// [`synthesize_symbol_introduction`] emits. The *authored* root conjuncts come
+/// from `constraints` ([`ccm_constraints`]).
+///
+/// That closes the configflux-9xxq defect class at the PRODUCER, not in the
+/// encoding: the emitter folds this list into the root like any other channel,
+/// so all that keeps a selector off it is this function emitting nothing but
+/// tautologies — pinned by example in `compiler_core_tests`.
+///
+/// Only conditions that parse under the typed condition grammar are included —
+/// exactly mirroring the legacy `register_condition` fall-through, where a
+/// condition that does not parse widens no facet domain and forms no group.
+/// This keeps the product compile from failing on a pass-through condition
+/// string the BDD grammar cannot represent. (A `constraints` entry that does
+/// not parse is the opposite: a hard ingest error in
+/// `link_verify::validate_constraints`, because a policy that cannot be
+/// understood must never be silently dropped.) De-duplication keeps an
+/// identical condition that appears on multiple entities from inflating the
+/// clause set (the BDD AND-fold is idempotent, so this is also a
+/// semantics-preserving normalization).
+pub(crate) fn ccm_clauses(
+    selectors: &[interface_summary::Clause],
+    declared: &BTreeMap<String, schema::Facet>,
+) -> Vec<String> {
+    // Keep first-seen, parseable, non-empty selectors only. Every survivor is
+    // replaced by one symbol-introducing tautology per `(facet, value)` pair it
+    // names, so its symbols still land while the AND-fold sees only `TRUE`
+    // (ADR-0054 §5.1).
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut clauses: Vec<String> = Vec::new();
+    for selector in selectors {
+        let trimmed = selector.condition.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(expr) = parse_condition_expr(trimmed) else {
+            continue;
         };
-
-        // configflux-9pjy.4 / ADR-0039 §5: convert the soft RSS target from
-        // MiB (the operator-facing unit on `ResourceBudget`) to KiB (the
-        // unit `proc_rss` samples and the in-crate apply loop's live shrink
-        // compares against). `None` ⇒ no RSS budget ⇒ no sampling, no
-        // shrink, byte-identical emission.
-        let rss_budget_kib = budget
-            .and_then(|b| b.max_rss_mb)
-            .map(|mb| mb.saturating_mul(1024));
-
-        let mut outcome = match (progress, effective_cluster_size, memo_cap) {
-            // A progress tracker is wired: route through the progress-aware
-            // entry point. The knob values still flow exactly as below
-            // (`usize::MAX` collapses to a single partition); only the
-            // observational progress stream is added — output bytes are
-            // unchanged (ADR-0005 Amendment 2).
-            (Some(tracker), cluster, cap) => emit_ccm_dir_with_progress(
-                &model,
-                &ccm_dir,
-                "facet-name-ascending",
-                "in-crate",
-                cluster.unwrap_or(usize::MAX),
-                cap,
-                rss_budget_kib,
-                tracker,
-            ),
-            // No progress, no partitioning override, no budget memo cap, no
-            // RSS budget: take the exact pre-budget single-partition path
-            // (byte-identical). Its outcome is the zeroed default.
-            (None, None, None) if rss_budget_kib.is_none() => {
-                emit_ccm_dir(&model, &ccm_dir).map(|()| EmitBudgetOutcome::default())
+        for clause in synthesize_selector_symbols(&expr) {
+            if seen.insert(clause.clone()) {
+                clauses.push(clause);
             }
-            // No progress, but an effective cluster size, a budget memo cap,
-            // an RSS budget, or any combination: go through the budget-aware
-            // entry point so the live shrink + advisory are exercised.
-            (None, cluster, cap) => emit_ccm_dir_with_budget(
-                &model,
-                &ccm_dir,
-                "facet-name-ascending",
-                "in-crate",
-                cluster.unwrap_or(usize::MAX),
-                cap,
-                rss_budget_kib,
-            ),
         }
-        .with_context(|| format!("Failed to emit .ccm artifact at '{}'", ccm_dir.display()))?;
-        // Record the effective cluster_size (the explicit-vs-derived
-        // precedence result) on the outcome so the advisory can name a
-        // concrete value, but only when a budget was actually in play —
-        // the unbudgeted path leaves the outcome zeroed.
-        if budget.is_some() {
-            outcome.effective_cluster_size = Some(effective_cluster_size.unwrap_or(usize::MAX));
-        }
-        Ok((ccm_dir, outcome))
     }
 
-    /// Harvest the model's `condition`s into the `ccm_emitter`-grammar clause
-    /// list. Walks every chunk's components and definitions in a stable,
-    /// content-derived order (component/definition id ascending, then override
-    /// order) so the emitted `.ccm` is reproducible byte-for-byte regardless of
-    /// the chunks' `HashMap` iteration order (ADR-0005 §10 G1).
-    ///
-    /// **No harvested `condition` is asserted** (ADR-0054 §5.1). Every one of
-    /// them — a component's activation `condition` and a parameter override's
-    /// branch `condition` alike — is an *inclusion selector*, so it contributes
-    /// its `(facet, value)` symbols and nothing else, via the same ADR-0047
-    /// tautology [`synthesize_symbol_introduction`] emits. The root conjuncts
-    /// come from the `constraints` namespace only
-    /// ([`Self::collect_ccm_constraints`]).
-    ///
-    /// This is the structural elimination of the configflux-9xxq defect class:
-    /// a selector has no syntactic path to the root, because this function has
-    /// no path from an authored condition string to an emitted clause that is
-    /// anything other than a tautology. `compiler_core_tests` pins that.
-    ///
-    /// Only conditions that parse under the typed condition grammar are
-    /// included — exactly mirroring the legacy `register_condition`
-    /// fall-through, where a condition that does not parse widens no facet
-    /// domain and forms no group. This keeps the product compile from failing
-    /// on a pass-through condition string the BDD grammar cannot represent.
-    /// (A `constraints` entry that does not parse is the opposite: a hard
-    /// ingest error in `link_verify::validate_constraints`, because a policy
-    /// that cannot be understood must never be silently dropped.)
-    /// De-duplication keeps an identical condition that appears on multiple
-    /// entities from inflating the clause set (the BDD AND-fold is idempotent,
-    /// so this is also a semantics-preserving normalization).
-    fn collect_ccm_clauses(&self, declared: &BTreeMap<String, &schema::Facet>) -> Vec<String> {
-        // Pass 1: gather every raw condition string in a stable,
-        // content-derived order (chunk order, then id ascending, then
-        // override order).
-        let mut raw: Vec<String> = Vec::new();
-        for chunk in &self.chunks {
-            // Definitions and components are stored in `HashMap`s; sort by id
-            // for a deterministic, seed-independent walk.
-            let mut definition_ids: Vec<&String> = chunk.config.definitions.keys().collect();
-            definition_ids.sort();
-            for id in definition_ids {
-                collect_parameter_conditions(&chunk.config.definitions[id], &mut raw);
-            }
+    // ADR-0047 §4, Amendment 1: append one symbol-introducing tautology per
+    // DECLARED facet value, AFTER all authored selector clauses, in
+    // facet-name-ascending order. This lands every declared value — including a
+    // default arm no condition names — into the symbol universe WITHOUT
+    // asserting any intra-facet constraint on the permissive BDD root. The
+    // ordering is the byte-stability commitment: deterministic, non-perturbing
+    // of the authored clauses, so `ccm_hash` is a pure function of (authored
+    // selectors, declared facets). A model that declares no facet appends
+    // nothing and is byte-identical to the pre-ADR path.
+    clauses.extend(synthesize_facet_clauses(declared));
+    clauses
+}
 
-            let mut component_ids: Vec<&String> = chunk.config.components.keys().collect();
-            component_ids.sort();
-            for id in component_ids {
-                let component = &chunk.config.components[id];
-                if let Some(condition) = component.condition.as_deref() {
-                    raw.push(condition.to_string());
-                }
-                let mut param_keys: Vec<&String> = component.params.keys().collect();
-                param_keys.sort();
-                for key in param_keys {
-                    collect_parameter_conditions(&component.params[key], &mut raw);
-                }
-            }
-        }
+/// The `.ccm` root conjuncts: the authored `constraints` namespace
+/// id-ascending, then the ADR-0057 §D4 lowered `derive` and `accepts`
+/// conjuncts (ADR-0054 §5.1).
+///
+/// The only producer of *authored* root conjuncts — not of root conjuncts as
+/// such ([`synthesize_facet_cardinality`]). Constraints are pack-global — no
+/// inheritance, no gap-fill, no merge — so the collapse is flat, and duplicate
+/// ids across chunks are rejected at ingest.
+///
+/// The lowered conjuncts carry the two reserved prefixes —
+/// `derive:<binding>:<source>=<value>` and `accepts:<component>.<slot>` — which
+/// an authored id can never spell, because a constraint id is snake_case and
+/// cannot contain `:`. Everything downstream reads them as ordinary roster
+/// entries: they get a `root_index`, they are folded into the BDD root, and
+/// `loader_api::unsat_attribution` names them in an unsat core exactly as it
+/// names an authored policy.
+///
+/// They are appended AFTER the authored block rather than merged into it: §D4
+/// fixes the fold order as authored, then derive, then accepts, and id-sorting
+/// the union would interleave them (`accepts:` sorts before an authored
+/// `alpha_rule`). A model that declares neither appends nothing and its
+/// `ccm_hash` does not move.
+///
+/// Conditions are passed through VERBATIM rather than re-serialized: the text
+/// is what the §5.4 manifest roster shows the operator, so it must stay the
+/// string the author wrote. Every constraint is known to parse by this point
+/// (`link_verify::validate_constraints` makes a parse failure a hard ingest
+/// error), so unlike a selector there is no skip-on-unparseable path here — a
+/// policy is never silently dropped.
+pub(crate) fn ccm_constraints(merged: &interface_summary::MergedSummary) -> Vec<(String, String)> {
+    let by_id: BTreeMap<String, String> = merged
+        .clauses
+        .iter()
+        .map(|clause| (clause.id.clone(), clause.condition.clone()))
+        .collect();
+    let mut out: Vec<(String, String)> = by_id.into_iter().collect();
+    out.extend(
+        crate::lowering::lowered_root_conjuncts_from_summary(
+            &merged.binding_links,
+            &merged.requirements,
+        )
+        .into_iter()
+        .map(|lowered| (lowered.id, lowered.condition)),
+    );
+    out
+}
 
-        // Pass 2: keep first-seen, parseable, non-empty conditions only. A
-        // condition that does not parse widens no facet and forms no clause,
-        // mirroring the legacy `register_condition` fall-through.
-        //
-        // Every surviving condition is replaced by one symbol-introducing
-        // tautology per `(facet, value)` pair it names, so its symbols still
-        // land while the AND-fold sees only `TRUE` (ADR-0054 §5.1).
-        let mut seen: BTreeSet<String> = BTreeSet::new();
-        let mut clauses: Vec<String> = Vec::new();
-        for condition in raw {
-            let trimmed = condition.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            let Ok(expr) = parse_condition_expr(trimmed) else {
-                continue;
-            };
-            for clause in synthesize_selector_symbols(&expr) {
-                if seen.insert(clause.clone()) {
-                    clauses.push(clause);
-                }
-            }
-        }
-
-        // Pass 3 (ADR-0047 §4, Amendment 1): append one symbol-introducing
-        // tautology per DECLARED facet value, AFTER all authored condition
-        // clauses, in facet-name-ascending order. This lands every declared
-        // value — including a default arm no condition names — into the symbol
-        // universe WITHOUT asserting any intra-facet constraint on the
-        // permissive BDD root. The ordering is the byte-stability commitment:
-        // deterministic, non-perturbing of the authored clauses, so `ccm_hash`
-        // is a pure function of (authored conditions, declared facets). A model
-        // that declares no facet appends nothing and is byte-identical to the
-        // pre-ADR path. Duplicate facet keys across chunks are rejected at
-        // ingest (`E_INGEST_DUPLICATE_FACET`), so the `BTreeMap` collapse below
-        // never drops a distinct declaration.
-        clauses.extend(synthesize_facet_clauses(declared));
-        clauses
-    }
-
-    /// The pack's DECLARED facets, collapsed across chunks in name-ascending
-    /// order. Duplicate facet keys across chunks are rejected at ingest
-    /// (`E_INGEST_DUPLICATE_FACET`), so the `BTreeMap` collapse never drops a
-    /// distinct declaration.
-    ///
-    /// Shared by the symbol-introduction pass (ADR-0047 §4 Amendment 1) and the
-    /// cardinality synthesis (ADR-0054 §5.2) so both see exactly one notion of
-    /// "declared".
-    fn declared_facets(&self) -> BTreeMap<String, &schema::Facet> {
-        let mut declared: BTreeMap<String, &schema::Facet> = BTreeMap::new();
-        for chunk in &self.chunks {
-            for (name, facet) in &chunk.config.facets {
-                declared.insert(name.clone(), facet);
-            }
-        }
-        declared
-    }
-
-    /// Harvest the pack's `constraints` namespace into the emitter's root
-    /// conjuncts: `(constraint_id, condition_text)` in id-ascending order
-    /// (ADR-0054 §5.1).
-    ///
-    /// This is the ONLY producer of root conjuncts. Constraints are pack-global
-    /// — no inheritance, no gap-fill, no merge — so the walk is a flat collapse
-    /// across chunks, and duplicate ids across chunks are rejected at ingest.
-    ///
-    /// Conditions are passed through VERBATIM rather than re-serialized: the
-    /// text is what the §5.4 manifest roster shows the operator, so it must
-    /// stay the string the author wrote. Every constraint is known to parse by
-    /// this point (`link_verify::validate_constraints` makes a parse failure a
-    /// hard ingest error), so unlike a selector condition there is no
-    /// skip-on-unparseable path here — a policy is never silently dropped.
-    fn collect_ccm_constraints(&self) -> Vec<(String, String)> {
-        let mut by_id: BTreeMap<String, String> = BTreeMap::new();
-        for chunk in &self.chunks {
-            for (id, constraint) in &chunk.config.constraints {
-                by_id.insert(id.clone(), constraint.condition.clone());
-            }
-        }
-        by_id.into_iter().collect()
+/// The constraint model a linked package's `.ccm` is emitted from, built from
+/// the merged object headers alone (ADR-0058 §D4 stage 2).
+///
+/// Every field is a function of the merged summary and `model_hash`, so
+/// `compile` and `link` cannot build a different model for one set of objects —
+/// they call this.
+pub(crate) fn condition_model_from_summary(
+    model_hash: &str,
+    merged: &interface_summary::MergedSummary,
+) -> ConditionModel {
+    let declared = declared_facets_from_summary(merged);
+    ConditionModel {
+        bound_model_hash: model_hash.to_string(),
+        clauses: ccm_clauses(&merged.selectors, &declared),
+        constraints: ccm_constraints(merged),
+        cardinality: synthesize_facet_cardinality(&declared),
+        facet_domains: collect_facet_domains(&declared),
     }
 }
 
@@ -642,7 +688,7 @@ fn synthesize_selector_symbols(expr: &ConditionExpr) -> Vec<String> {
 /// ([`synthesize_facet_cardinality`]) and deliberately does not ride on this
 /// pass: this one must stay a pure no-op on the BDD root so a model that
 /// declares a facet but no policy keeps a permissive root.
-fn synthesize_facet_clauses(facets: &BTreeMap<String, &schema::Facet>) -> Vec<String> {
+fn synthesize_facet_clauses(facets: &BTreeMap<String, schema::Facet>) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for (name, facet) in facets {
         for value in &facet.values {
@@ -700,7 +746,7 @@ fn synthesize_facet_clauses(facets: &BTreeMap<String, &schema::Facet>) -> Vec<St
 /// keeps modelling only real `(tag, value)` pairs and the byte-layout contract
 /// is untouched. The emitter's advisory `EXACTLY_ONE_OF_PAIRWISE_AMO_BOUND`
 /// (16, a stderr warning and never a build failure) applies unchanged.
-fn synthesize_facet_cardinality(facets: &BTreeMap<String, &schema::Facet>) -> Vec<String> {
+fn synthesize_facet_cardinality(facets: &BTreeMap<String, schema::Facet>) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for (name, facet) in facets {
         if facet.open {
@@ -729,6 +775,29 @@ fn synthesize_facet_cardinality(facets: &BTreeMap<String, &schema::Facet>) -> Ve
     out
 }
 
+/// Project the declared facets down to the value domains the emitter needs to
+/// expand a facet-to-facet comparison (configflux-secb.2 / ADR-0057 §D5).
+///
+/// Declared ORDER is preserved per facet, because that order is the pinned
+/// AND-fold order of the expansion and therefore determines emitted bytes
+/// (ADR-0006 §5). Both closed and open facets are included: ADR-0057 §D5
+/// requires only that both operands be DECLARED. For an open facet the
+/// equivalence ranges over its declared values, which is what the author
+/// wrote down; a value outside that set is not something the model can reason
+/// about here.
+///
+/// Deliberately not `facet.open`-aware and deliberately not filtered: a facet
+/// missing from this map is an internal error in the expansion, not a silent
+/// no-op, so the map must contain exactly what `declared_facets` does.
+fn collect_facet_domains(
+    facets: &BTreeMap<String, schema::Facet>,
+) -> crate::conditions::FacetDomains {
+    facets
+        .iter()
+        .map(|(name, facet)| (name.clone(), facet.values.clone()))
+        .collect()
+}
+
 /// A symbol-introducing tautology `f == 'v' || f != 'v'` for one declared
 /// value. `compile_expr` lowers `x ∨ ¬x` to the canonical TRUE terminal, so the
 /// AND-fold into the BDD root is a no-op; the `var_order` walk collects the
@@ -743,13 +812,93 @@ fn synthesize_symbol_introduction(name: &str, value: &str) -> String {
     )
 }
 
+/// The first `(facet, value)` pair whose symbol-introduction clause the
+/// condition grammar cannot parse — in ascending facet-name order and declared
+/// -value order within a facet — or `None` when every pair parses.
+///
+/// A BACKSTOP since ADR-0063, and no longer the guard. The guard is the ingest
+/// charset rule in [`crate::link_verify`] (`is_snake_id` / `is_symbol_token`),
+/// which `verify_complete_model`, `verify_ir_dir` and the object compile all
+/// reach through `validate_facets` and `validate_catalogues` — so a DECLARED
+/// facet key or value that is not a symbol token is refused long before the
+/// emitter, by `verify` and `compile` alike.
+///
+/// configflux-mrm6 is why that rule exists and why it could not live here.
+/// This is a PARSEABILITY oracle, not a validity one, and it is NOT a charset
+/// rule: it reports the pair whose clause the grammar REJECTS and says nothing
+/// about a pair whose clause the grammar ACCEPTS. A key or a value crafted to
+/// close its own literal and continue with valid grammar parsed, so this
+/// returned `None` for it and the model compiled — with a phantom value in a
+/// closed facet's domain, or a declared value silently truncated. Do not
+/// describe this function, or the diagnostic built from it, as a guard on what
+/// a facet may contain.
+///
+/// What still reaches it is not a second class of value. These domains are
+/// `ConditionModel::facet_domains`, which [`collect_facet_domains`] builds from
+/// [`declared_facets_from_summary`] alone — the declared facets, plus the closed
+/// facet each binding IS. No condition-inferred value lands here: the linker
+/// never reads `imports.facets` into a domain (that map is header information,
+/// not a link obligation), and the widening that does infer one —
+/// `loader_api::shared_ops::register_facet_domains` — runs on the consumption
+/// side over a `SelectionConstraintModel`, long after this.
+///
+/// So every pair here has passed the ingest rule, but by two different routes.
+/// `compile --source` verifies the repository before the emit and then builds
+/// its headers in memory from those same chunks, so the rule covers these
+/// domains exactly. The link path verifies the chunk BODIES it loaded, and
+/// these domains come from the on-disk object HEADERS merged before that — a
+/// gap while the only header-versus-body check compared id SETS, and closed by
+/// ADR-0063 Amendment 1 §2: `link_load::check_header_matches_bodies` rebuilds
+/// each header from the bodies and refuses any difference, value domains and
+/// entry rosters included. Headers equal bodies, and bodies are validated, so
+/// the two routes now agree.
+///
+/// This stays anyway, as defence in depth. It is the last thing between a
+/// domain and the emitted clause text, it costs one parse per declared pair,
+/// and it is the only check in the chain that does not depend on the ingest
+/// rule and the header rebuild both being correct. Nothing here should be read
+/// as a claim that it would catch what they let through — it would not; it
+/// catches only what the grammar rejects.
+///
+/// The introduction is a faithful proxy for the whole synthesized set: the
+/// cardinality conjuncts are built from the same two predicates over the same
+/// pair, so a pair whose introduction parses yields synthesized clauses that
+/// parse too.
+pub(crate) fn unrepresentable_facet_symbol(
+    domains: &crate::conditions::FacetDomains,
+) -> Option<(&str, &str)> {
+    domains.iter().find_map(|(name, values)| {
+        values
+            .iter()
+            .find(|value| {
+                parse_condition_expr(&synthesize_symbol_introduction(name, value)).is_err()
+            })
+            .map(|value| (name.as_str(), value.as_str()))
+    })
+}
+
 /// A synthesized equality predicate `f == '<value>'`. Facet values are
 /// effectively identifiers; the condition grammar's quoted literal has no
 /// escape syntax, so a value containing the chosen quote is unrepresentable.
 /// Prefer single quotes (the authored convention) and fall back to double
-/// quotes when the value itself contains a single quote — an authoring
-/// pathology that the CUE/Rust ingest layer guards upstream.
-fn facet_eq_predicate(name: &str, value: &str) -> String {
+/// quotes when the value itself contains a single quote.
+///
+/// The fallback was never a defence, and since ADR-0063 it is unreachable for
+/// a DECLARED value: `link_verify::is_symbol_token` refuses a facet value
+/// holding a quote of either kind at ingest, and `is_snake_id` does the same
+/// for the keys this interpolates BARE.
+///
+/// That is where the guard had to go, because it cannot live here. Nothing in
+/// this function quotes or escapes either argument — `name` is interpolated
+/// bare and the quote character is picked by a `contains` test over `value` —
+/// and the grammar offers nothing to escape INTO. configflux-mrm6 measured
+/// what that cost: a name or a value crafted to close its own literal
+/// continued into the surrounding clause as valid grammar, parsed, and
+/// compiled to a model carrying a phantom value or a truncated one. The
+/// fallback stays for a value that reached here without passing that rule (see
+/// [`unrepresentable_facet_symbol`]), and configflux-7xsy is why the refusal it
+/// backstops is reported as a model fault rather than as a failed write.
+pub(crate) fn facet_eq_predicate(name: &str, value: &str) -> String {
     if value.contains('\'') {
         format!("{name} == \"{value}\"")
     } else {
@@ -757,28 +906,11 @@ fn facet_eq_predicate(name: &str, value: &str) -> String {
     }
 }
 
-fn facet_ne_predicate(name: &str, value: &str) -> String {
+pub(crate) fn facet_ne_predicate(name: &str, value: &str) -> String {
     if value.contains('\'') {
         format!("{name} != \"{value}\"")
     } else {
         format!("{name} != '{value}'")
-    }
-}
-
-/// Recursively collect the `condition` strings from a parameter's override
-/// chain into `out`, in override order then nested-override order. Mirrors the
-/// legacy `register_parameter_conditions` traversal so the product `.ccm`
-/// reflects exactly the conditions the selection model already understood.
-/// Harvest a parameter's override-chain `condition`s, in override order,
-/// recursing into nested payloads.
-///
-/// Every condition on an override block is an inclusion selector: it selects
-/// which value the override contributes, and asserts nothing about which models
-/// are valid (configflux-9xxq / ADR-0054 §5.1).
-fn collect_parameter_conditions(parameter: &Parameter, out: &mut Vec<String>) {
-    for override_block in &parameter.overrides {
-        out.push(override_block.condition.clone());
-        collect_parameter_conditions(override_block.payload.as_ref(), out);
     }
 }
 
@@ -793,10 +925,25 @@ pub fn verify_ir_dir(output_dir: impl AsRef<Path>) -> Result<()> {
     let mut artifacts: HashMap<String, schema::Artifact> = HashMap::new();
     let mut facets: HashMap<String, schema::Facet> = HashMap::new();
     let mut constraints: HashMap<String, schema::Constraint> = HashMap::new();
+    let mut catalogues: HashMap<String, schema::Catalogue> = HashMap::new();
+    let mut bindings: HashMap<String, schema::Binding> = HashMap::new();
+    // ADR-0057 §D9: the re-verification path runs the SAME whole-model checks
+    // over the SAME types as the compile path, so a package that only
+    // `verify_ir_dir` ever sees cannot slip past a rule the compiler enforces.
+    //
+    // That parity is maintained BY HAND. The list at the bottom of this function
+    // is a second spelling of `verify_complete_model`'s, over maps read back
+    // from chunk files rather than over an authored `Config`, so a rule added
+    // there has to be added here too, in the same slot. configflux-2yiq is what
+    // it costs when one is not: the catalogue half of the finiteness rule
+    // arrived here for free inside `validate_catalogues` and the parameter half
+    // did not, leaving this comment claiming a coverage the code lacked.
+    let mut summaries: Vec<crate::interface_summary::InterfaceSummary> = Vec::new();
 
     for chunk_ref in &index.chunks {
         let chunk_path = output_dir.join(format!("chunk-{}.cfir", chunk_ref.chunk_hash));
         let chunk = ir::load_chunk(&chunk_path)?;
+        summaries.push(crate::interface_summary::summarize_ir_chunk(&chunk));
 
         for (id, def) in chunk.definitions {
             if definitions.insert(id.clone(), def).is_some() {
@@ -823,11 +970,41 @@ pub fn verify_ir_dir(output_dir: impl AsRef<Path>) -> Result<()> {
                 bail!("Duplicate constraint '{}' appears across chunks", id);
             }
         }
+        for (id, catalogue) in chunk.catalogues {
+            if catalogues.insert(id.clone(), catalogue).is_some() {
+                bail!("Catalogue '{}' is declared in more than one chunk", id);
+            }
+        }
+        for (id, binding) in chunk.bindings {
+            if bindings.insert(id.clone(), binding).is_some() {
+                bail!("Binding '{}' is declared in more than one chunk", id);
+            }
+        }
     }
 
     validate_definition_inheritance(&definitions)?;
     validate_component_dependencies(&components)?;
+    validate_catalogues(&catalogues)?;
+    // configflux-2yiq: the parameter half of the finiteness rule, in the slot
+    // `verify_complete_model` runs it, so this list now matches that one check
+    // for check and order for order.
+    //
+    // Defense in depth rather than a live path: `ir::load_chunk` is
+    // `serde_json::from_slice`, JSON has no non-finite literal, and an
+    // overflowing one is refused as `number out of range` before a `Value` is
+    // built — so nothing this function can be handed today reaches the rule.
+    // That guard belongs to the decoder rather than to this contract, and this
+    // function is what a caller applies to a package another producer wrote.
+    validate_parameter_values(&definitions, &components)?;
+    validate_link_summary(&summaries)?;
+    // ADR-0057 §D3: a binding is one of the declared facets from here down,
+    // exactly as in `Compiler::link_and_verify_with`.
+    facets.extend(interface_summary::binding_facets(&catalogues, &bindings));
     validate_facets(&facets, &components, &definitions)?;
+    // ADR-0063 D4's parity rule: the same slot in this list as in
+    // `verify_complete_model`, so the linker cannot write a package `compile`
+    // would have rejected (ADR-0064 D2).
+    validate_facet_bindings_scoped(&components, &facets, Scope::Complete)?;
     validate_constraints(&constraints, &facets)?;
 
     Ok(())

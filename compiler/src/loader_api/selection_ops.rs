@@ -109,6 +109,64 @@ pub fn compute_selection_state_hash(state: &SelectionState) -> Result<String> {
     Ok(sha256_hex(&bytes))
 }
 
+/// Whether `selection_state` satisfies every integrity binding the selection
+/// and resolve operations require of it, over this handle and scope.
+///
+/// This is the SAME `validate_selection_state` every operation in this module
+/// already runs first, exposed for one purpose (configflux-q50t): a composition
+/// wrapper that adjudicates a request itself must be able to ask whether the
+/// state is coherent BEFORE it starts, so it can hand an incoherent one back to
+/// the operation that owns the canonical `E_SELECTION_STATE_INVALID` envelope.
+/// Without it `session_compose::apply` composed its own OK answer over a state
+/// `apply_selection` refuses — the whole `SelectionState` is caller-supplied at
+/// the SDK seam, so nothing else stood between the JSON and the solver.
+///
+/// Deliberately a PREDICATE and not the `Diagnostic`. A caller holding the
+/// diagnostic could render its own envelope, which is exactly the divergence
+/// this exists to close; a `bool` leaves delegation as the only way to answer.
+/// The one implementation stays private, so the two paths cannot drift.
+pub fn selection_state_is_valid(
+    model_handle: &ModelHandle,
+    scope: &str,
+    selection_state: &SelectionState,
+) -> bool {
+    validate_selection_state(model_handle, scope, selection_state).is_ok()
+}
+
+/// Whether every assignment `selection_state` already carries is one the MODEL
+/// admits — the companion to [`selection_state_is_valid`], for the check that
+/// one deliberately does not make (ADR-0030 Amendment 2 Rule 1,
+/// configflux-eclx).
+///
+/// `selection_state_is_valid` answers "is this state internally coherent and
+/// sealed against this model"; six integrity bindings, none of them a model
+/// check. This answers "does the model admit what it says" — the facet must
+/// exist and the value must be in its domain, with a closed facet's context
+/// tags held to the values the author declared. A state can pass all six
+/// bindings and still name a facet the model has never heard of.
+///
+/// Exposed for the same reason and in the same shape: `session_compose`
+/// adjudicates `select`, `options` and `resolve` itself once the state is in
+/// hand, so it must be able to ask BEFORE it builds a session — a session
+/// silently skips an assignment the `.ccm` cannot apply, so by the time the
+/// solver has answered, the inadmissible entry has already vanished from the
+/// deployment being reasoned about.
+///
+/// Deliberately a PREDICATE and not the diagnostics. A caller holding them
+/// could render its own envelope, which is the divergence this exists to close;
+/// a `bool` leaves delegation as the only way to answer. A model that will not
+/// load is `false` for the same reason: the delegated operation renders the
+/// canonical `E_LOADER_INDEX_INVALID` (or `E_RESOLVE_MODEL_INVALID`) itself.
+pub fn selection_state_is_admissible(
+    model_handle: &ModelHandle,
+    selection_state: &SelectionState,
+) -> bool {
+    match load_selection_constraint_model(model_handle) {
+        Ok(model) => screen_selection_assignments(&model, selection_state).is_empty(),
+        Err(_) => false,
+    }
+}
+
 /// List every selection facet the model exposes, in sorted order.
 ///
 /// The facet universe is exactly the set `get_selection_options`/`apply_selection`
@@ -205,6 +263,22 @@ pub fn get_selection_options(request: GetSelectionOptionsRequest) -> GetSelectio
             );
         }
     };
+
+    // ADR-0030 Amendment 2 Rule 1: the state's OWN assignments, screened
+    // against the model before anything is enumerated over them. An error
+    // envelope carries an empty option list, which is the point — the previous
+    // behavior published options computed over a deployment naming a facet or a
+    // value this model does not have.
+    let state_rejections = screen_selection_assignments(&model, &request.selection_state);
+    if !state_rejections.is_empty() {
+        return selection_options_failed(
+            model_hash,
+            scope,
+            facet,
+            selection_state_hash,
+            state_rejections,
+        );
+    }
 
     let domain = match facet_domain(&model, &assignments, &request.facet) {
         Some(domain) => domain,
@@ -333,6 +407,52 @@ pub fn apply_selection(request: ApplySelectionRequest) -> ApplySelectionResult {
         Err(diagnostic) => return apply_selection_failed(model_hash, scope, vec![diagnostic]),
     };
 
+    // ADR-0030 Amendment 2 Rule 1: the state's OWN assignments get the same
+    // screen the delta gets below, and they get it BEFORE the delta is
+    // adjudicated — a state the model cannot admit is not a request to decide,
+    // so the answer would be about a deployment that does not exist, whatever
+    // the delta says.
+    //
+    // "Before the delta is adjudicated" means before the three arms below as
+    // well, not merely before the domain lookup. Each of them answers the delta
+    // from the STATE alone: a delta repeating a choice the state already holds
+    // is idempotent and used to hand the state straight back with `status: ok`,
+    // and a delta contradicting a context tag or re-deciding a chosen facet was
+    // answered as a conflict about the delta. All three ran ahead of this load,
+    // so an inadmissible state reached them unscreened and the surface answered
+    // over it — `session_compose::apply` cannot compensate either, because its
+    // pre-screen disjunction short-circuits on `choices.contains_key` and
+    // delegates here. This is now the position `get_selection_options` and
+    // `explain_rejection` already put the load in: immediately after the
+    // integrity check, ahead of everything that adjudicates.
+    //
+    // A model that will not load therefore refuses those three arms too, rather
+    // than answering them from the state. That is the same fail-closed rule the
+    // rest of this operation already follows: nothing about a selection can be
+    // decided over a package the loader cannot read.
+    let model = match load_selection_constraint_model(&request.model_handle) {
+        Ok(model) => model,
+        Err(err) => {
+            return apply_selection_failed(
+                model_hash,
+                scope,
+                vec![Diagnostic {
+                    code: E_LOADER_INDEX_INVALID.to_string(),
+                    severity: DiagnosticSeverity::Error,
+                    message: err.to_string(),
+                    source_id: Some(request.model_handle.index_ref.clone()),
+                    entity_path: None,
+                    hint: Some("Re-open a valid CMP model handle before selection".to_string()),
+                }],
+            );
+        }
+    };
+
+    let state_rejections = screen_selection_assignments(&model, &request.selection_state);
+    if !state_rejections.is_empty() {
+        return apply_selection_failed(model_hash, scope, state_rejections);
+    }
+
     if let Some(existing) = request
         .selection_state
         .context_tags
@@ -395,24 +515,6 @@ pub fn apply_selection(request: ApplySelectionRequest) -> ApplySelectionResult {
             )],
         );
     }
-
-    let model = match load_selection_constraint_model(&request.model_handle) {
-        Ok(model) => model,
-        Err(err) => {
-            return apply_selection_failed(
-                model_hash,
-                scope,
-                vec![Diagnostic {
-                    code: E_LOADER_INDEX_INVALID.to_string(),
-                    severity: DiagnosticSeverity::Error,
-                    message: err.to_string(),
-                    source_id: Some(request.model_handle.index_ref),
-                    entity_path: None,
-                    hint: Some("Re-open a valid CMP model handle before selection".to_string()),
-                }],
-            );
-        }
-    };
 
     let domain = match model.facet_domains.get(&request.selection_delta.facet) {
         Some(domain) => domain,
@@ -609,6 +711,30 @@ pub fn explain_rejection(request: ExplainRejectionRequest) -> ExplainRejectionRe
             );
         }
     };
+
+    // ADR-0030 Amendment 2 Rule 1. `explain_rejection_failed` carries ONE
+    // `RejectionReason`, so the FIRST diagnostic is the one rendered — the same
+    // choice the `validate_selection_state` arm above makes, and for the same
+    // reason: this envelope has room for one refusal and the first is the
+    // stable, deterministic pick.
+    if let Some(first) = screen_selection_assignments(&model, &request.selection_state)
+        .into_iter()
+        .next()
+    {
+        return explain_rejection_failed(
+            model_hash,
+            scope,
+            facet,
+            option,
+            RejectionReason {
+                code: first.code,
+                message: first.message,
+                blocking_choices: BTreeMap::new(),
+                hint: first.hint,
+                unsat_core: None,
+            },
+        );
+    }
 
     let reason = classify_rejection_reason(
         &model,

@@ -52,4 +52,10 @@ chunk: #Config & {
 		power_rating: {values: ["standard", "high"], default: "standard", doc: "Power class; high raises the current limit and enables the safety monitor."}
 		encoder_type: {values: ["incremental", "absolute"], default: "incremental", doc: "Encoder feedback; absolute selects the absolute encoder driver."}
 	}
+	constraints: {
+		high_power_requires_absolute_encoder: {
+			condition: "power_rating != 'high' || encoder_type != 'incremental'"
+			doc:       "A high-power drive needs absolute position feedback."
+		}
+	}
 }

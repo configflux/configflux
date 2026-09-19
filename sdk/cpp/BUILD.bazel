@@ -1,5 +1,7 @@
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_cc//cc:cc_test.bzl", "cc_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -93,6 +95,55 @@ cc_test(
     ],
 )
 
+# The C++ SDK against the REAL runtime (ADR-0061 D3, configflux-x5gb.8).
+#
+# runtime_sdk_core_linked_abi_test above links the same static library but only
+# reaches the fail-closed open; every happy-path SDK test runs against a test
+# double. This pair closes that gap: the driver is the README's "Integration
+# Example" as a real program, and the sh_test produces the snapshot it opens by
+# running the real compiler and interpreter binaries first.
+#
+# The driver is a cc_binary rather than a cc_test because its input is a
+# resolved snapshot that only the product binaries can produce -- so the shell
+# test owns the pipeline and the assertions, and the driver owns nothing but
+# the ABI calls.
+cc_binary(
+    name = "runtime_session_e2e_driver",
+    testonly = True,
+    srcs = ["tests/runtime_session_e2e_driver.cc"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":runtime_sdk_core",
+        "//runtime:runtime_c_abi_static",
+    ],
+)
+
+sh_test(
+    name = "runtime_sdk_linked_abi_e2e_test",
+    size = "small",
+    timeout = "short",
+    srcs = ["tests/runtime_sdk_linked_abi_e2e_test.sh"],
+    data = [
+        ":runtime_session_e2e_driver",
+        "//compiler:compiler",
+        "//examples:03-motor-controller/00_definitions.json",
+        "//examples:03-motor-controller/10_components.json",
+        "//interpreter:interpreter",
+    ],
+    env = {
+        "COMPILER_RLOCATION": "$(rootpath //compiler:compiler)",
+        "COMPONENTS_RLOCATION": "$(rootpath //examples:03-motor-controller/10_components.json)",
+        "DEFS_RLOCATION": "$(rootpath //examples:03-motor-controller/00_definitions.json)",
+        "DRIVER_RLOCATION": "$(rootpath :runtime_session_e2e_driver)",
+        "INTERPRETER_RLOCATION": "$(rootpath //interpreter:interpreter)",
+    },
+    tags = [
+        "ci",
+        "owner:sdk",
+        "sdk",
+    ],
+)
+
 filegroup(
     name = "docs",
     srcs = ["README.md"],
@@ -103,5 +154,23 @@ filegroup(
     srcs = glob(
         ["**"],
         exclude = ["BUILD.bazel"],
+    ),
+)
+
+# configflux-ulbg: the shell/python sources //tools:schema_version_lint_test
+# scans for stale product `schema_version` literals. Bazel globs stop at package
+# boundaries, so each owning package has to hand its own scripts over; the test
+# cross-checks the union against tools/publishignore_manifest.txt and fails when
+# a package is missing rather than skipping it in silence.
+filegroup(
+    name = "schema_version_scan_sources",
+    srcs = glob(
+        [
+            "**/*.py",
+            "**/*.sh",
+        ],
+        # sdk/cpp has no python and validation has no shell; a package holding
+        # only one of the two kinds is normal and must not fail analysis.
+        allow_empty = True,
     ),
 )

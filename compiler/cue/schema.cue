@@ -6,8 +6,9 @@
 // overrides, cardinality, and late-binding (ADR 0021 decision 1).
 //
 // Each authored chunk is a `#Config` (package + version + any of
-// definitions/components/artifacts). `condition` strings and `overrides` blocks
-// are opaque pass-through data here — CUE does not interpret them.
+// definitions/components/artifacts/facets/constraints/catalogues/bindings).
+// `condition` strings and `overrides` blocks are opaque pass-through data here
+// — CUE does not interpret them.
 //
 // Recursion note (ADR 0021 decision 7): `#ConditionalBlock` is a `#Parameter`
 // plus a required `condition`. A *closed* `#Parameter` rejects the extra field
@@ -57,6 +58,7 @@ _paramFields: {
 	unit?:      string
 	doc?:       string
 	value?:     #Value
+	facet?:     #snakeId
 	lifecycle?: #Lifecycle
 	safety?:    #SafetyLevel
 	access?:    #Role
@@ -67,8 +69,13 @@ _paramFields: {
 
 #Parameter: close(_paramFields)
 
+// A binding is a property of the parameter, not of a variant of it, so a
+// conditional block may not declare one (ADR-0064 D1, the `#Definition`/`value`
+// precedent above). Rust refuses the same thing on the JSON-direct path, where
+// no CUE is evaluated (`link_verify::validate_facet_bindings_scoped`).
 #ConditionalBlock: close(_paramFields & {
 	condition!: string
+	facet?:     _|_
 })
 
 // A definition is a valueless #Parameter (ADR-0027 decision 3). Definitions
@@ -82,12 +89,34 @@ _paramFields: {
 	value?: _|_
 })
 
+// What one component NEEDS from the model's bindings, in one slot
+// (ADR-0057 §D4). Two authored forms: the bare binding id (every entry is
+// acceptable) and the explicit form that narrows the binding to the entries
+// this component `accepts`.
+//
+// CUE owns the SHAPE — the binding id is a #snakeId, `accepts` is a non-empty
+// list of #snakeId, and the explicit form is closed so a typo is a "field not
+// allowed" error. Everything that must look ACROSS namespaces is Rust's, in
+// `link_verify::validate_requirements`: that the binding is declared, that each
+// accepted entry is in the binding's catalogue, that `accepts` has no
+// duplicates, and that the intersection of every `accepts` list naming one
+// binding is non-empty (`E_REQUIRES_INVALID`, `E_BINDING_NO_ACCEPTABLE_ENTRY`).
+#Requirement: #snakeId | close({
+	binding!: #snakeId
+	accepts?: [#snakeId, ...#snakeId]
+})
+
 #Component: close({
 	type?:      string
 	condition?: string
 	// depends_on entries are component references; validate_snake_case_ids
 	// (ingest_merge.rs:71-73) checks each dep, so the element type is #snakeId.
 	depends_on?: [...#snakeId]
+	// ADR-0057 §D4. Slot keys are authored ids, so they carry #snakeId like
+	// every other authored key. A requirement is NOT a depends_on edge: it names
+	// a shared choice, not a component, and does not enter the dependency
+	// closure.
+	requires?: close({[#snakeId]: #Requirement})
 	// component param KEYS are snake_case-checked (ingest_merge.rs:74-76); their
 	// VALUES are full #Parameter (value-bearing — the using param authors value).
 	params?: close({[#snakeId]: #Parameter})
@@ -135,6 +164,54 @@ _paramFields: {
 	doc?:       string
 })
 
+// A typed catalogue: a table of named entries, each supplying every declared
+// field with a value of the declared type (ADR-0057 §D2). The physical
+// containers a plant uses, the firmware modes a device supports, the motor
+// variants a line can be built from.
+//
+// CUE checks the SHAPE here: the field type is one of four literals, an entry
+// is a struct of #Value, and both maps carry the #snakeId key constraint. The
+// SEMANTIC invariants — `fields` non-empty, `entries` non-empty, every entry
+// supplying exactly the declared fields, and each value agreeing with its
+// field's declared type — are Rust's, in `link_verify::validate_catalogues`
+// (ADR-0021 "CUE authors, Rust re-validates"). CUE cannot express "this
+// struct's keys are exactly that struct's keys" without a comprehension per
+// catalogue, which authored data cannot carry.
+#CatalogueField: close({
+	type!: "integer" | "float" | "boolean" | "string"
+	unit?: string
+	doc?:  string
+})
+
+#Catalogue: close({
+	fields!: close({[#snakeId]:  #CatalogueField})
+	entries!: close({[#snakeId]: close({[#snakeId]: #Value})})
+	doc?: string
+})
+
+// One shared choice of a catalogue entry (ADR-0057 §D3). A binding IS a
+// declared CLOSED FACET whose values are its catalogue's entry ids, and it
+// shares the facet id space — so a binding named like a facet is
+// E_INGEST_DUPLICATE_FACET at ingest, and everything downstream (environments,
+// constraints, `cfx options`, the CCM's cardinality) treats it as the facet it
+// is.
+//
+// `default` and `derive` are mutually exclusive, `catalogue` must exist,
+// `default` must be one of its entries, and a `derive` table must name exactly
+// one DECLARED source whose keys are source values and whose values are
+// entries. None of that is expressible in CUE — it is cross-namespace, and CUE
+// validates one chunk at a time — so all of it is Rust's, checked over the
+// merged interface summary (`E_BINDING_INVALID`).
+#Binding: close({
+	catalogue!: #snakeId
+	default?:   #snakeId
+	// {source_facet_or_binding: {source_value: entry_id}}. The inner key is a
+	// plain string because a facet VALUE is not an authored id — #Facet.values
+	// is [...string], so a derive key must accept whatever a facet declares.
+	derive?: close({[#snakeId]: close({[string]: #snakeId})})
+	doc?:    string
+})
+
 // A single authored chunk. definitions/components/artifacts are all optional
 // (serde(default)); package + version are required and shared across a pack's
 // chunks. Authored top-level IDs (definition/component/artifact keys) carry the
@@ -157,6 +234,12 @@ _paramFields: {
 	// is deterministic for byte-stable emission. Pack-global; passes through the
 	// resolve layer verbatim, like facets.
 	constraints?: close({[#snakeId]: #Constraint})
+	// Sixth and seventh top-level namespaces (ADR-0057 §D2/§D3). Both carry the
+	// #snakeId key constraint like the five above, and both pass through the
+	// #ResolvePack / export layer verbatim — a table and a choice have nothing
+	// to gap-fill, exactly like facets and constraints.
+	catalogues?: close({[#snakeId]: #Catalogue})
+	bindings?: close({[#snakeId]:   #Binding})
 })
 
 // A resolution profile (scenario selection domains + default context). Mirrors
@@ -192,13 +275,16 @@ _paramFields: {
 //      to leak; this rule keeps the contract explicit even so.
 //
 // Note the inheritable set is exactly resolver.rs's: type, unit, safety,
-// lifecycle, access, limits, doc. `inherits` (the pointer), `req_id`,
+// lifecycle, access, limits, doc — plus `facet` (ADR-0064 D1), which is
+// gap-filled like any other declared field so a definition can carry the
+// binding down to the using parameter. `inherits` (the pointer), `req_id`,
 // `condition`, and `overrides` are NOT gap-filled — they stay author-owned and,
 // for overrides/condition, opaque late-bound data (ADR-0003).
 
 // #InheritFields: the gap-fillable subset of a definition (resolver.rs:337-356).
 #InheritFields: {
 	type?:      string
+	facet?:     #snakeId
 	unit?:      string
 	safety?:    #SafetyLevel
 	lifecycle?: #Lifecycle
@@ -226,6 +312,7 @@ _paramFields: {
 	out: {
 		// Gap-fill: parent fills a field ONLY when the child left it absent.
 		if _parent.type != _|_ if _child.type == _|_ {type: _parent.type}
+		if _parent.facet != _|_ if _child.facet == _|_ {facet: _parent.facet}
 		if _parent.unit != _|_ if _child.unit == _|_ {unit: _parent.unit}
 		if _parent.safety != _|_ if _child.safety == _|_ {safety: _parent.safety}
 		if _parent.lifecycle != _|_ if _child.lifecycle == _|_ {lifecycle: _parent.lifecycle}
@@ -235,6 +322,7 @@ _paramFields: {
 
 		// Author-owned fields pass through verbatim (no inheritance).
 		if _child.type != _|_ {type: _child.type}
+		if _child.facet != _|_ {facet: _child.facet}
 		if _child.unit != _|_ {unit: _child.unit}
 		if _child.safety != _|_ {safety: _child.safety}
 		if _child.lifecycle != _|_ {lifecycle: _child.lifecycle}
@@ -269,10 +357,18 @@ _paramFields: {
 	// the resolution layer verbatim (ADR-0054 §1) — there is nothing to gap-fill
 	// in a proposition. Optional: a pack that declares no policy omits it.
 	_constraints?: {[#snakeId]: #Constraint}
+	// Catalogues and bindings are pack-global and pass through verbatim for the
+	// same reason facets and constraints do (ADR-0057 §D2/§D3): a typed table
+	// has no inheritable shape, and a binding is a declared facet. Optional: a
+	// pack that declares neither omits both inputs entirely.
+	_catalogues?: {[#snakeId]: #Catalogue}
+	_bindings?: {[#snakeId]:   #Binding}
 
 	definitions: _definitions
 	if _facets != _|_ {facets: _facets}
 	if _constraints != _|_ {constraints: _constraints}
+	if _catalogues != _|_ {catalogues: _catalogues}
+	if _bindings != _|_ {bindings: _bindings}
 	components: {
 		for _cid, _c in _components {
 			(_cid): _c & {

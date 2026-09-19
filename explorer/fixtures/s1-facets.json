@@ -1,77 +1,77 @@
 [
   {
-    "schema_version": 4,
+    "schema_version": 5,
     "status": "ok",
-    "model_hash": "a3486458bf58f77d5eb9f7b562aab9d8eaffcacdac1cbe1218c8aa0d4196c57f",
+    "model_hash": "f8a6f2fbc454152033f8b41def9250b3ae1d5cc3fdb7d17938e59ff034e284b7",
     "scope": "all",
     "facet": "cooling_brand",
     "valid_options": [
       "aeroflux",
       "hydra"
     ],
-    "selection_state_hash": "da6ced4bb46e22ce7b18e70e2590eefc18aa77e88ab630954f746b3247c2d406",
+    "selection_state_hash": "70e4721632c2f78e00f0dd813b6daf0fcf7bcdab939ece5b4bd38bd19050a131",
     "error_count": 0,
     "warning_count": 0,
     "diagnostics": {
-      "schema_version": 4,
+      "schema_version": 5,
       "diagnostics": [],
       "error_count": 0,
       "warning_count": 0
     }
   },
   {
-    "schema_version": 4,
+    "schema_version": 5,
     "status": "ok",
-    "model_hash": "a3486458bf58f77d5eb9f7b562aab9d8eaffcacdac1cbe1218c8aa0d4196c57f",
+    "model_hash": "f8a6f2fbc454152033f8b41def9250b3ae1d5cc3fdb7d17938e59ff034e284b7",
     "scope": "all",
     "facet": "cooling_model",
     "valid_options": [
       "a9",
       "x200"
     ],
-    "selection_state_hash": "da6ced4bb46e22ce7b18e70e2590eefc18aa77e88ab630954f746b3247c2d406",
+    "selection_state_hash": "70e4721632c2f78e00f0dd813b6daf0fcf7bcdab939ece5b4bd38bd19050a131",
     "error_count": 0,
     "warning_count": 0,
     "diagnostics": {
-      "schema_version": 4,
+      "schema_version": 5,
       "diagnostics": [],
       "error_count": 0,
       "warning_count": 0
     }
   },
   {
-    "schema_version": 4,
+    "schema_version": 5,
     "status": "ok",
-    "model_hash": "a3486458bf58f77d5eb9f7b562aab9d8eaffcacdac1cbe1218c8aa0d4196c57f",
+    "model_hash": "f8a6f2fbc454152033f8b41def9250b3ae1d5cc3fdb7d17938e59ff034e284b7",
     "scope": "all",
     "facet": "pump_type",
     "valid_options": [
       "dual"
     ],
-    "selection_state_hash": "da6ced4bb46e22ce7b18e70e2590eefc18aa77e88ab630954f746b3247c2d406",
+    "selection_state_hash": "70e4721632c2f78e00f0dd813b6daf0fcf7bcdab939ece5b4bd38bd19050a131",
     "error_count": 0,
     "warning_count": 0,
     "diagnostics": {
-      "schema_version": 4,
+      "schema_version": 5,
       "diagnostics": [],
       "error_count": 0,
       "warning_count": 0
     }
   },
   {
-    "schema_version": 4,
+    "schema_version": 5,
     "status": "ok",
-    "model_hash": "a3486458bf58f77d5eb9f7b562aab9d8eaffcacdac1cbe1218c8aa0d4196c57f",
+    "model_hash": "f8a6f2fbc454152033f8b41def9250b3ae1d5cc3fdb7d17938e59ff034e284b7",
     "scope": "all",
     "facet": "region",
     "valid_options": [
       "eu"
     ],
-    "selection_state_hash": "da6ced4bb46e22ce7b18e70e2590eefc18aa77e88ab630954f746b3247c2d406",
+    "selection_state_hash": "70e4721632c2f78e00f0dd813b6daf0fcf7bcdab939ece5b4bd38bd19050a131",
     "error_count": 0,
     "warning_count": 0,
     "diagnostics": {
-      "schema_version": 4,
+      "schema_version": 5,
       "diagnostics": [],
       "error_count": 0,
       "warning_count": 0
